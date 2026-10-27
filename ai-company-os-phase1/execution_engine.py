@@ -219,7 +219,9 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             "담당 역할과 프로젝트 목표에 맞춰 실제로 유용한 작업 결과를 작성하세요. "
             "근거가 없거나 확인하지 않은 내용은 사실처럼 꾸미지 말고 불확실성을 표시하세요. "
             "이전 작업 결과를 참고하되 오류나 미해결 사항을 그대로 전달하고, "
-            "요청 결과물을 명확한 제목과 구조로 작성하세요."
+            "요청 결과물을 명확한 제목과 구조로 작성하세요. "
+            "안전성 분류 문구나 'User Safety' 같은 메타데이터만 출력하지 마세요. "
+            "요청된 업무 결과물의 실제 내용을 반드시 작성하세요."
         )
         user_payload = {
             "project_goal": goal,
@@ -230,6 +232,11 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             "previous_task_results": previous_results,
             "instructions": (
                 "위 정보를 바탕으로 이번 작업의 결과물만 작성하세요. "
+                "응답은 한국어로 작성하고, 최소 3개의 구체적인 항목을 포함하세요. "
+                "요구사항 정리 작업이라면 반드시 프로젝트 목표, 조건 및 가정, "
+                "성공 기준, 미해결 사항 제목을 포함해 각각 내용을 작성하세요. "
+                "작업명과 담당 역할에 맞는 실제 결과를 작성하며, "
+                "안전성 판정이나 메타데이터만 답하지 마세요. "
                 "이전 결과가 부족하거나 검증되지 않았다면 그 한계를 명시하세요."
             ),
         }
@@ -280,6 +287,12 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
 
         if not isinstance(content, str) or not content.strip():
             raise RuntimeError("AI API가 빈 작업 결과를 반환했습니다.")
+        normalized_content = content.strip().lower()
+        if normalized_content in {"user safety: safe", "safe", "user safety: unsafe"}:
+            raise RuntimeError(
+                "AI API가 업무 결과 대신 안전성 판정 문구만 반환했습니다. "
+                "AI_MODEL을 다른 지원 모델로 변경한 뒤 다시 실행해 주세요."
+            )
 
         return (
             f"[실제 AI 실행 결과]\n"

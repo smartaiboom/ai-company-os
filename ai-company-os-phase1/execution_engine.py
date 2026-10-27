@@ -139,7 +139,7 @@ class MockExecutionEngine(ExecutionEngine):
                 f"{output}에 해당하는 내용을 작성할 항목으로 정리합니다.",
             ])
 
-        if previous_results and task_name != "최종 보고":
+        if previous_results:
             result_parts.append("\n연결된 입력 자료와 실제 결과:")
 
             for item in previous_results:

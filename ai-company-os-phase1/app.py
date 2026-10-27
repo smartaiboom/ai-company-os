@@ -6,7 +6,7 @@ import html
 import json
 import os
 import uuid
-from execution_engine import execute_task_mock
+from execution_engine import execute_task, get_execution_engine_name
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -474,7 +474,7 @@ class Handler(BaseHTTPRequestHandler):
                         })
 
                 try:
-                    result = execute_task_mock(
+                    result = execute_task(
                         project,
                         task,
                         previous_results=previous_results
@@ -488,7 +488,7 @@ class Handler(BaseHTTPRequestHandler):
                     project.setdefault("history", []).append({
                         "at": now(),
                         "event": "task_execution_succeeded",
-                        "details": f"{task_id}: 모의 실행 성공"
+                        "details": f"{task_id}: 작업 실행 성공 (실행 엔진: {get_execution_engine_name()})"
                     })
                 except Exception as exc:
                     task["status"] = "진행 중"

@@ -1,6 +1,10 @@
-"""AI Company OS 작업 실행 엔진 인터페이스와 모의 구현."""
+"""AI Company OS 작업 실행 엔진 인터페이스와 구현."""
 
 from abc import ABC, abstractmethod
+import json
+import os
+from urllib.error import HTTPError, URLError
+from urllib.request import Request, urlopen
 
 
 class ExecutionEngine(ABC):
@@ -175,11 +179,150 @@ class MockExecutionEngine(ExecutionEngine):
         return "\n".join(result_parts)
 
 
+
+class OpenAICompatibleExecutionEngine(ExecutionEngine):
+    """OpenAI 호환 Chat Completions API를 사용하는 실제 AI 실행 엔진.
+
+    AI_API_BASE_URL은 /v1 같은 API 기본 경로까지 지정한다.
+    AI_API_KEY는 제공자가 키를 요구할 때 설정한다.
+    AI_MODEL은 제공자가 지원하는 모델 이름이다.
+    """
+
+    def __init__(self, base_url=None, api_key=None, model=None, timeout=None):
+        self.base_url = (base_url or os.getenv("AI_API_BASE_URL", "")).rstrip("/")
+        self.api_key = api_key if api_key is not None else os.getenv("AI_API_KEY", "")
+        self.model = model or os.getenv("AI_MODEL", "")
+        self.timeout = timeout or int(os.getenv("AI_API_TIMEOUT", "90"))
+
+        if not self.base_url:
+            raise ValueError(
+                "실제 AI 엔진을 사용하려면 AI_API_BASE_URL 환경변수를 설정해야 합니다."
+            )
+        if not self.model:
+            raise ValueError(
+                "실제 AI 엔진을 사용하려면 AI_MODEL 환경변수를 설정해야 합니다."
+            )
+
+    def execute(self, project, task, previous_results=None):
+        goal = project.get("manager_goal") or project.get("goal", "")
+        task_name = task.get("name", "이름 없는 작업")
+        role = task.get("role", "미지정")
+        inputs = task.get("inputs", [])
+        output = task.get("output", "작업 결과물")
+        previous_results = previous_results or []
+
+        if not goal.strip():
+            raise ValueError("프로젝트 목표가 없어 작업을 실행할 수 없습니다.")
+
+        system_prompt = (
+            "당신은 AI Company OS의 가상회사 직원입니다. "
+            "담당 역할과 프로젝트 목표에 맞춰 실제로 유용한 작업 결과를 작성하세요. "
+            "근거가 없거나 확인하지 않은 내용은 사실처럼 꾸미지 말고 불확실성을 표시하세요. "
+            "이전 작업 결과를 참고하되 오류나 미해결 사항을 그대로 전달하고, "
+            "요청 결과물을 명확한 제목과 구조로 작성하세요."
+        )
+        user_payload = {
+            "project_goal": goal,
+            "task_name": task_name,
+            "assigned_role": role,
+            "required_inputs": inputs,
+            "requested_output": output,
+            "previous_task_results": previous_results,
+            "instructions": (
+                "위 정보를 바탕으로 이번 작업의 결과물만 작성하세요. "
+                "이전 결과가 부족하거나 검증되지 않았다면 그 한계를 명시하세요."
+            ),
+        }
+        body = json.dumps({
+            "model": self.model,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {
+                    "role": "user",
+                    "content": json.dumps(user_payload, ensure_ascii=False),
+                },
+            ],
+            "temperature": 0.3,
+        }).encode("utf-8")
+
+        headers = {"Content-Type": "application/json"}
+        if self.api_key:
+            headers["Authorization"] = f"Bearer {self.api_key}"
+
+        request = Request(
+            f"{self.base_url}/chat/completions",
+            data=body,
+            headers=headers,
+            method="POST",
+        )
+
+        try:
+            with urlopen(request, timeout=self.timeout) as response:
+                response_data = json.loads(response.read().decode("utf-8"))
+        except HTTPError as exc:
+            detail = exc.read().decode("utf-8", errors="replace")[:1000]
+            raise RuntimeError(
+                f"AI API 요청 실패 (HTTP {exc.code}): {detail}"
+            ) from exc
+        except (URLError, TimeoutError) as exc:
+            raise RuntimeError(f"AI API 연결 실패: {exc}") from exc
+        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raise RuntimeError("AI API 응답을 해석할 수 없습니다.") from exc
+
+        try:
+            content = response_data["choices"][0]["message"]["content"]
+        except (KeyError, IndexError, TypeError) as exc:
+            raise RuntimeError(
+                "AI API 응답에 choices[0].message.content가 없습니다."
+            ) from exc
+
+        if not isinstance(content, str) or not content.strip():
+            raise RuntimeError("AI API가 빈 작업 결과를 반환했습니다.")
+
+        return (
+            f"[실제 AI 실행 결과]\n"
+            f"프로젝트 목표: {goal}\n"
+            f"작업명: {task_name}\n"
+            f"담당 역할: {role}\n"
+            f"사용 모델: {self.model}\n\n"
+            f"{content.strip()}\n\n"
+            "참고: AI가 생성한 결과이며, 사실 확인이나 외부 검증이 자동으로 "
+            "완료되었다는 의미는 아닙니다."
+        )
+
+
+def get_execution_engine():
+    """환경변수에 따라 실행 엔진을 선택한다. 기본값은 안전한 모의 실행이다."""
+    engine_name = os.getenv("AI_ENGINE", "mock").strip().lower()
+    if engine_name == "mock":
+        return MockExecutionEngine()
+    if engine_name in {"openai_compatible", "openai-compatible"}:
+        return OpenAICompatibleExecutionEngine()
+    raise ValueError(
+        f"지원하지 않는 AI_ENGINE 값입니다: {engine_name}. "
+        "mock 또는 openai_compatible을 사용하세요."
+    )
+
+
+def get_execution_engine_name():
+    """현재 설정된 실행 엔진 이름을 반환한다."""
+    return os.getenv("AI_ENGINE", "mock").strip().lower()
+
+
+def execute_task(project, task, previous_results=None):
+    """설정된 실행 엔진으로 작업을 실행한다."""
+    return get_execution_engine().execute(
+        project,
+        task,
+        previous_results=previous_results,
+    )
+
+
 _default_engine = MockExecutionEngine()
 
 
 def execute_task_mock(project, task, previous_results=None):
-    """기존 호출부와의 호환성을 유지하는 모의 실행 함수."""
+    """기존 테스트 및 호출부와의 호환성을 유지하는 모의 실행 함수."""
     return _default_engine.execute(
         project,
         task,

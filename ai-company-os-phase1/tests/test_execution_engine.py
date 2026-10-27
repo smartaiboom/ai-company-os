@@ -113,5 +113,39 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertIn("수정 제안:", result)
         self.assertIn("최종 검토 결과: 추가 검증 필요", result)
 
+    def test_final_report_includes_linked_input_results(self):
+        project = {"goal": "테스트용 프로젝트"}
+        task = {
+            "name": "최종 보고",
+            "role": "AI 관리자",
+            "inputs": ["최종 결과물", "미해결 사항"],
+            "output": "최종 결과 및 미해결 사항",
+        }
+        previous_results = [
+            {
+                "input_name": "최종 결과물",
+                "task_name": "검토 및 수정",
+                "result": "최종 검토 결과: 추가 검증 필요",
+            },
+            {
+                "input_name": "미해결 사항",
+                "task_name": "검토 및 수정",
+                "result": "미해결 사항: 실제 검증이 수행되지 않아 검토 결과 확정 필요",
+            },
+        ]
+
+        result = execute_task_mock(
+            project,
+            task,
+            previous_results=previous_results,
+        )
+
+        self.assertIn("연결된 입력 자료와 실제 결과", result)
+        self.assertIn("입력 자료: 최종 결과물", result)
+        self.assertIn("출처 작업: 검토 및 수정", result)
+        self.assertIn("최종 검토 결과: 추가 검증 필요", result)
+        self.assertIn("입력 자료: 미해결 사항", result)
+        self.assertIn("미해결 사항: 실제 검증이 수행되지 않아 검토 결과 확정 필요", result)
+
 if __name__ == "__main__":
     unittest.main()

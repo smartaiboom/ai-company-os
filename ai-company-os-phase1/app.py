@@ -65,11 +65,12 @@ def mark_downstream_for_review(project, task_index, reason):
     tasks = project.get("tasks", [])
     affected = []
     for later_task in tasks[task_index + 1:]:
-        if later_task.get("status") == "완료" or later_task.get("result"):
-            later_task["review_required"] = True
-            later_task["review_reason"] = reason
-            later_task["updated_at"] = now()
-            affected.append(later_task.get("name", later_task.get("id", "이름 없는 작업")))
+        # 결과 유무나 기존 상태와 관계없이 모든 후속 작업은 다시 검토해야 한다.
+        later_task["status"] = "재검토 필요"
+        later_task["review_required"] = True
+        later_task["review_reason"] = reason
+        later_task["updated_at"] = now()
+        affected.append(later_task.get("name", later_task.get("id", "이름 없는 작업")))
     if affected:
         project.setdefault("history", []).append({
             "at": now(),
@@ -305,7 +306,7 @@ class Handler(BaseHTTPRequestHandler):
                 status = form.get("status", task.get("status", "대기"))
                 result = form.get("result", task.get("result", ""))
 
-                if status not in ("대기", "진행 중", "완료"):
+                if status not in ("대기", "진행 중", "재검토 필요", "완료"):
                     raise ValueError("잘못된 작업 상태입니다.")
 
                 if status == "완료" and not result.strip():
@@ -322,7 +323,7 @@ class Handler(BaseHTTPRequestHandler):
                 task["status"] = status
                 task["updated_at"] = now()
 
-                # 완료 작업의 결과/상태를 바꾸면 기존 후속 결과는 보존하고 재검토 표시만 한다.
+                # 작업 결과/상태가 바뀌면 모든 후속 작업을 재검토 필요로 바꾸고 결과는 보존한다.
                 if result_changed or status_changed:
                     reason = (
                         f"선행 작업 {task.get('name', task_id)}의 결과 또는 상태가 변경됨"
@@ -547,7 +548,7 @@ class Handler(BaseHTTPRequestHandler):
 
 <label>작업 상태
 <select name='status'>
-{''.join(f"<option value='{s}' {'selected' if task.get('status', '대기') == s else ''}>{s}</option>" for s in ('대기', '진행 중', '완료'))}
+{''.join(f"<option value='{s}' {'selected' if task.get('status', '대기') == s else ''}>{s}</option>" for s in ('대기', '진행 중', '재검토 필요', '완료'))}
 </select>
 </label>
 <button type='submit'>상태 저장</button>
@@ -584,7 +585,10 @@ class Handler(BaseHTTPRequestHandler):
         tasks = p.get("tasks", [])
         total_tasks = len(tasks)
         completed_tasks = sum(
-            1 for task in tasks if task.get("status") == "완료"
+            1 for task in tasks if task.get("status") == "완료" and not task.get("review_required")
+        )
+        review_tasks = sum(
+            1 for task in tasks if task.get("status") == "재검토 필요"
         )
         in_progress_tasks = sum(
             1 for task in tasks if task.get("status") == "진행 중"
@@ -628,7 +632,7 @@ class Handler(BaseHTTPRequestHandler):
 <p><strong>작업 진행률:</strong> {task_progress}%</p>
 <p><a class="button" href="/report/{esc(p['id'])}">최종 보고서 보기</a></p>
 <p><strong>전체 작업:</strong> {total_tasks}개</p>
-<p><strong>대기:</strong> {waiting_tasks}개 · <strong>진행 중:</strong> {in_progress_tasks}개 · <strong>완료:</strong> {completed_tasks}개</p>
+<p><strong>대기:</strong> {waiting_tasks}개 · <strong>진행 중:</strong> {in_progress_tasks}개 · <strong>재검토 필요:</strong> {review_tasks}개 · <strong>완료:</strong> {completed_tasks}개</p>
 
 <p><strong>생성일:</strong> {esc(p.get('created_at',''))}</p>
 <p><strong>최근 수정:</strong> {esc(p.get('updated_at',''))}</p></section>
@@ -664,7 +668,8 @@ class Handler(BaseHTTPRequestHandler):
 
         tasks = p.get("tasks", [])
         total_tasks = len(tasks)
-        completed_tasks = sum(1 for task in tasks if task.get("status") == "완료")
+        completed_tasks = sum(1 for task in tasks if task.get("status") == "완료" and not task.get("review_required"))
+        review_tasks = sum(1 for task in tasks if task.get("status") == "재검토 필요")
         in_progress_tasks = sum(1 for task in tasks if task.get("status") == "진행 중")
         waiting_tasks = sum(1 for task in tasks if task.get("status", "대기") == "대기")
         progress = round(completed_tasks / total_tasks * 100) if total_tasks else 0
@@ -685,7 +690,7 @@ class Handler(BaseHTTPRequestHandler):
 
 
         unfinished = [
-            task for task in tasks if task.get("status") != "완료"
+            task for task in tasks if task.get("status") != "완료" or task.get("review_required")
         ]
         unfinished_rows = "".join(
             f"<li>{esc(task.get('name', ''))} — "
@@ -703,6 +708,7 @@ class Handler(BaseHTTPRequestHandler):
 <p><strong>전체 작업:</strong> {total_tasks}개</p>
 <p><strong>대기:</strong> {waiting_tasks}개 ·
 <strong>진행 중:</strong> {in_progress_tasks}개 ·
+<strong>재검토 필요:</strong> {review_tasks}개 ·
 <strong>완료:</strong> {completed_tasks}개</p>
 </section>
 <section class="card">

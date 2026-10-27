@@ -147,8 +147,6 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertIn("입력 자료: 미해결 사항", result)
         self.assertIn("미해결 사항: 실제 검증이 수행되지 않아 검토 결과 확정 필요", result)
 
-if __name__ == "__main__":
-    unittest.main()
 
     def test_get_execution_engine_defaults_to_mock(self):
         from unittest.mock import patch
@@ -173,3 +171,5 @@ if __name__ == "__main__":
             with self.assertRaisesRegex(ValueError, "지원하지 않는 AI_ENGINE"):
                 get_execution_engine()
 
+if __name__ == "__main__":
+    unittest.main()

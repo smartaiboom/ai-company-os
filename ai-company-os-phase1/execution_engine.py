@@ -243,6 +243,8 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
                 },
             ],
             "temperature": 0.3,
+            "max_tokens": 2048,
+            "chat_template_kwargs": {"enable_thinking": False},
         }).encode("utf-8")
 
         headers = {"Content-Type": "application/json"}

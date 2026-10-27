@@ -515,7 +515,21 @@ class Handler(BaseHTTPRequestHandler):
             else:
                 self.send_html(page("Not found", "<p>요청을 처리할 수 없습니다.</p><a class='button' href='/'>홈으로</a>"), 404)
         except (ValueError, OSError, json.JSONDecodeError, KeyError) as exc:
-            self.send_html(page("오류", f"<p>요청을 처리하지 못했습니다: {esc(exc)}</p><a class='button' href='/'>홈으로</a>"), 400)
+            safe_project_id = locals().get("project_id", "")
+            if safe_project_id and all(
+                c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"
+                for c in safe_project_id
+            ):
+                back_link = (
+                    f"<a class='button' href='/project/{esc(safe_project_id)}'>"
+                    "프로젝트 상세로 돌아가기</a>"
+                )
+            else:
+                back_link = "<a class='button' href='/'>홈으로</a>"
+            self.send_html(
+                page("오류", f"<p>요청을 처리하지 못했습니다: {esc(exc)}</p>{back_link}"),
+                400,
+            )
 
     def home(self):
         projects = load_projects()

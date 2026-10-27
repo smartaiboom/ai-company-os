@@ -149,3 +149,27 @@ class ExecutionEngineTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+    def test_get_execution_engine_defaults_to_mock(self):
+        from unittest.mock import patch
+        from execution_engine import MockExecutionEngine, get_execution_engine
+
+        with patch.dict("os.environ", {}, clear=True):
+            self.assertIsInstance(get_execution_engine(), MockExecutionEngine)
+
+    def test_openai_compatible_engine_requires_configuration(self):
+        from unittest.mock import patch
+        from execution_engine import OpenAICompatibleExecutionEngine
+
+        with patch.dict("os.environ", {}, clear=True):
+            with self.assertRaisesRegex(ValueError, "AI_API_BASE_URL"):
+                OpenAICompatibleExecutionEngine()
+
+    def test_get_execution_engine_rejects_unknown_engine(self):
+        from unittest.mock import patch
+        from execution_engine import get_execution_engine
+
+        with patch.dict("os.environ", {"AI_ENGINE": "unknown"}, clear=True):
+            with self.assertRaisesRegex(ValueError, "지원하지 않는 AI_ENGINE"):
+                get_execution_engine()
+

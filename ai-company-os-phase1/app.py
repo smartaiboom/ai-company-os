@@ -60,6 +60,24 @@ def save_project(project):
     temp_path.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_path.replace(path)
 
+def mark_downstream_for_review(project, task_index, reason):
+    """앞선 작업 변경으로 영향받는 후속 작업을 표시하되 기존 결과는 보존한다."""
+    tasks = project.get("tasks", [])
+    affected = []
+    for later_task in tasks[task_index + 1:]:
+        if later_task.get("status") == "완료" or later_task.get("result"):
+            later_task["review_required"] = True
+            later_task["review_reason"] = reason
+            later_task["updated_at"] = now()
+            affected.append(later_task.get("name", later_task.get("id", "이름 없는 작업")))
+    if affected:
+        project.setdefault("history", []).append({
+            "at": now(),
+            "event": "downstream_review_required",
+            "details": f"후속 작업 재검토 필요: {', '.join(affected)} — {reason}",
+        })
+    return affected
+
 def esc(value):
     return html.escape(str(value), quote=True)
 
@@ -296,31 +314,20 @@ class Handler(BaseHTTPRequestHandler):
                 old_status = task.get("status", "대기")
                 old_result = task.get("result", "")
 
-                # 후속 작업이 완료되었는지 확인
                 task_index = tasks.index(task)
-                later_completed = [
-                    later_task
-                    for later_task in tasks[task_index + 1:]
-                    if later_task.get("status") == "완료"
-                ]
-
-                # 완료된 후속 작업이 있다면 앞선 작업 변경 차단
-                if later_completed and (
-                    status != old_status or result != old_result
-                ):
-                    later_names = ", ".join(
-                        later_task.get("name", later_task.get("id", "이름 없는 작업"))
-                        for later_task in later_completed
-                    )
-                    raise ValueError(
-                        "후속 작업이 이미 완료되어 이 작업을 변경할 수 없습니다. "
-                        f"완료된 후속 작업: {later_names}. "
-                        "후속 작업의 재검토 기능은 아직 지원하지 않습니다."
-                    )
+                result_changed = result != old_result
+                status_changed = status != old_status
 
                 task["result"] = result
                 task["status"] = status
                 task["updated_at"] = now()
+
+                # 완료 작업의 결과/상태를 바꾸면 기존 후속 결과는 보존하고 재검토 표시만 한다.
+                if result_changed or status_changed:
+                    reason = (
+                        f"선행 작업 {task.get('name', task_id)}의 결과 또는 상태가 변경됨"
+                    )
+                    mark_downstream_for_review(project, task_index, reason)
 
                 if old_status != status:
                     project.setdefault("history", []).append({
@@ -354,13 +361,15 @@ class Handler(BaseHTTPRequestHandler):
                 if not task:
                     raise ValueError("실행할 작업을 찾을 수 없습니다.")
 
-                if task.get("status") == "완료":
-                    raise ValueError("이미 완료된 작업입니다.")
-
                 task_index = tasks.index(task)
+                if task.get("status") == "완료" and not task.get("review_required"):
+                    raise ValueError(
+                        "이미 완료된 작업입니다. 재실행하려면 먼저 '진행 중'으로 변경해 주세요."
+                    )
+
                 unfinished = [
                     t for t in tasks[:task_index]
-                    if t.get("status") != "완료"
+                    if t.get("status") != "완료" or t.get("review_required")
                 ]
 
                 if unfinished:
@@ -452,6 +461,8 @@ class Handler(BaseHTTPRequestHandler):
                     )
                     task["result"] = result
                     task["status"] = "완료"
+                    task["review_required"] = False
+                    task.pop("review_reason", None)
                     task["updated_at"] = now()
 
                     project.setdefault("history", []).append({
@@ -523,7 +534,7 @@ class Handler(BaseHTTPRequestHandler):
         task_rows = "".join(
             f"""<li>
 <strong>{esc(task.get('name', ''))}</strong> — 담당: {esc(task.get('role', ''))}<br>
-
+{f"<p><strong>⚠ 재검토 필요:</strong> {esc(task.get('review_reason', '선행 작업이 변경되었습니다.'))}</p>" if task.get('review_required') else ""}
 결과물 설명: {esc(task.get('output', ''))}<br>
 
 <form method='post' action='/task/update'>
@@ -592,6 +603,7 @@ class Handler(BaseHTTPRequestHandler):
             "plan_changes_requested": "계획 수정 요청",
             "task_execution_succeeded": "작업 실행 성공",
             "task_execution_failed": "작업 실행 실패",
+            "downstream_review_required": "후속 작업 재검토 필요",
             "project_created": "프로젝트 생성",
             "plan_created": "작업 계획 작성",
             "tasks_created": "작업 생성",

@@ -364,7 +364,7 @@ class Handler(BaseHTTPRequestHandler):
                     })
 
                 save_project(project)
-                self.redirect(f"/project/{project_id}")
+                self.redirect(f"/project/{project_id}#task-{task_id}")
 
                 
             elif parsed.path == "/task/execute":
@@ -510,7 +510,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 project["updated_at"] = now()
                 save_project(project)
-                self.redirect(f"/project/{project_id}")
+                self.redirect(f"/project/{project_id}#task-{task_id}")
 
             else:
                 self.send_html(page("Not found", "<p>요청을 처리할 수 없습니다.</p><a class='button' href='/'>홈으로</a>"), 404)
@@ -566,7 +566,7 @@ class Handler(BaseHTTPRequestHandler):
         tasks = p.get("tasks", [])
         
         task_rows = "".join(
-            f"""<li>
+            f"""<li id="task-{esc(task.get('id', ''))}">
 <strong>{esc(task.get('name', ''))}</strong> — 담당: {esc(task.get('role', ''))}<br>
 {f"<p><strong>⚠ 재검토 필요:</strong> {esc(task.get('review_reason', '선행 작업이 변경되었습니다.'))}</p>" if task.get('review_required') else ""}
 결과물 설명: {esc(task.get('output', ''))}<br>

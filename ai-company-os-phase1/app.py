@@ -309,8 +309,27 @@ class Handler(BaseHTTPRequestHandler):
                 if status not in ("대기", "진행 중", "재검토 필요", "완료"):
                     raise ValueError("잘못된 작업 상태입니다.")
 
-                if status == "완료" and not result.strip():
-                    raise ValueError("작업 결과를 입력한 후 완료 처리해 주세요.")
+                if status == "완료":
+                    task_index = tasks.index(task)
+                    unfinished = [
+                        previous_task for previous_task in tasks[:task_index]
+                        if previous_task.get("status") != "완료"
+                        or previous_task.get("review_required")
+                    ]
+                    if unfinished:
+                        names = ", ".join(
+                            previous_task.get("name", previous_task.get("id", "이름 없는 작업"))
+                            for previous_task in unfinished
+                        )
+                        raise ValueError(
+                            f"앞선 작업의 재검토가 끝나지 않아 완료 처리할 수 없습니다: {names}"
+                        )
+                    if task.get("review_required"):
+                        raise ValueError(
+                            "재검토 필요 작업은 상태만 완료로 바꿀 수 없습니다. '작업 실행'으로 다시 실행해 주세요."
+                        )
+                    if not result.strip():
+                        raise ValueError("작업 결과를 입력한 후 완료 처리해 주세요.")
 
                 old_status = task.get("status", "대기")
                 old_result = task.get("result", "")

@@ -2,6 +2,7 @@
 
 import json
 import os
+import re
 from copy import deepcopy
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -101,6 +102,31 @@ def validate_stages(stages):
     return normalized
 
 
+def _parse_plan_content(content):
+    """Parse JSON returned as plain text, fenced JSON, or text content blocks."""
+    if isinstance(content, list):
+        text_parts = [
+            part.get("text", "")
+            for part in content
+            if isinstance(part, dict) and isinstance(part.get("text"), str)
+        ]
+        content = "\n".join(text_parts)
+    if not isinstance(content, str) or not content.strip():
+        raise ValueError("응답 내용이 비어 있습니다.")
+
+    cleaned = content.strip()
+    fenced = re.search(r"```(?:json)?\s*(.*?)\s*```", cleaned, re.IGNORECASE | re.DOTALL)
+    if fenced:
+        cleaned = fenced.group(1).strip()
+    else:
+        # Some models prepend a short sentence despite being asked for JSON only.
+        start = cleaned.find("{")
+        end = cleaned.rfind("}")
+        if start >= 0 and end > start:
+            cleaned = cleaned[start : end + 1]
+    return json.loads(cleaned)
+
+
 def _request_ai_plan(goal):
     base_url = os.getenv("AI_API_BASE_URL", "").rstrip("/")
     api_key = os.getenv("AI_API_KEY", "")
@@ -147,10 +173,15 @@ def _request_ai_plan(goal):
         raise RuntimeError("AI 관리자 API 응답을 해석할 수 없습니다.") from exc
 
     try:
-        content = response_data["choices"][0]["message"]["content"]
-        parsed = json.loads(content)
-    except (KeyError, IndexError, TypeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("AI 관리자 응답이 올바른 JSON 계획이 아닙니다.") from exc
+        message = response_data["choices"][0]["message"]
+        content = message.get("content")
+        parsed = _parse_plan_content(content)
+    except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
+        # Keep the diagnostic short and avoid showing request headers or credentials.
+        preview = str(locals().get("content", ""))[:180].replace("\n", " ")
+        raise RuntimeError(
+            f"AI 관리자 응답을 JSON으로 해석하지 못했습니다. 응답 일부: {preview or '(내용 없음)'}"
+        ) from exc
     if not isinstance(parsed, dict):
         raise RuntimeError("AI 관리자 응답은 JSON 객체여야 합니다.")
 

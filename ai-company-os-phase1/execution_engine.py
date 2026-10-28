@@ -327,6 +327,19 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
                 f"finish_reason={finish_reason}, message_fields={fields}. "
                 "모델 응답에 내용이 없으므로 설정된 AI_MODEL의 호환성을 확인해야 합니다."
             )
+        # Reject leaked planning notes instead of showing them as a finished deliverable.
+        internal_note_markers = (
+            "the user wants", "i need to", "let's draft", "let's write",
+            "let's compose", "make sure", "structure:", "need to ensure",
+            "i should write", "we need to", "let's compose carefully",
+        )
+        lowered_content = content.strip().lower()
+        if any(marker in lowered_content for marker in internal_note_markers):
+            raise RuntimeError(
+                "AI가 완성된 결과물 대신 작업 계획이나 작성 메모를 반환했습니다. "
+                "해당 결과는 저장·사용하지 말고 같은 작업을 다시 실행해 주세요."
+            )
+
         normalized_content = content.strip().lower()
         if normalized_content in {"user safety: safe", "safe", "user safety: unsafe"}:
             raise RuntimeError(

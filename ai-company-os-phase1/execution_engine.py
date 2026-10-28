@@ -336,10 +336,18 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             "let's compose carefully",
         )
         lowered_content = content.strip().lower()
-        if any(marker in lowered_content for marker in internal_note_markers):
+        # Check only the opening of the response: a legitimate document may
+        # naturally contain these phrases later in its body.
+        opening = lowered_content[:250]
+        matched_marker = next(
+            (marker for marker in internal_note_markers if marker in opening),
+            None,
+        )
+        if matched_marker:
             raise RuntimeError(
-                "AI가 완성된 결과물 대신 작업 계획이나 작성 메모를 반환했습니다. "
-                "해당 결과는 저장·사용하지 말고 같은 작업을 다시 실행해 주세요."
+                "AI 응답 첫 부분에서 작성 메모로 의심되는 표현이 감지되었습니다 "
+                f"({matched_marker!r}). 결과는 저장하지 않았습니다. "
+                "다음 단계에서 실제 응답 내용을 확인해 판별 규칙을 조정해야 합니다."
             )
 
         finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None

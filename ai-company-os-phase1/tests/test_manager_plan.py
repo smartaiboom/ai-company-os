@@ -2,7 +2,7 @@ import os
 import unittest
 from unittest.mock import patch
 
-from manager_plan import build_manager_plan, validate_stages
+from manager_plan import _parse_plan_content, build_manager_plan, validate_stages
 
 
 class ManagerPlanTests(unittest.TestCase):
@@ -51,6 +51,18 @@ class ManagerPlanTests(unittest.TestCase):
                 {"name": "작업 1", "role": "AI 관리자", "inputs": [], "output": "결과", "risk": "없음"},
                 {"name": "작업 2", "role": "개발 담당", "inputs": [], "output": "", "risk": "없음"},
             ])
+
+    def test_parse_plan_content_accepts_plain_json(self):
+        self.assertEqual(_parse_plan_content('{"stages": []}'), {"stages": []})
+
+    def test_parse_plan_content_accepts_fenced_json(self):
+        self.assertEqual(_parse_plan_content('Here is the plan:\n```json\n{"stages": []}\n```'), {"stages": []})
+
+    def test_parse_plan_content_accepts_text_blocks(self):
+        self.assertEqual(
+            _parse_plan_content([{"type": "text", "text": '{"stages": []}'}]),
+            {"stages": []},
+        )
 
 
 if __name__ == "__main__":

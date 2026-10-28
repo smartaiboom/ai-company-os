@@ -173,14 +173,25 @@ def _request_ai_plan(goal):
         raise RuntimeError("AI 관리자 API 응답을 해석할 수 없습니다.") from exc
 
     try:
-        message = response_data["choices"][0]["message"]
+        choice = response_data["choices"][0]
+        message = choice["message"]
         content = message.get("content")
+        # Some OpenRouter models return the answer in a reasoning field or omit
+        # content entirely. Try common compatible fields before reporting details.
+        if not content:
+            content = message.get("reasoning_content") or message.get("reasoning")
         parsed = _parse_plan_content(content)
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        # Keep the diagnostic short and avoid showing request headers or credentials.
+        # Report response metadata, never request headers or credentials.
+        choice = locals().get("choice", {})
+        message = locals().get("message", {})
+        keys = ", ".join(sorted(message.keys())) if isinstance(message, dict) else "(message 없음)"
+        finish_reason = choice.get("finish_reason", "알 수 없음") if isinstance(choice, dict) else "알 수 없음"
         preview = str(locals().get("content", ""))[:180].replace("\n", " ")
         raise RuntimeError(
-            f"AI 관리자 응답을 JSON으로 해석하지 못했습니다. 응답 일부: {preview or '(내용 없음)'}"
+            "AI 관리자 응답에 읽을 수 있는 JSON이 없습니다. "
+            f"finish_reason={finish_reason}, message_fields={keys}, "
+            f"응답 일부: {preview or '(내용 없음)'}"
         ) from exc
     if not isinstance(parsed, dict):
         raise RuntimeError("AI 관리자 응답은 JSON 객체여야 합니다.")

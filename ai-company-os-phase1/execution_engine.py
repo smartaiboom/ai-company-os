@@ -269,6 +269,9 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             ],
             "temperature": 0.3,
             "max_tokens": 4096,
+            # OpenRouter uses its own reasoning controls; do not rely only on
+            # provider-specific chat_template_kwargs being honored by routing.
+            "reasoning": {"enabled": False, "exclude": True},
             "chat_template_kwargs": {"enable_thinking": False},
         }).encode("utf-8")
 

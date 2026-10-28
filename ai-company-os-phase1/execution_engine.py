@@ -340,6 +340,13 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
                 "해당 결과는 저장·사용하지 말고 같은 작업을 다시 실행해 주세요."
             )
 
+        finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
+        if finish_reason == "length":
+            raise RuntimeError(
+                "AI가 결과물을 끝까지 작성하지 못해 응답이 중간에 끊겼습니다. "
+                "미완성 결과는 사용하지 말고 작업을 다시 실행해 주세요."
+            )
+
         normalized_content = content.strip().lower()
         if normalized_content in {"user safety: safe", "safe", "user safety: unsafe"}:
             raise RuntimeError(

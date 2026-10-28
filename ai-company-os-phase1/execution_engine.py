@@ -257,7 +257,7 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
                 },
             ],
             "temperature": 0.3,
-            "max_tokens": 2048,
+            "max_tokens": 4096,
             "chat_template_kwargs": {"enable_thinking": False},
         }).encode("utf-8")
 

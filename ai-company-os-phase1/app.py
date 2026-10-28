@@ -514,7 +514,7 @@ class Handler(BaseHTTPRequestHandler):
 
             else:
                 self.send_html(page("Not found", "<p>요청을 처리할 수 없습니다.</p><a class='button' href='/'>홈으로</a>"), 404)
-        except (ValueError, OSError, json.JSONDecodeError, KeyError) as exc:
+        except (ValueError, OSError, json.JSONDecodeError, KeyError, RuntimeError) as exc:
             safe_project_id = locals().get("project_id", "")
             if safe_project_id and all(
                 c in "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_"

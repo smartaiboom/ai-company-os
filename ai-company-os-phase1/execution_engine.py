@@ -279,14 +279,36 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             raise RuntimeError("AI API 응답을 해석할 수 없습니다.") from exc
 
         try:
-            content = response_data["choices"][0]["message"]["content"]
+            choice = response_data["choices"][0]
+            message = choice["message"]
+            content = message.get("content")
+            # Some routed models place their generated text in a reasoning field
+            # or return an empty content field. Check common compatible fields.
+            if not content:
+                content = (
+                    message.get("reasoning_content")
+                    or message.get("reasoning")
+                    or message.get("output_text")
+                )
         except (KeyError, IndexError, TypeError) as exc:
             raise RuntimeError(
-                "AI API 응답에 choices[0].message.content가 없습니다."
+                "AI API 응답에 choices[0].message가 없습니다."
             ) from exc
 
+        if isinstance(content, list):
+            content = "\\n".join(
+                part.get("text", "")
+                for part in content
+                if isinstance(part, dict) and isinstance(part.get("text"), str)
+            )
         if not isinstance(content, str) or not content.strip():
-            raise RuntimeError("AI API가 빈 작업 결과를 반환했습니다.")
+            fields = ", ".join(sorted(message.keys())) if isinstance(message, dict) else "(message 없음)"
+            finish_reason = choice.get("finish_reason", "알 수 없음") if isinstance(choice, dict) else "알 수 없음"
+            raise RuntimeError(
+                "AI API가 작업 결과 내용을 반환하지 않았습니다. "
+                f"finish_reason={finish_reason}, message_fields={fields}. "
+                "모델 응답에 내용이 없으므로 설정된 AI_MODEL의 호환성을 확인해야 합니다."
+            )
         normalized_content = content.strip().lower()
         if normalized_content in {"user safety: safe", "safe", "user safety: unsafe"}:
             raise RuntimeError(

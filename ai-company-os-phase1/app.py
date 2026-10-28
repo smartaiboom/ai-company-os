@@ -61,11 +61,14 @@ def save_project(project):
     temp_path.replace(path)
 
 def mark_downstream_for_review(project, task_index, reason):
-    """앞선 작업 변경으로 영향받는 후속 작업을 표시하되 기존 결과는 보존한다."""
+    """진행 중이거나 완료된 후속 작업만 재검토 대상으로 표시한다."""
     tasks = project.get("tasks", [])
     affected = []
     for later_task in tasks[task_index + 1:]:
-        # 결과 유무나 기존 상태와 관계없이 모든 후속 작업은 다시 검토해야 한다.
+        # 대기 작업은 아직 결과를 만들지 않았으므로 대기 상태를 유지한다.
+        # 진행 중/완료 작업은 선행 결과가 바뀌면 기존 작업 내용에 영향이 있을 수 있다.
+        if later_task.get("status", "대기") not in ("진행 중", "완료"):
+            continue
         later_task["status"] = "재검토 필요"
         later_task["review_required"] = True
         later_task["review_reason"] = reason

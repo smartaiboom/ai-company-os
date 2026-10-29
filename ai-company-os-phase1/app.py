@@ -59,6 +59,12 @@ document.addEventListener("DOMContentLoaded", () => {
           const responseText = await response.text();
           const errorPage = new DOMParser().parseFromString(responseText, "text/html");
           const errorText = errorPage.querySelector("body p")?.textContent?.trim();
+          const taskStatus = errorPage.querySelector("[data-task-status]")?.dataset.taskStatus;
+          if (taskStatus) {
+            const taskRow = form.closest("li");
+            const statusSelect = taskRow?.querySelector("form[action='/task/update'] select[name='status']");
+            if (statusSelect) statusSelect.value = taskStatus;
+          }
           if (errorText) message = errorText;
         }
       } catch (_) {
@@ -207,6 +213,7 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         form = self.read_form()
+        execution_failed = False
         try:
             if parsed.path == "/create":
                 name = form.get("name", "").strip()
@@ -335,7 +342,7 @@ class Handler(BaseHTTPRequestHandler):
                 status = form.get("status", task.get("status", "대기"))
                 result = form.get("result", task.get("result", ""))
 
-                if status not in ("대기", "진행 중", "재검토 필요", "완료"):
+                if status not in ("대기", "진행 중", "실행 실패", "재검토 필요", "완료"):
                     raise ValueError("잘못된 작업 상태입니다.")
 
                 if status == "완료":
@@ -508,6 +515,10 @@ class Handler(BaseHTTPRequestHandler):
                         task,
                         previous_results=previous_results
                     )
+                    if not isinstance(result, str) or not result.strip():
+                        raise RuntimeError(
+                            "실행기가 빈 작업 결과를 반환했습니다. 결과를 저장하지 않았습니다."
+                        )
                     task["result"] = result
                     task["status"] = "완료"
                     task["review_required"] = False
@@ -520,7 +531,7 @@ class Handler(BaseHTTPRequestHandler):
                         "details": f"{task_id}: 작업 실행 성공 (실행 엔진: {get_execution_engine_name()})"
                     })
                 except Exception as exc:
-                    task["status"] = "진행 중"
+                    task["status"] = "실행 실패"
                     task["updated_at"] = now()
                     project.setdefault("history", []).append({
                         "at": now(),
@@ -534,6 +545,7 @@ class Handler(BaseHTTPRequestHandler):
                             "details": f"{task_id}: {old_status} -> {task['status']}"
                         })
                     save_project(project)
+                    execution_failed = True
                     raise
 
                 if old_status != task["status"]:
@@ -563,8 +575,12 @@ class Handler(BaseHTTPRequestHandler):
                 )
             else:
                 back_link = "<a class='button' href='/'>홈으로</a>"
+            task_status = ' data-task-status="실행 실패"' if execution_failed else ""
             self.send_html(
-                page("오류", f"<p>요청을 처리하지 못했습니다: {esc(exc)}</p>{back_link}"),
+                page(
+                    "오류",
+                    f"<p{task_status}>요청을 처리하지 못했습니다: {esc(exc)}</p>{back_link}",
+                ),
                 400,
             )
 
@@ -618,7 +634,7 @@ class Handler(BaseHTTPRequestHandler):
 
 <label>작업 상태
 <select name='status'>
-{''.join(f"<option value='{s}' {'selected' if task.get('status', '대기') == s else ''}>{s}</option>" for s in ('대기', '진행 중', '재검토 필요', '완료'))}
+{''.join(f"<option value='{s}' {'selected' if task.get('status', '대기') == s else ''}>{s}</option>" for s in ('대기', '진행 중', '실행 실패', '재검토 필요', '완료'))}
 </select>
 </label>
 <button type='submit'>상태 저장</button><p class='muted' data-processing-status aria-live='polite' hidden></p>
@@ -663,6 +679,7 @@ class Handler(BaseHTTPRequestHandler):
         in_progress_tasks = sum(
             1 for task in tasks if task.get("status") == "진행 중" and not task_requires_review(task)
         )
+        failed_tasks = sum(1 for task in tasks if task.get("status") == "실행 실패")
         waiting_tasks = sum(
             1 for task in tasks if task.get("status", "대기") == "대기" and not task_requires_review(task)
         )
@@ -702,7 +719,7 @@ class Handler(BaseHTTPRequestHandler):
 <p><strong>작업 진행률:</strong> {task_progress}%</p>
 <p><a class="button" href="/report/{esc(p['id'])}">최종 보고서 보기</a></p>
 <p><strong>전체 작업:</strong> {total_tasks}개</p>
-<p><strong>대기:</strong> {waiting_tasks}개 · <strong>진행 중:</strong> {in_progress_tasks}개 · <strong>재검토 필요:</strong> {review_tasks}개 · <strong>완료:</strong> {completed_tasks}개</p>
+<p><strong>대기:</strong> {waiting_tasks}개 · <strong>진행 중:</strong> {in_progress_tasks}개 · <strong>실행 실패:</strong> {failed_tasks}개 · <strong>재검토 필요:</strong> {review_tasks}개 · <strong>완료:</strong> {completed_tasks}개</p>
 
 <p><strong>생성일:</strong> {esc(p.get('created_at',''))}</p>
 <p><strong>최근 수정:</strong> {esc(p.get('updated_at',''))}</p></section>
@@ -741,6 +758,7 @@ class Handler(BaseHTTPRequestHandler):
         completed_tasks = sum(1 for task in tasks if task.get("status") == "완료" and not task_requires_review(task))
         review_tasks = sum(1 for task in tasks if task_requires_review(task))
         in_progress_tasks = sum(1 for task in tasks if task.get("status") == "진행 중" and not task_requires_review(task))
+        failed_tasks = sum(1 for task in tasks if task.get("status") == "실행 실패")
         waiting_tasks = sum(1 for task in tasks if task.get("status", "대기") == "대기" and not task_requires_review(task))
         progress = round(completed_tasks / total_tasks * 100) if total_tasks else 0
 
@@ -780,6 +798,7 @@ class Handler(BaseHTTPRequestHandler):
 <p><strong>전체 작업:</strong> {total_tasks}개</p>
 <p><strong>대기:</strong> {waiting_tasks}개 ·
 <strong>진행 중:</strong> {in_progress_tasks}개 ·
+<strong>실행 실패:</strong> {failed_tasks}개 ·
 <strong>재검토 필요:</strong> {review_tasks}개 ·
 <strong>완료:</strong> {completed_tasks}개</p>
 </section>

@@ -84,6 +84,34 @@ class ProjectUITests(unittest.TestCase):
         self.assertIn("button.disabled = originalDisabled", html)
         self.assertIn("status.textContent = message", html)
         self.assertIn("window.location.assign(response.url)", html)
+        self.assertIn('querySelector("[data-task-status]")', html)
+        self.assertIn("statusSelect.value = taskStatus", html)
+
+    def test_execution_failure_status_is_visible_in_project_and_report(self):
+        project = {
+            "id": self.PROJECT_ID,
+            "name": "실행 실패 표시 테스트",
+            "goal": "실행 실패 상태 표시",
+            "status": "active",
+            "history": [],
+            "plan": {"status": "approved", "goal": "실행 실패 상태 표시", "stages": []},
+            "tasks": [{
+                "id": "TASK-001",
+                "name": "실패한 개발 작업",
+                "role": "개발 담당",
+                "output": "개발 결과",
+                "status": "실행 실패",
+            }],
+        }
+        with patch.object(app, "PROJECTS_DIR", self.projects_dir):
+            detail_html = self._render(app.Handler.project_detail, project)
+            report_html = self._render(app.Handler.project_report, project)
+
+        self.assertIn("실행 실패:</strong> 1개", detail_html)
+        self.assertIn("value='실행 실패' selected", detail_html)
+        self.assertIn("상태: 실행 실패", report_html)
+        self.assertIn("실행 실패:</strong> 1개", report_html)
+        self.assertIn("실패한 개발 작업 — 실행 실패", report_html)
 
     def test_review_required_state_is_counted_and_shown_in_final_report(self):
         project = {

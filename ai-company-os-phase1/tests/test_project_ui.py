@@ -96,7 +96,9 @@ class ProjectUITests(unittest.TestCase):
 
         self.assertIn('id="processing-modal" class="processing-modal"', html)
         self.assertIn('role="dialog" aria-modal="true"', html)
-        self.assertIn("작업 처리 중입니다. 잠시만 기다려 주세요.", html)
+        self.assertIn("작업 처리 중입니다. 잠시만 기다려 주세요...", html)
+        self.assertIn('class="processing-spinner" role="status"', html)
+        self.assertIn("@keyframes processing-spin", html)
         self.assertIn("background:rgba(0,0,0,.58)", html)
         self.assertIn('id="page-content"', html)
         self.assertIn("pageContent.inert = visible", html)
@@ -108,6 +110,11 @@ class ProjectUITests(unittest.TestCase):
         self.assertIn("activeFormRequest = false", html)
         self.assertIn("finally", html)
         self.assertIn("setModalVisible(false)", html)
+        self.assertIn('const scrollRestoreKey = "ai-company-os:scroll-restore"', html)
+        self.assertIn("scrollY: window.scrollY", html)
+        self.assertIn('taskRowId: taskRow?.id || ""', html)
+        self.assertIn('taskRow.scrollIntoView({ block: "center" })', html)
+        self.assertIn("window.scrollTo(0, savedPosition.scrollY)", html)
 
     def test_execution_failure_status_is_visible_in_project_and_report(self):
         project = {

@@ -18,6 +18,24 @@ PORT = int(os.environ.get("AI_COMPANY_OS_PORT", "8000"))
 VALID_STATUSES = {"active", "paused", "completed"}
 PROCESSING_SCRIPT = """<script>
 document.addEventListener("DOMContentLoaded", () => {
+  const scrollRestoreKey = "ai-company-os:scroll-restore";
+  try {
+    const savedPosition = JSON.parse(sessionStorage.getItem(scrollRestoreKey) || "null");
+    if (savedPosition && savedPosition.path === window.location.pathname) {
+      sessionStorage.removeItem(scrollRestoreKey);
+      requestAnimationFrame(() => {
+        const taskRow = savedPosition.taskRowId && document.getElementById(savedPosition.taskRowId);
+        if (taskRow) {
+          taskRow.scrollIntoView({ block: "center" });
+        } else if (Number.isFinite(savedPosition.scrollY)) {
+          window.scrollTo(0, savedPosition.scrollY);
+        }
+      });
+    }
+  } catch (_) {
+    // 저장소를 사용할 수 없는 브라우저에서는 복원 기능을 건너뛴다.
+  }
+
   let activeFormRequest = false;
   const pageContent = document.querySelector("#page-content");
   const processingModal = document.querySelector("#processing-modal");
@@ -68,6 +86,17 @@ document.addEventListener("DOMContentLoaded", () => {
           credentials: "same-origin",
         });
         if (response.redirected) {
+          const destination = new URL(response.url, window.location.href);
+          const taskRow = form.closest("li[id^='task-']");
+          try {
+            sessionStorage.setItem(scrollRestoreKey, JSON.stringify({
+              path: destination.pathname,
+              scrollY: window.scrollY,
+              taskRowId: taskRow?.id || "",
+            }));
+          } catch (_) {
+            // 저장소 접근이 불가능해도 서버가 돌려준 화면으로 이동한다.
+          }
           window.location.assign(response.url);
           return;
         }
@@ -199,7 +228,10 @@ button, .button {{ display:inline-block; background:#1f2937; color:white; border
 .processing-modal[hidden] {{ display:none; }}
 .processing-dialog {{ box-sizing:border-box; width:100%; max-width:420px; padding:28px; border-radius:12px; background:#fff; color:#202124; box-shadow:0 12px 40px rgba(0,0,0,.28); text-align:center; }}
 .processing-dialog p {{ margin:0; font-weight:600; }}
-</style></head><body><div id="page-content"><h1><a href="/" style="color:inherit;text-decoration:none">AI Company OS</a></h1>{body}</div><div id="processing-modal" class="processing-modal" role="dialog" aria-modal="true" aria-labelledby="processing-modal-message" hidden><div class="processing-dialog" tabindex="-1"><p id="processing-modal-message">작업 처리 중입니다. 잠시만 기다려 주세요.</p></div></div>{PROCESSING_SCRIPT}</body></html>"""
+.processing-spinner {{ width:36px; height:36px; margin:0 auto 16px; border:4px solid #dbe2ea; border-top-color:#2563eb; border-radius:50%; animation:processing-spin .8s linear infinite; }}
+@keyframes processing-spin {{ to {{ transform:rotate(360deg); }} }}
+@media (prefers-reduced-motion: reduce) {{ .processing-spinner {{ animation-duration:2s; }} }}
+</style></head><body><div id="page-content"><h1><a href="/" style="color:inherit;text-decoration:none">AI Company OS</a></h1>{body}</div><div id="processing-modal" class="processing-modal" role="dialog" aria-modal="true" aria-labelledby="processing-modal-message" hidden><div class="processing-dialog" tabindex="-1"><div class="processing-spinner" role="status" aria-label="작업 처리 중"></div><p id="processing-modal-message">작업 처리 중입니다. 잠시만 기다려 주세요...</p></div></div>{PROCESSING_SCRIPT}</body></html>"""
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):

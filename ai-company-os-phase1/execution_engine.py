@@ -2,12 +2,57 @@
 
 from abc import ABC, abstractmethod
 import json
+import logging
 import os
+import re
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
 OPENROUTER_FREE_MODEL = "openrouter/free"
+logger = logging.getLogger(__name__)
+
+
+def _log_response_diagnostics(choice, message, content, safety_verdict="none"):
+    """Log bounded response metadata only; never log prompts or response text."""
+    raw_finish_reason = (
+        choice.get("finish_reason") if isinstance(choice, dict) else None
+    )
+    if isinstance(raw_finish_reason, str) and re.fullmatch(
+        r"[A-Za-z0-9_-]{1,40}", raw_finish_reason
+    ):
+        finish_reason = raw_finish_reason
+    else:
+        finish_reason = "missing" if raw_finish_reason is None else "other"
+
+    raw_fields = message.keys() if isinstance(message, dict) else ()
+    safe_fields = []
+    omitted_fields = False
+    for field in raw_fields:
+        if (
+            isinstance(field, str)
+            and re.fullmatch(r"[A-Za-z0-9_.-]{1,48}", field)
+        ):
+            safe_fields.append(field)
+        else:
+            omitted_fields = True
+    safe_fields = sorted(set(safe_fields))[:24]
+    if len(raw_fields) > len(safe_fields):
+        omitted_fields = True
+    if omitted_fields:
+        safe_fields.append("other")
+
+    content_length = len(content) if isinstance(content, str) else 0
+    content_empty = not isinstance(content, str) or not content.strip()
+    logger.warning(
+        "AI API 응답 진단: finish_reason=%s message_fields=%s "
+        "content_length=%d content_empty=%s safety_verdict=%s",
+        finish_reason,
+        tuple(safe_fields),
+        content_length,
+        content_empty,
+        safety_verdict,
+    )
 
 
 def validate_openrouter_free_model(model):
@@ -329,12 +374,10 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
         if not isinstance(content, str) or not content.strip():
-            fields = ", ".join(sorted(message.keys())) if isinstance(message, dict) else "(message 없음)"
-            finish_reason = choice.get("finish_reason", "알 수 없음") if isinstance(choice, dict) else "알 수 없음"
+            _log_response_diagnostics(choice, message, content)
             raise RuntimeError(
                 "AI API가 작업 결과 내용을 반환하지 않았습니다. "
-                f"finish_reason={finish_reason}, message_fields={fields}. "
-                "모델 응답에 내용이 없으므로 설정된 AI_MODEL의 호환성을 확인해야 합니다."
+                "응답 진단 로그에서 반환 메타데이터를 확인해 주세요."
             )
         # Reject leaked planning notes instead of showing them as a finished deliverable.
         # Only reject distinctive self-planning phrases. Generic wording such as
@@ -368,6 +411,10 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
 
         normalized_content = content.strip().lower()
         if normalized_content in {"user safety: safe", "safe", "user safety: unsafe"}:
+            safety_verdict = "unsafe" if normalized_content.endswith("unsafe") else "safe"
+            _log_response_diagnostics(
+                choice, message, content, safety_verdict=safety_verdict
+            )
             raise RuntimeError(
                 "AI API가 업무 결과 대신 안전성 판정 문구만 반환했습니다. "
                 "업무 결과는 저장되지 않았습니다. 응답 내용과 라우팅된 모델의 동작을 확인해 주세요."

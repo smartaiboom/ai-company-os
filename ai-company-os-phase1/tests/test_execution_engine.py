@@ -177,7 +177,7 @@ class ExecutionEngineTests(unittest.TestCase):
                 return False
 
             def read(self):
-                return b'{"choices":[{"message":{"content":"result"}}]}'
+                return b'{"choices":[{"message":{"content":"ordinary result includes safe"}}]}'
 
         env = {
             "AI_ENGINE": "openai_compatible",
@@ -186,10 +186,11 @@ class ExecutionEngineTests(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("execution_engine.urlopen", return_value=FakeResponse()) as mocked_urlopen:
-                execute_task({"goal": "테스트 목표"}, {"name": "테스트 업무"})
+                result = execute_task({"goal": "테스트 목표"}, {"name": "테스트 업무"})
 
         request = mocked_urlopen.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
+        self.assertIn("ordinary result includes safe", result)
         self.assertEqual(payload["model"], "openrouter/free")
         self.assertNotIn("reasoning", payload)
         self.assertNotIn("chat_template_kwargs", payload)
@@ -207,7 +208,61 @@ class ExecutionEngineTests(unittest.TestCase):
                 return False
 
             def read(self):
-                return b'{"choices":[{"message":{"content":"User Safety: Safe"}}]}'
+                return b'{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"User Safety: Safe"}}]}'
+
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_MODEL": "openrouter/free",
+            "AI_API_KEY": "AUTH_SENTINEL",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("execution_engine.urlopen", return_value=FakeResponse()):
+                with self.assertLogs("execution_engine", level="WARNING") as diagnostics:
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "응답 내용과 라우팅된 모델의 동작을 확인",
+                    ) as error:
+                        execute_task(
+                            {"goal": "PRIVATE_PROMPT_SENTINEL"},
+                            {
+                                "name": "테스트 업무",
+                                "inputs": ["PRIVATE_INPUT_SENTINEL"],
+                            },
+                            previous_results=[{
+                                "task_name": "선행 작업",
+                                "result": "PRIVATE_RESULT_SENTINEL",
+                            }],
+                        )
+
+        self.assertIn("업무 결과 대신 안전성 판정 문구만 반환했습니다", str(error.exception))
+        self.assertNotIn("AI_MODEL을 다른 지원 모델로 변경", str(error.exception))
+        log_message = " ".join(diagnostics.output)
+        self.assertIn("finish_reason=stop", log_message)
+        self.assertIn("message_fields=('content', 'role')", log_message)
+        self.assertIn("content_length=17", log_message)
+        self.assertIn("content_empty=False", log_message)
+        self.assertIn("safety_verdict=safe", log_message)
+        self.assertNotIn("User Safety: Safe", log_message)
+        self.assertNotIn("PRIVATE_PROMPT_SENTINEL", log_message)
+        self.assertNotIn("PRIVATE_INPUT_SENTINEL", log_message)
+        self.assertNotIn("PRIVATE_RESULT_SENTINEL", log_message)
+        self.assertNotIn("AUTH_SENTINEL", log_message)
+
+    def test_empty_ai_response_logs_only_safe_diagnostic_metadata(self):
+        import os
+        from unittest.mock import patch
+        from execution_engine import execute_task
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"finish_reason":"content_filter","message":{"role":"assistant","content":""}}]}'
 
         env = {
             "AI_ENGINE": "openai_compatible",
@@ -216,14 +271,16 @@ class ExecutionEngineTests(unittest.TestCase):
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("execution_engine.urlopen", return_value=FakeResponse()):
-                with self.assertRaisesRegex(
-                    RuntimeError,
-                    "응답 내용과 라우팅된 모델의 동작을 확인",
-                ) as error:
-                    execute_task({"goal": "테스트 목표"}, {"name": "테스트 업무"})
+                with self.assertLogs("execution_engine", level="WARNING") as diagnostics:
+                    with self.assertRaisesRegex(RuntimeError, "응답 진단 로그"):
+                        execute_task({"goal": "PRIVATE_PROMPT_SENTINEL"}, {"name": "테스트 업무"})
 
-        self.assertIn("업무 결과 대신 안전성 판정 문구만 반환했습니다", str(error.exception))
-        self.assertNotIn("AI_MODEL을 다른 지원 모델로 변경", str(error.exception))
+        log_message = " ".join(diagnostics.output)
+        self.assertIn("finish_reason=content_filter", log_message)
+        self.assertIn("message_fields=('content', 'role')", log_message)
+        self.assertIn("content_length=0", log_message)
+        self.assertIn("content_empty=True", log_message)
+        self.assertNotIn("PRIVATE_PROMPT_SENTINEL", log_message)
 
     def test_non_free_model_is_rejected_before_api_request(self):
         from unittest.mock import patch

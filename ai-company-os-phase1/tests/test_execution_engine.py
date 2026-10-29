@@ -163,6 +163,37 @@ class ExecutionEngineTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "AI_API_BASE_URL"):
                 OpenAICompatibleExecutionEngine()
 
+    def test_openai_compatible_request_does_not_disable_reasoning(self):
+        import json
+        import os
+        from unittest.mock import patch
+        from execution_engine import execute_task
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"result"}}]}'
+
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_MODEL": "openrouter/free",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("execution_engine.urlopen", return_value=FakeResponse()) as mocked_urlopen:
+                execute_task({"goal": "테스트 목표"}, {"name": "테스트 업무"})
+
+        request = mocked_urlopen.call_args.args[0]
+        payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(payload["model"], "openrouter/free")
+        self.assertNotIn("reasoning", payload)
+        self.assertNotIn("chat_template_kwargs", payload)
+
     def test_non_free_model_is_rejected_before_api_request(self):
         from unittest.mock import patch
         from execution_engine import execute_task

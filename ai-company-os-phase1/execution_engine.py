@@ -370,7 +370,7 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
         if normalized_content in {"user safety: safe", "safe", "user safety: unsafe"}:
             raise RuntimeError(
                 "AI API가 업무 결과 대신 안전성 판정 문구만 반환했습니다. "
-                "AI_MODEL을 다른 지원 모델로 변경한 뒤 다시 실행해 주세요."
+                "업무 결과는 저장되지 않았습니다. 응답 내용과 라우팅된 모델의 동작을 확인해 주세요."
             )
 
         return (

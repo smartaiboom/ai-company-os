@@ -194,6 +194,37 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertNotIn("reasoning", payload)
         self.assertNotIn("chat_template_kwargs", payload)
 
+    def test_safety_verdict_only_response_is_rejected_without_model_change_advice(self):
+        import os
+        from unittest.mock import patch
+        from execution_engine import execute_task
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return b'{"choices":[{"message":{"content":"User Safety: Safe"}}]}'
+
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_MODEL": "openrouter/free",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("execution_engine.urlopen", return_value=FakeResponse()):
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "응답 내용과 라우팅된 모델의 동작을 확인",
+                ) as error:
+                    execute_task({"goal": "테스트 목표"}, {"name": "테스트 업무"})
+
+        self.assertIn("업무 결과 대신 안전성 판정 문구만 반환했습니다", str(error.exception))
+        self.assertNotIn("AI_MODEL을 다른 지원 모델로 변경", str(error.exception))
+
     def test_non_free_model_is_rejected_before_api_request(self):
         from unittest.mock import patch
         from execution_engine import execute_task

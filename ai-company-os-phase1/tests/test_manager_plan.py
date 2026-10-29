@@ -1,3 +1,4 @@
+import json
 import os
 import unittest
 from unittest.mock import patch
@@ -30,6 +31,82 @@ class ManagerPlanTests(unittest.TestCase):
     def test_empty_goal_is_rejected(self):
         with self.assertRaises(ValueError):
             build_manager_plan("   ", "time")
+
+    def test_non_free_model_is_rejected_before_plan_api_request(self):
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_MODEL": "some-provider/some-model",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("manager_plan.urlopen") as mocked_urlopen:
+                with self.assertRaisesRegex(ValueError, "openrouter/free"):
+                    build_manager_plan("test goal", "time")
+                mocked_urlopen.assert_not_called()
+
+    def test_missing_model_is_rejected_before_plan_api_request(self):
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("manager_plan.urlopen") as mocked_urlopen:
+                with self.assertRaisesRegex(ValueError, "openrouter/free"):
+                    build_manager_plan("test goal", "time")
+                mocked_urlopen.assert_not_called()
+
+    def test_api_plan_accepts_nested_tasks_and_singular_input_response(self):
+        stages = [
+            {
+                "task_name": "요구사항 정리",
+                "role": "AI 관리자",
+                "input": "프로젝트 목표",
+                "deliverable": "목표 및 성공 기준",
+                "risk": "요구사항 확인 필요",
+            },
+            {
+                "task_name": "초안 작성",
+                "role": "기획 담당",
+                "input": "목표 및 성공 기준",
+                "deliverable": "초안",
+                "risk": "사용자 검토 필요",
+            },
+        ]
+        response_data = {
+            "choices": [{
+                "message": {
+                    "content": json.dumps({
+                        "plan": {"tasks": stages},
+                        "questions": [],
+                        "assumptions": [],
+                    }, ensure_ascii=False)
+                }
+            }]
+        }
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return json.dumps(response_data).encode("utf-8")
+
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_MODEL": "openrouter/free",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("manager_plan.urlopen", return_value=FakeResponse()) as mocked_urlopen:
+                plan = build_manager_plan("test goal", "time")
+
+        self.assertEqual([stage["name"] for stage in plan["stages"]], ["요구사항 정리", "초안 작성"])
+        self.assertEqual(plan["stages"][0]["inputs"], ["프로젝트 목표"])
+        self.assertEqual(plan["stages"][1]["output"], "초안")
+        mocked_urlopen.assert_called_once()
 
     def test_stage_validation_accepts_variable_number_of_tasks(self):
         stages = [

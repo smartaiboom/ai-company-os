@@ -6,6 +6,7 @@ import re
 from copy import deepcopy
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
+from execution_engine import validate_openrouter_free_model
 
 
 DEFAULT_QUESTIONS = [
@@ -102,6 +103,60 @@ def validate_stages(stages):
     return normalized
 
 
+def _normalize_plan_response(parsed):
+    """Normalize common equivalent JSON shapes before strict stage validation."""
+    if not isinstance(parsed, dict):
+        return parsed
+
+    normalized = dict(parsed)
+    nested_plan = parsed.get("plan")
+    if isinstance(nested_plan, dict):
+        normalized.update(nested_plan)
+
+    if "stages" not in normalized:
+        for alias in ("tasks", "steps"):
+            if alias in normalized:
+                normalized["stages"] = normalized[alias]
+                break
+
+    stages = normalized.get("stages")
+    if not isinstance(stages, list):
+        return normalized
+
+    normalized_stages = []
+    field_aliases = {
+        "name": ("task_name", "title"),
+        "role": ("assigned_role", "assignee"),
+        "inputs": ("input",),
+        "output": ("deliverable", "result"),
+        "risk": ("risk_note", "risks"),
+    }
+    for stage in stages:
+        if not isinstance(stage, dict):
+            normalized_stages.append(stage)
+            continue
+
+        item = dict(stage)
+        for field, aliases in field_aliases.items():
+            if field not in item:
+                for alias in aliases:
+                    if alias in item:
+                        item[field] = item[alias]
+                        break
+
+        if isinstance(item.get("inputs"), str):
+            item["inputs"] = [item["inputs"]]
+        if isinstance(item.get("risk"), list):
+            item["risk"] = "; ".join(
+                value.strip() for value in item["risk"]
+                if isinstance(value, str) and value.strip()
+            )
+        normalized_stages.append(item)
+
+    normalized["stages"] = normalized_stages
+    return normalized
+
+
 def _parse_plan_content(content):
     """Parse JSON returned as plain text, fenced JSON, or text content blocks."""
     if isinstance(content, list):
@@ -131,9 +186,10 @@ def _request_ai_plan(goal):
     base_url = os.getenv("AI_API_BASE_URL", "").rstrip("/")
     api_key = os.getenv("AI_API_KEY", "")
     model = os.getenv("AI_MODEL", "")
-    if not base_url or not model:
+    validate_openrouter_free_model(model)
+    if not base_url:
         raise ValueError(
-            "실제 AI 관리자 계획을 만들려면 AI_API_BASE_URL과 AI_MODEL 설정이 필요합니다."
+            "실제 AI 관리자 계획을 만들려면 AI_API_BASE_URL 설정이 필요합니다."
         )
 
     payload = {
@@ -196,6 +252,7 @@ def _request_ai_plan(goal):
     if not isinstance(parsed, dict):
         raise RuntimeError("AI 관리자 응답은 JSON 객체여야 합니다.")
 
+    parsed = _normalize_plan_response(parsed)
     stages = validate_stages(parsed.get("stages"))
     questions = parsed.get("questions", [])
     assumptions = parsed.get("assumptions", [])

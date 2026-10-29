@@ -159,9 +159,38 @@ class ExecutionEngineTests(unittest.TestCase):
         from unittest.mock import patch
         from execution_engine import OpenAICompatibleExecutionEngine
 
-        with patch.dict("os.environ", {}, clear=True):
+        with patch.dict("os.environ", {"AI_MODEL": "openrouter/free"}, clear=True):
             with self.assertRaisesRegex(ValueError, "AI_API_BASE_URL"):
                 OpenAICompatibleExecutionEngine()
+
+    def test_non_free_model_is_rejected_before_api_request(self):
+        from unittest.mock import patch
+        from execution_engine import execute_task
+
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_MODEL": "some-provider/some-model",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            with patch("execution_engine.urlopen") as mocked_urlopen:
+                with self.assertRaisesRegex(ValueError, "openrouter/free"):
+                    execute_task({"goal": "test"}, {"name": "test"})
+                mocked_urlopen.assert_not_called()
+
+    def test_missing_model_is_rejected_before_api_request(self):
+        from unittest.mock import patch
+        from execution_engine import execute_task
+
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+        }
+        with patch.dict("os.environ", env, clear=True):
+            with patch("execution_engine.urlopen") as mocked_urlopen:
+                with self.assertRaisesRegex(ValueError, "openrouter/free"):
+                    execute_task({"goal": "test"}, {"name": "test"})
+                mocked_urlopen.assert_not_called()
 
     def test_get_execution_engine_rejects_unknown_engine(self):
         from unittest.mock import patch

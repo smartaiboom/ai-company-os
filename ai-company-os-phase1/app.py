@@ -18,10 +18,28 @@ PORT = int(os.environ.get("AI_COMPANY_OS_PORT", "8000"))
 VALID_STATUSES = {"active", "paused", "completed"}
 PROCESSING_SCRIPT = """<script>
 document.addEventListener("DOMContentLoaded", () => {
+  let activeFormRequest = false;
+  const pageContent = document.querySelector("#page-content");
+  const processingModal = document.querySelector("#processing-modal");
+  const processingDialog = processingModal?.querySelector(".processing-dialog");
+  const setModalVisible = (visible) => {
+    if (!pageContent || !processingModal) return;
+    processingModal.hidden = !visible;
+    pageContent.inert = visible;
+    if (visible) {
+      pageContent.setAttribute("aria-busy", "true");
+      document.body.style.overflow = "hidden";
+      processingDialog?.focus();
+    } else {
+      pageContent.removeAttribute("aria-busy");
+      document.body.style.overflow = "";
+    }
+  };
+
   document.querySelectorAll("form[data-processing-form]").forEach((form) => {
     form.addEventListener("submit", async (event) => {
       event.preventDefault();
-      if (form.dataset.processing === "true") return;
+      if (activeFormRequest || form.dataset.processing === "true") return;
 
       const button = event.submitter || form.querySelector("button[type='submit']");
       const status = form.querySelector("[data-processing-status]");
@@ -29,8 +47,8 @@ document.addEventListener("DOMContentLoaded", () => {
 
       const originalLabel = button.textContent;
       const originalDisabled = button.disabled;
-      let redirecting = false;
       let message = "";
+      activeFormRequest = true;
       form.dataset.processing = "true";
       form.setAttribute("aria-busy", "true");
       button.disabled = true;
@@ -39,6 +57,7 @@ document.addEventListener("DOMContentLoaded", () => {
       status.textContent = "";
 
       try {
+        setModalVisible(true);
         const body = new URLSearchParams();
         new FormData(form).forEach((value, key) => {
           if (typeof value === "string") body.append(key, value);
@@ -49,7 +68,6 @@ document.addEventListener("DOMContentLoaded", () => {
           credentials: "same-origin",
         });
         if (response.redirected) {
-          redirecting = true;
           window.location.assign(response.url);
           return;
         }
@@ -68,16 +86,21 @@ document.addEventListener("DOMContentLoaded", () => {
           if (errorText) message = errorText;
         }
       } catch (_) {
-        redirecting = false;
         message = "연결 문제로 요청을 완료하지 못했습니다. 다시 시도해 주세요.";
       } finally {
-        if (!redirecting) {
+        try {
           form.dataset.processing = "false";
           form.removeAttribute("aria-busy");
           button.disabled = originalDisabled;
           button.textContent = originalLabel;
           status.textContent = message;
           status.hidden = !message;
+        } finally {
+          try {
+            setModalVisible(false);
+          } finally {
+            activeFormRequest = false;
+          }
         }
       }
     });
@@ -172,7 +195,11 @@ label {{ display:block; font-weight:600; margin: 10px 0 4px; }}
 input, textarea, select {{ box-sizing:border-box; width:100%; padding:10px; border:1px solid #aaa; border-radius:8px; font:inherit; }}
 button, .button {{ display:inline-block; background:#1f2937; color:white; border:0; border-radius:8px; padding:10px 14px; font:inherit; text-decoration:none; cursor:pointer; margin-top:10px; }}
 .muted {{ color:#666; font-size:.92rem; }} .status {{ font-weight:600; }}
-</style></head><body><h1><a href="/" style="color:inherit;text-decoration:none">AI Company OS</a></h1>{body}{PROCESSING_SCRIPT}</body></html>"""
+.processing-modal {{ position:fixed; inset:0; z-index:10000; display:flex; align-items:center; justify-content:center; padding:24px; background:rgba(0,0,0,.58); }}
+.processing-modal[hidden] {{ display:none; }}
+.processing-dialog {{ box-sizing:border-box; width:100%; max-width:420px; padding:28px; border-radius:12px; background:#fff; color:#202124; box-shadow:0 12px 40px rgba(0,0,0,.28); text-align:center; }}
+.processing-dialog p {{ margin:0; font-weight:600; }}
+</style></head><body><div id="page-content"><h1><a href="/" style="color:inherit;text-decoration:none">AI Company OS</a></h1>{body}</div><div id="processing-modal" class="processing-modal" role="dialog" aria-modal="true" aria-labelledby="processing-modal-message" hidden><div class="processing-dialog" tabindex="-1"><p id="processing-modal-message">작업 처리 중입니다. 잠시만 기다려 주세요.</p></div></div>{PROCESSING_SCRIPT}</body></html>"""
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):

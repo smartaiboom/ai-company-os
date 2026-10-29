@@ -87,6 +87,28 @@ class ProjectUITests(unittest.TestCase):
         self.assertIn('querySelector("[data-task-status]")', html)
         self.assertIn("statusSelect.value = taskStatus", html)
 
+    def test_processing_modal_locks_and_restores_page_for_all_forms(self):
+        handler = app.Handler.__new__(app.Handler)
+        with patch.object(app, "load_projects", return_value=[]):
+            with patch.object(app.Handler, "send_html", autospec=True) as send_html:
+                app.Handler.home(handler)
+        html = send_html.call_args.args[1]
+
+        self.assertIn('id="processing-modal" class="processing-modal"', html)
+        self.assertIn('role="dialog" aria-modal="true"', html)
+        self.assertIn("작업 처리 중입니다. 잠시만 기다려 주세요.", html)
+        self.assertIn("background:rgba(0,0,0,.58)", html)
+        self.assertIn('id="page-content"', html)
+        self.assertIn("pageContent.inert = visible", html)
+        self.assertIn('pageContent.setAttribute("aria-busy", "true")', html)
+        self.assertIn('pageContent.removeAttribute("aria-busy")', html)
+        self.assertIn('document.body.style.overflow = "hidden"', html)
+        self.assertIn('document.body.style.overflow = ""', html)
+        self.assertIn("if (activeFormRequest || form.dataset.processing === \"true\") return", html)
+        self.assertIn("activeFormRequest = false", html)
+        self.assertIn("finally", html)
+        self.assertIn("setModalVisible(false)", html)
+
     def test_execution_failure_status_is_visible_in_project_and_report(self):
         project = {
             "id": self.PROJECT_ID,

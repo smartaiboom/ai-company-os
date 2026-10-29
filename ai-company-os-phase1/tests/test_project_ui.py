@@ -190,6 +190,36 @@ class ProjectUITests(unittest.TestCase):
         self.assertIn("선행 결과가 변경되었습니다.", report_html)
         self.assertIn("저장된 최종 결과", report_html)
 
+    def test_legacy_linked_result_shows_review_status_and_actions(self):
+        project = {
+            "id": self.PROJECT_ID,
+            "name": "구형 결과 검토 표시",
+            "goal": "선행 결과 승인",
+            "status": "active",
+            "history": [{
+                "event": "task_execution_succeeded",
+                "details": "TASK-001: 작업 실행 성공 (실행 엔진: mock)",
+            }],
+            "plan": {"status": "approved", "goal": "선행 결과 승인", "stages": []},
+            "tasks": [
+                {
+                    "id": "TASK-001", "name": "선행 조사", "output": "조사 결과",
+                    "status": "완료", "result": "저장된 조사 결과",
+                },
+                {
+                    "id": "TASK-002", "name": "후속 기획", "output": "기획안",
+                    "input_task_ids": ["TASK-001"], "status": "대기",
+                },
+            ],
+        }
+        with patch.object(app, "PROJECTS_DIR", self.projects_dir):
+            html = self._render(app.Handler.project_detail, project)
+
+        self.assertIn("업무 결과 검토: 검토 승인 대기", html)
+        self.assertIn("action='/task/review'", html)
+        self.assertIn("검토 승인", html)
+        self.assertIn("수정 요청 내용", html)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -61,11 +61,21 @@ class QualityReviewFlowTests(unittest.TestCase):
                     "status": "대기",
                 },
             ],
-            "history": [],
+            "history": [{
+                "event": "task_execution_succeeded",
+                "details": "TASK-001: 작업 실행 성공 (실행 엔진: mock)",
+            }],
         }
 
         with patch.object(app, "PROJECTS_DIR", self.projects_dir):
             app.save_project(project)
+
+            redirect, send_html = self._post("/task/review", {
+                "task_id": "TASK-001",
+                "decision": "approve",
+            })
+            self.assertFalse(send_html.called)
+            self.assertTrue(redirect.called)
 
             # 실제 API 대신 기존 MockExecutionEngine 경로로 검토를 실행한다.
             redirect, send_html = self._post(
@@ -110,6 +120,19 @@ class QualityReviewFlowTests(unittest.TestCase):
                 for item in revised["history"]
             ))
 
+            # 수동 편집 결과는 실행 성공 기록이 없으므로 재실행으로 검증한다.
+            with patch.object(app, "execute_task", return_value="초안 v2 — 검토 의견 반영"):
+                redirect, send_html = self._post("/task/execute", {"task_id": "TASK-001"})
+            self.assertFalse(send_html.called)
+            self.assertTrue(redirect.called)
+
+            redirect, send_html = self._post("/task/review", {
+                "task_id": "TASK-001",
+                "decision": "approve",
+            })
+            self.assertFalse(send_html.called)
+            self.assertTrue(redirect.called)
+
             # 상태만 완료로 바꾸어 검토 표시를 건너뛰는 요청은 거부되고 저장되지 않는다.
             project_path = self.projects_dir / f"{self.PROJECT_ID}.json"
             before = project_path.read_bytes()
@@ -135,6 +158,14 @@ class QualityReviewFlowTests(unittest.TestCase):
             self.assertFalse(review_task.get("review_required", False))
             self.assertNotIn("review_reason", review_task)
             self.assertIn("초안 v2 — 검토 의견 반영", review_task["result"])
+            self.assertEqual(review_task["review_status"], "pending")
+
+            redirect, send_html = self._post("/task/review", {
+                "task_id": "TASK-002",
+                "decision": "approve",
+            })
+            self.assertFalse(send_html.called)
+            self.assertTrue(redirect.called)
 
             # 최종 업무도 검토 결과를 다시 받아 재실행할 수 있다.
             redirect, send_html = self._post(

@@ -53,12 +53,15 @@ class ExplicitWorkflowLinkTests(unittest.TestCase):
         self.addCleanup(self.temp_dir.cleanup)
 
     def _post_execute(self, task_id):
+        return self._post("/task/execute", {"task_id": task_id})
+
+    def _post(self, path, form):
         body = urlencode({
             "id": self.PROJECT_ID,
-            "task_id": task_id,
+            **form,
         }).encode("utf-8")
         handler = app.Handler.__new__(app.Handler)
-        handler.path = "/task/execute"
+        handler.path = path
         handler.headers = {"Content-Length": str(len(body))}
         handler.rfile = io.BytesIO(body)
         handler.wfile = io.BytesIO()
@@ -80,6 +83,13 @@ class ExplicitWorkflowLinkTests(unittest.TestCase):
                     redirect, send_html = self._post_execute(task_id)
                     redirect.assert_called_once()
                     send_html.assert_not_called()
+                    if task_id != "TASK-003":
+                        redirect, send_html = self._post("/task/review", {
+                            "task_id": task_id,
+                            "decision": "approve",
+                        })
+                        redirect.assert_called_once()
+                        send_html.assert_not_called()
 
             saved = app.load_project(self.PROJECT_ID)
 
@@ -97,6 +107,9 @@ class ExplicitWorkflowLinkTests(unittest.TestCase):
         self.assertEqual(development_inputs[0]["task_id"], "TASK-002")
         self.assertEqual(development_inputs[0]["result"], outputs[1])
         self.assertEqual([task["result"] for task in saved["tasks"]], outputs)
+        self.assertEqual(saved["tasks"][0]["review_status"], "approved")
+        self.assertEqual(saved["tasks"][1]["review_status"], "approved")
+        self.assertEqual(saved["tasks"][2]["review_status"], "not_required")
 
     def test_required_predecessor_without_result_blocks_execution(self):
         for missing_result in (None, "   "):

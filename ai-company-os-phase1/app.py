@@ -16,6 +16,16 @@ ARTIFACTS_DIR = DATA_DIR / "artifacts"
 HOST = os.environ.get("AI_COMPANY_OS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AI_COMPANY_OS_PORT", "8000"))
 VALID_STATUSES = {"active", "paused", "completed"}
+REVIEW_PENDING = "pending"
+REVIEW_APPROVED = "approved"
+REVIEW_CHANGES_REQUESTED = "changes_requested"
+REVIEW_NOT_REQUIRED = "not_required"
+VALID_REVIEW_STATUSES = {
+    REVIEW_PENDING,
+    REVIEW_APPROVED,
+    REVIEW_CHANGES_REQUESTED,
+    REVIEW_NOT_REQUIRED,
+}
 PROCESSING_SCRIPT = """<script>
 document.addEventListener("DOMContentLoaded", () => {
   const scrollRestoreKey = "ai-company-os:scroll-restore";
@@ -185,7 +195,7 @@ def mark_downstream_for_review(project, task_index, reason):
     """진행 중이거나 완료된 후속 작업만 재검토 대상으로 표시한다."""
     tasks = project.get("tasks", [])
     affected = []
-    for later_task in tasks[task_index + 1:]:
+    for later_index, later_task in enumerate(tasks[task_index + 1:], start=task_index + 1):
         # 대기 작업은 아직 결과를 만들지 않았으므로 대기 상태를 유지한다.
         # 진행 중/완료 작업은 선행 결과가 바뀌면 기존 작업 내용에 영향이 있을 수 있다.
         if later_task.get("status", "대기") not in ("진행 중", "완료"):
@@ -193,6 +203,10 @@ def mark_downstream_for_review(project, task_index, reason):
         later_task["status"] = "재검토 필요"
         later_task["review_required"] = True
         later_task["review_reason"] = reason
+        _reset_review_approval(
+            later_task,
+            _task_has_dependents(tasks, later_index),
+        )
         later_task["updated_at"] = now()
         affected.append(later_task.get("name", later_task.get("id", "이름 없는 작업")))
     if affected:
@@ -206,6 +220,39 @@ def mark_downstream_for_review(project, task_index, reason):
 def task_requires_review(task):
     """Treat the review flag and visible review status as the same UI state."""
     return bool(task.get("review_required")) or task.get("status") == "재검토 필요"
+
+def task_review_status(task, has_dependents=False):
+    """Read review state safely, treating legacy linked results as pending."""
+    status = task.get("review_status")
+    if status in VALID_REVIEW_STATUSES:
+        if (
+            has_dependents
+            and status == REVIEW_NOT_REQUIRED
+            and task.get("status") == "완료"
+        ):
+            return REVIEW_PENDING
+        return status
+    if has_dependents and task.get("status") == "완료":
+        return REVIEW_PENDING
+    return REVIEW_NOT_REQUIRED
+
+def task_has_successful_result(project, task):
+    """Only expose review actions for the latest stored result from a successful run."""
+    task_id = task.get("id")
+    if not task_id:
+        return False
+    relevant_events = {
+        "task_execution_succeeded",
+        "task_execution_failed",
+        "task_result_saved",
+    }
+    for event in reversed(project.get("history", [])):
+        if (
+            event.get("event") in relevant_events
+            and str(event.get("details", "")).startswith(f"{task_id}:")
+        ):
+            return event.get("event") == "task_execution_succeeded"
+    return False
 
 def _task_matches_input(input_name, task):
     """Legacy plan labels are resolved once into explicit task IDs."""
@@ -249,6 +296,104 @@ def _resolve_input_task_ids(task, tasks, task_index):
             if task_id and task_id not in task_ids:
                 task_ids.append(task_id)
     return task_ids
+
+def _task_has_dependents(tasks, task_index):
+    task_id = tasks[task_index].get("id")
+    if not task_id:
+        return False
+    for index, candidate in enumerate(tasks[task_index + 1:], start=task_index + 1):
+        try:
+            if task_id in _resolve_input_task_ids(candidate, tasks, index):
+                return True
+        except ValueError:
+            # 잘못된 연결은 후속 실행 시 오류로 처리하며 여기서는 UI를 중단하지 않는다.
+            continue
+    return False
+
+def _validate_task_predecessors(task, tasks, task_index):
+    input_task_ids = _resolve_input_task_ids(task, tasks, task_index)
+    previous_tasks_by_id = {
+        item.get("id"): item for item in tasks[:task_index]
+    }
+    for input_task_id in input_task_ids:
+        previous_task = previous_tasks_by_id[input_task_id]
+        if previous_task.get("status") != "완료" or task_requires_review(previous_task):
+            raise ValueError(
+                f"필수 선행 업무 '{previous_task.get('name', input_task_id)}'가 "
+                f"완료되지 않았습니다 (현재 상태: {previous_task.get('status', '대기')}). "
+                "앞선 작업을 먼저 완료해 주세요."
+            )
+        previous_result = previous_task.get("result")
+        if not isinstance(previous_result, str) or not previous_result.strip():
+            raise ValueError(
+                f"필수 선행 업무 '{previous_task.get('name', input_task_id)}'의 "
+                "결과가 비어 있어 실행을 중단했습니다."
+            )
+        review_status = task_review_status(previous_task, has_dependents=True)
+        if review_status != REVIEW_APPROVED:
+            if review_status == REVIEW_CHANGES_REQUESTED:
+                reason = "수정 요청이 아직 반영·재검토되지 않았습니다"
+            else:
+                reason = "검토 승인이 완료되지 않았습니다"
+            raise ValueError(
+                f"필수 선행 업무 '{previous_task.get('name', input_task_id)}'는 "
+                f"{reason}. 승인 후 다시 실행해 주세요."
+            )
+    return input_task_ids
+
+def _reset_review_approval(task, has_dependents):
+    task["review_status"] = REVIEW_PENDING if has_dependents else REVIEW_NOT_REQUIRED
+    task.pop("reviewed_at", None)
+    task.pop("reviewed_by", None)
+
+def task_review_controls(project, task_index):
+    project_id = project["id"]
+    tasks = project.get("tasks", [])
+    task = tasks[task_index]
+    if not _task_has_dependents(tasks, task_index):
+        return ""
+
+    review_status = task_review_status(task, has_dependents=True)
+    labels = {
+        REVIEW_PENDING: "검토 승인 대기",
+        REVIEW_APPROVED: "검토 승인됨",
+        REVIEW_CHANGES_REQUESTED: "수정 요청됨",
+        REVIEW_NOT_REQUIRED: "검토 불필요",
+    }
+    html_parts = [f"<p class='status'>업무 결과 검토: {esc(labels[review_status])}</p>"]
+    feedback = task.get("review_feedback", "")
+    if feedback:
+        html_parts.append(f"<p><strong>수정 요청:</strong> {esc(feedback)}</p>")
+
+    result = task.get("result")
+    if (
+        task.get("status") == "완료"
+        and isinstance(result, str)
+        and result.strip()
+        and not task_has_successful_result(project, task)
+        and review_status != REVIEW_APPROVED
+    ):
+        html_parts.append("<p class='muted'>실행 성공 기록이 확인되지 않아 검토할 수 없습니다. 작업을 다시 실행해 주세요.</p>")
+    can_review = (
+        task.get("status") == "완료"
+        and isinstance(result, str)
+        and bool(result.strip())
+        and task_has_successful_result(project, task)
+        and not task_requires_review(task)
+        and review_status != REVIEW_CHANGES_REQUESTED
+    )
+    if can_review and review_status != REVIEW_APPROVED:
+        html_parts.append(f"""<form method='post' action='/task/review' data-processing-form data-processing-label='승인 중...'>
+<input type='hidden' name='id' value='{esc(project_id)}'><input type='hidden' name='task_id' value='{esc(task.get('id', ''))}'><input type='hidden' name='decision' value='approve'>
+<button type='submit'>검토 승인</button><p class='muted' data-processing-status aria-live='polite' hidden></p></form>
+<form method='post' action='/task/review' data-processing-form data-processing-label='요청 중...'>
+<input type='hidden' name='id' value='{esc(project_id)}'><input type='hidden' name='task_id' value='{esc(task.get('id', ''))}'><input type='hidden' name='decision' value='request_changes'>
+<label for='review-feedback-{esc(task.get('id', ''))}'>수정 요청 내용</label><textarea id='review-feedback-{esc(task.get('id', ''))}' name='feedback' rows='3' required placeholder='수정이 필요한 내용을 적어 주세요.'></textarea>
+<button type='submit'>수정 요청</button><p class='muted' data-processing-status aria-live='polite' hidden></p></form>""")
+    reviewed_at = task.get("reviewed_at")
+    if review_status == REVIEW_APPROVED and reviewed_at:
+        html_parts.append(f"<p class='muted'>승인 시각: {esc(format_time(reviewed_at))}</p>")
+    return "".join(html_parts)
 
 def _build_previous_results(task, tasks, task_index, input_task_ids):
     """Assemble linked result records using explicit IDs as the source of truth."""
@@ -505,6 +650,7 @@ class Handler(BaseHTTPRequestHandler):
 
                 if status == "완료":
                     task_index = tasks.index(task)
+                    _validate_task_predecessors(task, tasks, task_index)
                     unfinished = [
                         previous_task for previous_task in tasks[:task_index]
                         if previous_task.get("status") != "완료"
@@ -527,6 +673,10 @@ class Handler(BaseHTTPRequestHandler):
 
                 old_status = task.get("status", "대기")
                 old_result = task.get("result", "")
+                old_review_status = task_review_status(
+                    task,
+                    has_dependents=_task_has_dependents(tasks, tasks.index(task)),
+                )
 
                 task_index = tasks.index(task)
                 result_changed = result != old_result
@@ -535,6 +685,18 @@ class Handler(BaseHTTPRequestHandler):
                 task["result"] = result
                 task["status"] = status
                 task["updated_at"] = now()
+
+                if result_changed:
+                    _reset_review_approval(
+                        task,
+                        _task_has_dependents(tasks, task_index),
+                    )
+                    task.pop("review_feedback", None)
+                elif status_changed and old_review_status == REVIEW_APPROVED:
+                    _reset_review_approval(
+                        task,
+                        _task_has_dependents(tasks, task_index),
+                    )
 
                 # 작업 결과/상태가 바뀌면 모든 후속 작업을 재검토 필요로 바꾸고 결과는 보존한다.
                 if result_changed or status_changed:
@@ -560,7 +722,69 @@ class Handler(BaseHTTPRequestHandler):
                 save_project(project)
                 self.redirect(f"/project/{project_id}#task-{task_id}")
 
-                
+            elif parsed.path == "/task/review":
+                project_id = form.get("id", "")
+                task_id = form.get("task_id", "")
+                decision = form.get("decision", "")
+                project = load_project(project_id)
+                tasks = project.get("tasks", [])
+                task = next((item for item in tasks if item.get("id") == task_id), None)
+                if not task:
+                    raise ValueError("검토할 업무를 찾을 수 없습니다.")
+
+                task_index = tasks.index(task)
+                if not _task_has_dependents(tasks, task_index):
+                    raise ValueError("후속 업무가 연결되지 않은 결과는 이 승인 단계가 필요하지 않습니다.")
+                if task.get("status") != "완료":
+                    raise ValueError("완료된 업무 결과만 검토할 수 있습니다.")
+                result = task.get("result")
+                if not isinstance(result, str) or not result.strip():
+                    raise ValueError("결과가 비어 있어 검토할 수 없습니다.")
+                if not task_has_successful_result(project, task):
+                    raise ValueError("실행에 성공해 저장된 결과만 검토할 수 있습니다. 작업을 다시 실행해 주세요.")
+                if task_requires_review(task):
+                    raise ValueError("선행 결과가 바뀌어 업무를 다시 실행해야 검토할 수 있습니다.")
+                _validate_task_predecessors(task, tasks, task_index)
+
+                review_status = task_review_status(task, has_dependents=True)
+                if decision == "approve":
+                    if review_status == REVIEW_APPROVED:
+                        raise ValueError("이미 승인된 업무 결과입니다.")
+                    if review_status == REVIEW_CHANGES_REQUESTED:
+                        raise ValueError("수정 요청 내용을 반영해 다시 실행한 후 검토해 주세요.")
+                    task["review_status"] = REVIEW_APPROVED
+                    task["reviewed_by"] = "사용자"
+                    task["reviewed_at"] = now()
+                    task.pop("review_feedback", None)
+                    event = "task_review_approved"
+                    details = f"{task_id}: 업무 결과 검토 승인"
+                elif decision == "request_changes":
+                    feedback = form.get("feedback", "").strip()
+                    if not feedback:
+                        raise ValueError("수정 요청 내용을 입력해 주세요.")
+                    task["review_status"] = REVIEW_CHANGES_REQUESTED
+                    task["review_feedback"] = feedback
+                    task["reviewed_by"] = "사용자"
+                    task["reviewed_at"] = now()
+                    mark_downstream_for_review(
+                        project,
+                        task_index,
+                        f"선행 업무 {task.get('name', task_id)}에 수정 요청이 등록됨",
+                    )
+                    event = "task_review_changes_requested"
+                    details = f"{task_id}: 업무 결과 수정 요청"
+                else:
+                    raise ValueError("검토 결정 값이 올바르지 않습니다.")
+
+                task["updated_at"] = now()
+                project.setdefault("history", []).append({
+                    "at": now(),
+                    "event": event,
+                    "details": details,
+                })
+                save_project(project)
+                self.redirect(f"/project/{project_id}#task-{task_id}")
+
             elif parsed.path == "/task/execute":
                 project_id = form.get("id", "")
                 task_id = form.get("task_id", "")
@@ -576,29 +800,22 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("실행할 작업을 찾을 수 없습니다.")
 
                 task_index = tasks.index(task)
-                if task.get("status") == "완료" and not task.get("review_required"):
+                has_dependents = _task_has_dependents(tasks, task_index)
+                current_review_status = task_review_status(
+                    task,
+                    has_dependents=has_dependents,
+                )
+                if (
+                    task.get("status") == "완료"
+                    and not task.get("review_required")
+                    and current_review_status != REVIEW_CHANGES_REQUESTED
+                    and task_has_successful_result(project, task)
+                ):
                     raise ValueError(
                         "이미 완료된 작업입니다. 재실행하려면 먼저 '진행 중'으로 변경해 주세요."
                     )
 
-                input_task_ids = _resolve_input_task_ids(task, tasks, task_index)
-                previous_tasks_by_id = {
-                    item.get("id"): item for item in tasks[:task_index]
-                }
-                for input_task_id in input_task_ids:
-                    previous_task = previous_tasks_by_id[input_task_id]
-                    if previous_task.get("status") != "완료" or task_requires_review(previous_task):
-                        raise ValueError(
-                            f"필수 선행 업무 '{previous_task.get('name', input_task_id)}'가 "
-                            f"완료되지 않았습니다 (현재 상태: {previous_task.get('status', '대기')}). "
-                            "앞선 작업을 먼저 완료해 주세요."
-                        )
-                    previous_result = previous_task.get("result")
-                    if not isinstance(previous_result, str) or not previous_result.strip():
-                        raise ValueError(
-                            f"필수 선행 업무 '{previous_task.get('name', input_task_id)}'의 "
-                            "결과가 비어 있어 실행을 중단했습니다."
-                        )
+                input_task_ids = _validate_task_predecessors(task, tasks, task_index)
 
                 unfinished = [
                     t for t in tasks[:task_index]
@@ -615,12 +832,26 @@ class Handler(BaseHTTPRequestHandler):
                     )
 
                 old_status = task.get("status", "대기")
+                old_result = task.get("result", "")
+                review_feedback = (
+                    task.get("review_feedback", "")
+                    if current_review_status == REVIEW_CHANGES_REQUESTED
+                    else ""
+                )
+                _reset_review_approval(task, has_dependents)
                 task["status"] = "진행 중"
                 task["updated_at"] = now()
 
                 previous_results = _build_previous_results(
                     task, tasks, task_index, input_task_ids
                 )
+                if review_feedback:
+                    previous_results.append({
+                        "task_id": task_id,
+                        "input_name": "검토 수정 요청",
+                        "task_name": "사용자 검토자",
+                        "result": review_feedback,
+                    })
 
                 try:
                     result = execute_task(
@@ -636,7 +867,18 @@ class Handler(BaseHTTPRequestHandler):
                     task["status"] = "완료"
                     task["review_required"] = False
                     task.pop("review_reason", None)
+                    task["review_status"] = REVIEW_PENDING if has_dependents else REVIEW_NOT_REQUIRED
+                    task.pop("review_feedback", None)
+                    task.pop("reviewed_at", None)
+                    task.pop("reviewed_by", None)
                     task["updated_at"] = now()
+
+                    if old_result != result:
+                        mark_downstream_for_review(
+                            project,
+                            task_index,
+                            f"선행 업무 {task.get('name', task_id)} 결과가 다시 생성됨",
+                        )
 
                     project.setdefault("history", []).append({
                         "at": now(),
@@ -645,6 +887,11 @@ class Handler(BaseHTTPRequestHandler):
                     })
                 except Exception as exc:
                     task["status"] = "실행 실패"
+                    task["review_status"] = (
+                        REVIEW_CHANGES_REQUESTED
+                        if has_dependents and review_feedback
+                        else REVIEW_PENDING if has_dependents else REVIEW_NOT_REQUIRED
+                    )
                     task["updated_at"] = now()
                     project.setdefault("history", []).append({
                         "at": now(),
@@ -735,6 +982,7 @@ class Handler(BaseHTTPRequestHandler):
             f"""<li id="task-{esc(task.get('id', ''))}">
 <strong>{esc(task.get('name', ''))}</strong> — 담당: {esc(task.get('role', ''))}<br>
 {f"<p><strong>⚠ 재검토 필요:</strong> {esc(task.get('review_reason', '선행 작업이 변경되었습니다.'))}</p>" if task_requires_review(task) else ""}
+{task_review_controls(p, task_index)}
 결과물 설명: {esc(task.get('output', ''))}<br>
 
 <form method='post' action='/task/update' data-processing-form data-processing-label='저장 중...'>
@@ -755,10 +1003,10 @@ class Handler(BaseHTTPRequestHandler):
 <form method='post' action='/task/execute' data-processing-form data-processing-label='실행 중...'>
 <input type='hidden' name='id' value='{esc(p['id'])}'>
 <input type='hidden' name='task_id' value='{esc(task.get('id', ''))}'>
-<button type='submit'>작업 실행</button><p class='muted' data-processing-status aria-live='polite' hidden></p>
+<button type='submit'>{'수정 반영 후 다시 실행' if task.get('review_status') == REVIEW_CHANGES_REQUESTED else '작업 실행'}</button><p class='muted' data-processing-status aria-live='polite' hidden></p>
 </form>
 </li>"""
-            for task in tasks
+            for task_index, task in enumerate(tasks)
         )
         task_section = (
             f"<h3>생성된 작업 목록 ({len(tasks)}개)</h3><ol>{task_rows}</ol>"
@@ -807,6 +1055,8 @@ class Handler(BaseHTTPRequestHandler):
             "plan_changes_requested": "계획 수정 요청",
             "task_execution_succeeded": "작업 실행 성공",
             "task_execution_failed": "작업 실행 실패",
+            "task_review_approved": "업무 결과 검토 승인",
+            "task_review_changes_requested": "업무 결과 수정 요청",
             "downstream_review_required": "후속 작업 재검토 필요",
             "project_created": "프로젝트 생성",
             "plan_created": "작업 계획 작성",

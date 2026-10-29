@@ -71,7 +71,7 @@ class CompanyWorkflowEndToEndTests(unittest.TestCase):
                 "요구사항 정리", "작업 초안 작성", "검토 및 수정", "최종 보고",
             ])
 
-            for task in approved["tasks"]:
+            for task_index, task in enumerate(approved["tasks"]):
                 redirect, error = self._post("/task/execute", {"task_id": task["id"]})
                 redirect.assert_called_once()
                 error.assert_not_called()
@@ -79,6 +79,13 @@ class CompanyWorkflowEndToEndTests(unittest.TestCase):
                 completed = next(item for item in saved["tasks"] if item["id"] == task["id"])
                 self.assertEqual(completed["status"], "완료")
                 self.assertTrue(completed["result"])
+                if task_index < len(approved["tasks"]) - 1:
+                    redirect, error = self._post("/task/review", {
+                        "task_id": task["id"],
+                        "decision": "approve",
+                    })
+                    redirect.assert_called_once()
+                    error.assert_not_called()
 
             completed = app.load_project(self.PROJECT_ID)
             quality_review = completed["tasks"][2]["result"]
@@ -102,8 +109,30 @@ class CompanyWorkflowEndToEndTests(unittest.TestCase):
             self.assertEqual(revised["tasks"][2]["status"], "재검토 필요")
             self.assertTrue(revised["tasks"][2]["review_required"])
             self.assertEqual(revised["tasks"][3]["status"], "재검토 필요")
+            self.assertEqual(revised["tasks"][1]["review_status"], "pending")
+
+            # 수동 결과 변경은 기존 성공 기록과 분리되므로 새 실행 후에 승인한다.
+            with patch.object(app, "execute_task", return_value="수정된 할 일 프로그램 초안 v2"):
+                redirect, error = self._post("/task/execute", {"task_id": "TASK-002"})
+            redirect.assert_called_once()
+            error.assert_not_called()
+
+            redirect, error = self._post("/task/review", {
+                "task_id": "TASK-002",
+                "decision": "approve",
+            })
+            redirect.assert_called_once()
+            error.assert_not_called()
 
             redirect, error = self._post("/task/execute", {"task_id": "TASK-003"})
+            redirect.assert_called_once()
+            error.assert_not_called()
+            rerun_review = app.load_project(self.PROJECT_ID)
+            self.assertEqual(rerun_review["tasks"][2]["review_status"], "pending")
+            redirect, error = self._post("/task/review", {
+                "task_id": "TASK-003",
+                "decision": "approve",
+            })
             redirect.assert_called_once()
             error.assert_not_called()
             redirect, error = self._post("/task/execute", {"task_id": "TASK-004"})

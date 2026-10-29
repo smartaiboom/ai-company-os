@@ -1,6 +1,6 @@
 # 다음 작업: AI 직원 업무 검토 승인 게이트
 
-**상태:** 준비됨. 이 파일은 작업 지시이며, 사용자의 별도 실행 요청 전에는 개발을 시작하지 않는다.
+**상태:** 완료 — 2026-10-29 구현 및 검증 완료. 상세 내용은 [`review_approval_gate_report.md`](../reports/review_approval_gate_report.md)를 참조한다.
 
 ## 목표
 

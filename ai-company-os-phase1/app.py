@@ -455,11 +455,19 @@ class Handler(BaseHTTPRequestHandler):
                     })
                 except Exception as exc:
                     task["status"] = "진행 중"
+                    task["updated_at"] = now()
                     project.setdefault("history", []).append({
                         "at": now(),
                         "event": "task_execution_failed",
                         "details": f"{task_id}: 실행 실패 — {exc}"
                     })
+                    if old_status != task["status"]:
+                        project.setdefault("history", []).append({
+                            "at": now(),
+                            "event": "task_status_changed",
+                            "details": f"{task_id}: {old_status} -> {task['status']}"
+                        })
+                    save_project(project)
                     raise
 
                 if old_status != task["status"]:

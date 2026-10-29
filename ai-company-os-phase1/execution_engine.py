@@ -7,6 +7,18 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 
+OPENROUTER_FREE_MODEL = "openrouter/free"
+
+
+def validate_openrouter_free_model(model):
+    """Require the configured free model before any real API request."""
+    if model != OPENROUTER_FREE_MODEL:
+        raise ValueError(
+            "무료 모델 보호: 실제 API 요청에는 AI_MODEL을 "
+            f"'{OPENROUTER_FREE_MODEL}'로 설정해야 합니다. 요청을 중단했습니다."
+        )
+
+
 class ExecutionEngine(ABC):
     """모든 작업 실행 엔진이 따라야 하는 공통 인터페이스."""
 
@@ -191,16 +203,14 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
     def __init__(self, base_url=None, api_key=None, model=None, timeout=None):
         self.base_url = (base_url or os.getenv("AI_API_BASE_URL", "")).rstrip("/")
         self.api_key = api_key if api_key is not None else os.getenv("AI_API_KEY", "")
-        self.model = model or os.getenv("AI_MODEL", "")
+        self.model = model if model is not None else os.getenv("AI_MODEL", "")
         self.timeout = timeout or int(os.getenv("AI_API_TIMEOUT", "90"))
+
+        validate_openrouter_free_model(self.model)
 
         if not self.base_url:
             raise ValueError(
                 "실제 AI 엔진을 사용하려면 AI_API_BASE_URL 환경변수를 설정해야 합니다."
-            )
-        if not self.model:
-            raise ValueError(
-                "실제 AI 엔진을 사용하려면 AI_MODEL 환경변수를 설정해야 합니다."
             )
 
     def execute(self, project, task, previous_results=None):

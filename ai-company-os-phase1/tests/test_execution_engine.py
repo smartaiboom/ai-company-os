@@ -195,6 +195,44 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertNotIn("reasoning", payload)
         self.assertNotIn("chat_template_kwargs", payload)
 
+    def test_api_result_notice_is_not_duplicated_when_model_already_includes_it(self):
+        import json
+        import os
+        from unittest.mock import patch
+        from execution_engine import AI_RESULT_NOTICE, execute_task
+
+        model_result = f"업무 본문은 그대로 보존합니다.\n\n{AI_RESULT_NOTICE}"
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return json.dumps({
+                    "choices": [{
+                        "finish_reason": "stop",
+                        "message": {"content": model_result},
+                    }]
+                }).encode("utf-8")
+
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_MODEL": "openrouter/free",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("execution_engine.urlopen", return_value=FakeResponse()):
+                result = execute_task(
+                    {"goal": "테스트 목표"},
+                    {"name": "테스트 업무"},
+                )
+
+        self.assertIn("업무 본문은 그대로 보존합니다.", result)
+        self.assertEqual(result.count(AI_RESULT_NOTICE), 1)
+
     def test_safety_verdict_only_response_is_rejected_without_model_change_advice(self):
         import os
         from unittest.mock import patch

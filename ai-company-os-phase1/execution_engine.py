@@ -11,7 +11,21 @@ from urllib.request import Request, urlopen
 
 OPENROUTER_FREE_MODEL = "openrouter/free"
 MAX_RESPONSE_TOKENS = 4096
+AI_RESULT_NOTICE = (
+    "참고: AI가 생성한 결과이며, 사실 확인이나 외부 검증이 자동으로 "
+    "완료되었다는 의미는 아닙니다."
+)
 logger = logging.getLogger(__name__)
+
+
+def _append_result_notice_once(content):
+    """Keep the generated body intact and add one trailing notice."""
+    result_body = content.strip()
+    while result_body.endswith(AI_RESULT_NOTICE):
+        result_body = result_body[:-len(AI_RESULT_NOTICE)].rstrip()
+    if result_body:
+        return f"{result_body}\n\n{AI_RESULT_NOTICE}"
+    return AI_RESULT_NOTICE
 
 
 def _log_response_diagnostics(
@@ -456,9 +470,7 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             f"작업명: {task_name}\n"
             f"담당 역할: {role}\n"
             f"사용 모델: {self.model}\n\n"
-            f"{content.strip()}\n\n"
-            "참고: AI가 생성한 결과이며, 사실 확인이나 외부 검증이 자동으로 "
-            "완료되었다는 의미는 아닙니다."
+            f"{_append_result_notice_once(content)}"
         )
 
 

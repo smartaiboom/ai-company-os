@@ -34,4 +34,11 @@
 - `tests/test_manager_plan.py`
 - `reports/manager_plan_failure_analysis.md`
 
-검증이 통과해 위 관련 파일만 커밋·푸시하고 main에 통합한다. 다른 작업 트리 변경은 포함하지 않는다.
+## 게시 및 main 통합 결과
+
+- 보고서 전용 브랜치: `reports/manager-plan-test-20261029`
+- 해당 브랜치의 코드·테스트·분석 보고서 커밋: `bb137c9` (전체 ID는 작업 완료 응답에 표시)
+- main 통합 방식: 위 변경 커밋만 선택 적용(cherry-pick)했다. 이전 보고서 브랜치의 다른 커밋은 main에 포함하지 않았다.
+- main 통합 커밋: `a53bfdc` (전체 ID는 작업 완료 응답에 표시)
+- main에서 전체 26개 유닛 테스트가 다시 통과한 뒤 `origin/main`에 푸시했다.
+- 각 커밋은 이 보고서에 적힌 변경 범위만 포함하며 다른 기존 작업 트리 변경은 포함하지 않는다.

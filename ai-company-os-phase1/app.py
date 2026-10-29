@@ -83,6 +83,10 @@ def mark_downstream_for_review(project, task_index, reason):
         })
     return affected
 
+def task_requires_review(task):
+    """Treat the review flag and visible review status as the same UI state."""
+    return bool(task.get("review_required")) or task.get("status") == "재검토 필요"
+
 def esc(value):
     return html.escape(str(value), quote=True)
 
@@ -539,7 +543,7 @@ class Handler(BaseHTTPRequestHandler):
         task_rows = "".join(
             f"""<li id="task-{esc(task.get('id', ''))}">
 <strong>{esc(task.get('name', ''))}</strong> — 담당: {esc(task.get('role', ''))}<br>
-{f"<p><strong>⚠ 재검토 필요:</strong> {esc(task.get('review_reason', '선행 작업이 변경되었습니다.'))}</p>" if task.get('review_required') else ""}
+{f"<p><strong>⚠ 재검토 필요:</strong> {esc(task.get('review_reason', '선행 작업이 변경되었습니다.'))}</p>" if task_requires_review(task) else ""}
 결과물 설명: {esc(task.get('output', ''))}<br>
 
 <form method='post' action='/task/update'>
@@ -589,16 +593,16 @@ class Handler(BaseHTTPRequestHandler):
         tasks = p.get("tasks", [])
         total_tasks = len(tasks)
         completed_tasks = sum(
-            1 for task in tasks if task.get("status") == "완료" and not task.get("review_required")
+            1 for task in tasks if task.get("status") == "완료" and not task_requires_review(task)
         )
         review_tasks = sum(
-            1 for task in tasks if task.get("status") == "재검토 필요"
+            1 for task in tasks if task_requires_review(task)
         )
         in_progress_tasks = sum(
-            1 for task in tasks if task.get("status") == "진행 중"
+            1 for task in tasks if task.get("status") == "진행 중" and not task_requires_review(task)
         )
         waiting_tasks = sum(
-            1 for task in tasks if task.get("status", "대기") == "대기"
+            1 for task in tasks if task.get("status", "대기") == "대기" and not task_requires_review(task)
         )
         task_progress = (
             round(completed_tasks / total_tasks * 100)
@@ -672,16 +676,18 @@ class Handler(BaseHTTPRequestHandler):
 
         tasks = p.get("tasks", [])
         total_tasks = len(tasks)
-        completed_tasks = sum(1 for task in tasks if task.get("status") == "완료" and not task.get("review_required"))
-        review_tasks = sum(1 for task in tasks if task.get("status") == "재검토 필요")
-        in_progress_tasks = sum(1 for task in tasks if task.get("status") == "진행 중")
-        waiting_tasks = sum(1 for task in tasks if task.get("status", "대기") == "대기")
+        completed_tasks = sum(1 for task in tasks if task.get("status") == "완료" and not task_requires_review(task))
+        review_tasks = sum(1 for task in tasks if task_requires_review(task))
+        in_progress_tasks = sum(1 for task in tasks if task.get("status") == "진행 중" and not task_requires_review(task))
+        waiting_tasks = sum(1 for task in tasks if task.get("status", "대기") == "대기" and not task_requires_review(task))
         progress = round(completed_tasks / total_tasks * 100) if total_tasks else 0
 
         
         task_rows = "".join(
             f"<li><strong>{esc(task.get('name', ''))}</strong> — "
-            f"상태: {esc(task.get('status', '대기'))}<br>"
+            f"상태: {esc(task.get('status', '대기'))}"
+            f"{' · 재검토 필요' if task_requires_review(task) and task.get('status') != '재검토 필요' else ''}<br>"
+            f"{f'<p><strong>⚠ 재검토 필요:</strong> {esc(task.get("review_reason", "선행 작업이 변경되었습니다."))}</p>' if task_requires_review(task) else ''}"
             f"담당: {esc(task.get('role', '미지정'))}<br>"
             f"결과물 설명: {esc(task.get('output', '미등록'))}<br>"
             f"실제 작업 결과:<br>"

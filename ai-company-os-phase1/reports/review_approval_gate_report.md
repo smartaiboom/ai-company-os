@@ -13,6 +13,7 @@
 - `tests/test_company_workflow_e2e.py`, `tests/test_explicit_workflow_links.py`, `tests/test_quality_review_flow.py`: 기존 업무 연결과 종단 간 흐름에 승인·재검토 단계를 반영했다.
 - `tests/test_project_ui.py`: 구형 연결 결과에 검토 상태 및 승인/수정 요청 수단이 표시되는지 확인한다.
 - `codex_tasks/next_step.md`: 이 지시의 상태를 완료로 갱신했다.
+- `codex_tasks/task_history.md`: 완료 사실, 검증 결과, 보고서와 구현 커밋을 작업 이력에 추가했다.
 - `reports/review_approval_gate_report.md`: 변경·검증 내역을 기록하고 생성 후 다시 읽어 확인했다.
 
 기존 프로젝트 JSON은 일괄 변경하지 않았다. 모든 신규 기능 테스트는 임시 프로젝트 폴더와 모의 실행기를 사용했다. 실제 AI API는 호출하지 않았다.

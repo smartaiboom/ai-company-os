@@ -30,7 +30,14 @@ class ProjectUITests(unittest.TestCase):
             "name": "계획 표시 테스트",
             "goal": "할 일 관리 도구 기획",
             "status": "active",
-            "tasks": [],
+            "tasks": [{
+                "id": "TASK-001",
+                "name": "초안 작성",
+                "role": "작성 담당",
+                "inputs": [],
+                "output": "초안",
+                "status": "대기",
+            }],
             "history": [],
             "plan": {
                 "status": "pending_approval",
@@ -54,6 +61,29 @@ class ProjectUITests(unittest.TestCase):
         self.assertIn("성공 기준", html)
         self.assertIn("action='/manager/approve'", html)
         self.assertIn("계획 승인", html)
+        self.assertIn("action='/task/update' data-processing-form", html)
+        self.assertIn("action='/task/execute' data-processing-form", html)
+        self.assertIn("action='/manager/reject' data-processing-form", html)
+        self.assertIn("action='/manager/approve' data-processing-form", html)
+        self.assertIn('action="/update" data-processing-form', html)
+        self.assertIn('action="/manager/plan" data-processing-form', html)
+        self.assertIn('data-processing-label=\'실행 중...\'', html)
+        self.assertIn("data-processing-status aria-live='polite' hidden", html)
+
+    def test_project_creation_form_shows_processing_and_restores_on_error(self):
+        handler = app.Handler.__new__(app.Handler)
+        with patch.object(app, "load_projects", return_value=[]):
+            with patch.object(app.Handler, "send_html", autospec=True) as send_html:
+                app.Handler.home(handler)
+        html = send_html.call_args.args[1]
+
+        self.assertIn('action="/create" data-processing-form', html)
+        self.assertIn('data-processing-label="처리 중..."', html)
+        self.assertIn('form.dataset.processing === "true"', html)
+        self.assertIn("button.disabled = true", html)
+        self.assertIn("button.disabled = originalDisabled", html)
+        self.assertIn("status.textContent = message", html)
+        self.assertIn("window.location.assign(response.url)", html)
 
     def test_review_required_state_is_counted_and_shown_in_final_report(self):
         project = {

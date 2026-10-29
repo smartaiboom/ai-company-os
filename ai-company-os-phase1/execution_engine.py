@@ -10,10 +10,17 @@ from urllib.request import Request, urlopen
 
 
 OPENROUTER_FREE_MODEL = "openrouter/free"
+MAX_RESPONSE_TOKENS = 4096
 logger = logging.getLogger(__name__)
 
 
-def _log_response_diagnostics(choice, message, content, safety_verdict="none"):
+def _log_response_diagnostics(
+    choice,
+    message,
+    content,
+    safety_verdict="none",
+    usage=None,
+):
     """Log bounded response metadata only; never log prompts or response text."""
     raw_finish_reason = (
         choice.get("finish_reason") if isinstance(choice, dict) else None
@@ -44,14 +51,28 @@ def _log_response_diagnostics(choice, message, content, safety_verdict="none"):
 
     content_length = len(content) if isinstance(content, str) else 0
     content_empty = not isinstance(content, str) or not content.strip()
+    usage = usage if isinstance(usage, dict) else {}
+    token_counts = {}
+    for name in ("prompt_tokens", "completion_tokens", "total_tokens"):
+        value = usage.get(name)
+        token_counts[name] = (
+            value
+            if isinstance(value, int) and not isinstance(value, bool) and value >= 0
+            else "missing"
+        )
     logger.warning(
         "AI API 응답 진단: finish_reason=%s message_fields=%s "
-        "content_length=%d content_empty=%s safety_verdict=%s",
+        "content_length=%d content_empty=%s safety_verdict=%s "
+        "request_max_tokens=%d prompt_tokens=%s completion_tokens=%s total_tokens=%s",
         finish_reason,
         tuple(safe_fields),
         content_length,
         content_empty,
         safety_verdict,
+        MAX_RESPONSE_TOKENS,
+        token_counts["prompt_tokens"],
+        token_counts["completion_tokens"],
+        token_counts["total_tokens"],
     )
 
 
@@ -323,7 +344,7 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
                 },
             ],
             "temperature": 0.3,
-            "max_tokens": 4096,
+            "max_tokens": MAX_RESPONSE_TOKENS,
         }).encode("utf-8")
 
         headers = {"Content-Type": "application/json"}
@@ -374,7 +395,9 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
                 if isinstance(part, dict) and isinstance(part.get("text"), str)
             )
         if not isinstance(content, str) or not content.strip():
-            _log_response_diagnostics(choice, message, content)
+            _log_response_diagnostics(
+                choice, message, content, usage=response_data.get("usage")
+            )
             raise RuntimeError(
                 "AI API가 작업 결과 내용을 반환하지 않았습니다. "
                 "응답 진단 로그에서 반환 메타데이터를 확인해 주세요."
@@ -404,6 +427,9 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
 
         finish_reason = choice.get("finish_reason") if isinstance(choice, dict) else None
         if finish_reason == "length":
+            _log_response_diagnostics(
+                choice, message, content, usage=response_data.get("usage")
+            )
             raise RuntimeError(
                 "AI가 결과물을 끝까지 작성하지 못해 응답이 중간에 끊겼습니다. "
                 "미완성 결과는 사용하지 말고 작업을 다시 실행해 주세요."
@@ -413,7 +439,11 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
         if normalized_content in {"user safety: safe", "safe", "user safety: unsafe"}:
             safety_verdict = "unsafe" if normalized_content.endswith("unsafe") else "safe"
             _log_response_diagnostics(
-                choice, message, content, safety_verdict=safety_verdict
+                choice,
+                message,
+                content,
+                safety_verdict=safety_verdict,
+                usage=response_data.get("usage"),
             )
             raise RuntimeError(
                 "AI API가 업무 결과 대신 안전성 판정 문구만 반환했습니다. "

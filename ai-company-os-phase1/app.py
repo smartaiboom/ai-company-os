@@ -16,6 +16,68 @@ ARTIFACTS_DIR = DATA_DIR / "artifacts"
 HOST = os.environ.get("AI_COMPANY_OS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AI_COMPANY_OS_PORT", "8000"))
 VALID_STATUSES = {"active", "paused", "completed"}
+PROCESSING_SCRIPT = """<script>
+document.addEventListener("DOMContentLoaded", () => {
+  document.querySelectorAll("form[data-processing-form]").forEach((form) => {
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      if (form.dataset.processing === "true") return;
+
+      const button = event.submitter || form.querySelector("button[type='submit']");
+      const status = form.querySelector("[data-processing-status]");
+      if (!button || !status) return;
+
+      const originalLabel = button.textContent;
+      const originalDisabled = button.disabled;
+      let redirecting = false;
+      let message = "";
+      form.dataset.processing = "true";
+      form.setAttribute("aria-busy", "true");
+      button.disabled = true;
+      button.textContent = form.dataset.processingLabel || "처리 중...";
+      status.hidden = true;
+      status.textContent = "";
+
+      try {
+        const body = new URLSearchParams();
+        new FormData(form).forEach((value, key) => {
+          if (typeof value === "string") body.append(key, value);
+        });
+        const response = await fetch(form.action, {
+          method: form.method || "POST",
+          body,
+          credentials: "same-origin",
+        });
+        if (response.redirected) {
+          redirecting = true;
+          window.location.assign(response.url);
+          return;
+        }
+
+        message = "서버 응답을 확인하지 못했습니다. 다시 시도해 주세요.";
+        if (!response.ok) {
+          const responseText = await response.text();
+          const errorPage = new DOMParser().parseFromString(responseText, "text/html");
+          const errorText = errorPage.querySelector("body p")?.textContent?.trim();
+          if (errorText) message = errorText;
+        }
+      } catch (_) {
+        redirecting = false;
+        message = "연결 문제로 요청을 완료하지 못했습니다. 다시 시도해 주세요.";
+      } finally {
+        if (!redirecting) {
+          form.dataset.processing = "false";
+          form.removeAttribute("aria-busy");
+          button.disabled = originalDisabled;
+          button.textContent = originalLabel;
+          status.textContent = message;
+          status.hidden = !message;
+        }
+      }
+    });
+  });
+});
+</script>"""
 
 for folder in (PROJECTS_DIR, ARTIFACTS_DIR):
     folder.mkdir(parents=True, exist_ok=True)
@@ -104,7 +166,7 @@ label {{ display:block; font-weight:600; margin: 10px 0 4px; }}
 input, textarea, select {{ box-sizing:border-box; width:100%; padding:10px; border:1px solid #aaa; border-radius:8px; font:inherit; }}
 button, .button {{ display:inline-block; background:#1f2937; color:white; border:0; border-radius:8px; padding:10px 14px; font:inherit; text-decoration:none; cursor:pointer; margin-top:10px; }}
 .muted {{ color:#666; font-size:.92rem; }} .status {{ font-weight:600; }}
-</style></head><body><h1><a href="/" style="color:inherit;text-decoration:none">AI Company OS</a></h1>{body}</body></html>"""
+</style></head><body><h1><a href="/" style="color:inherit;text-decoration:none">AI Company OS</a></h1>{body}{PROCESSING_SCRIPT}</body></html>"""
 
 class Handler(BaseHTTPRequestHandler):
     def log_message(self, fmt, *args):
@@ -516,10 +578,10 @@ class Handler(BaseHTTPRequestHandler):
         if not cards:
             cards = '<p class="muted">아직 프로젝트가 없습니다. 아래에서 첫 프로젝트를 만들어 보세요.</p>'
         body = f"""<p>프로젝트를 만들고 저장된 작업 상태를 관리하는 1단계 기본 버전입니다.</p>
-<section class="card"><h2>새 프로젝트</h2><form method="post" action="/create">
+<section class="card"><h2>새 프로젝트</h2><form method="post" action="/create" data-processing-form data-processing-label="처리 중...">
 <label for="name">프로젝트 이름</label><input id="name" name="name" required maxlength="120" placeholder="예: 신규 서비스 조사">
 <label for="goal">목표 (선택)</label><textarea id="goal" name="goal" rows="3" maxlength="4000" placeholder="무엇을 이루고 싶은지 자유롭게 적어 주세요."></textarea>
-<button type="submit">프로젝트 만들기</button></form></section>
+<button type="submit">프로젝트 만들기</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form></section>
 <h2>프로젝트 목록 ({len(projects)})</h2>{cards}
 <p class="muted">Phase 1 · 로컬 JSON 저장 · API 호출 없음</p>"""
         self.send_html(page("프로젝트 목록", body))
@@ -546,7 +608,7 @@ class Handler(BaseHTTPRequestHandler):
 {f"<p><strong>⚠ 재검토 필요:</strong> {esc(task.get('review_reason', '선행 작업이 변경되었습니다.'))}</p>" if task_requires_review(task) else ""}
 결과물 설명: {esc(task.get('output', ''))}<br>
 
-<form method='post' action='/task/update'>
+<form method='post' action='/task/update' data-processing-form data-processing-label='저장 중...'>
 <input type='hidden' name='id' value='{esc(p['id'])}'>
 <input type='hidden' name='task_id' value='{esc(task.get('id', ''))}'>
 
@@ -559,12 +621,12 @@ class Handler(BaseHTTPRequestHandler):
 {''.join(f"<option value='{s}' {'selected' if task.get('status', '대기') == s else ''}>{s}</option>" for s in ('대기', '진행 중', '재검토 필요', '완료'))}
 </select>
 </label>
-<button type='submit'>상태 저장</button>
+<button type='submit'>상태 저장</button><p class='muted' data-processing-status aria-live='polite' hidden></p>
 </form>
-<form method='post' action='/task/execute'>
+<form method='post' action='/task/execute' data-processing-form data-processing-label='실행 중...'>
 <input type='hidden' name='id' value='{esc(p['id'])}'>
 <input type='hidden' name='task_id' value='{esc(task.get('id', ''))}'>
-<button type='submit'>작업 실행</button>
+<button type='submit'>작업 실행</button><p class='muted' data-processing-status aria-live='polite' hidden></p>
 </form>
 </li>"""
             for task in tasks
@@ -576,8 +638,8 @@ class Handler(BaseHTTPRequestHandler):
 
         actions = ""
         if status in ("pending_approval", "changes_requested"):
-            actions = f"""<form method='post' action='/manager/reject'><input type='hidden' name='id' value='{esc(p['id'])}'><label for='feedback'>계획 수정 요청 내용 (선택)</label><textarea id='feedback' name='feedback' rows='3' placeholder='추가하거나 변경할 내용을 입력하세요.'></textarea><button type='submit'>수정 요청</button></form>
-<form method='post' action='/manager/approve'><input type='hidden' name='id' value='{esc(p['id'])}'><button type='submit'>계획 승인</button></form>"""
+            actions = f"""<form method='post' action='/manager/reject' data-processing-form data-processing-label='처리 중...'><input type='hidden' name='id' value='{esc(p['id'])}'><label for='feedback'>계획 수정 요청 내용 (선택)</label><textarea id='feedback' name='feedback' rows='3' placeholder='추가하거나 변경할 내용을 입력하세요.'></textarea><button type='submit'>수정 요청</button><p class='muted' data-processing-status aria-live='polite' hidden></p></form>
+<form method='post' action='/manager/approve' data-processing-form data-processing-label='처리 중...'><input type='hidden' name='id' value='{esc(p['id'])}'><button type='submit'>계획 승인</button><p class='muted' data-processing-status aria-live='polite' hidden></p></form>"""
         return f"""<hr><h3>계획 상태: {esc(status_labels.get(status, status))}</h3>
 <p><strong>목표:</strong> {esc(plan.get('goal',''))}</p><p><strong>예상 비용:</strong> {esc(plan.get('cost_note',''))}</p>
 <h3>관리자가 확인할 질문</h3><ul>{questions}</ul><h3>현재 가정</h3><ul>{assumptions}</ul><h3>작업 단계</h3><ol>{stages}</ol>{task_section}{feedback}{actions}"""
@@ -644,19 +706,19 @@ class Handler(BaseHTTPRequestHandler):
 
 <p><strong>생성일:</strong> {esc(p.get('created_at',''))}</p>
 <p><strong>최근 수정:</strong> {esc(p.get('updated_at',''))}</p></section>
-<section class="card"><h2>프로젝트 정보</h2><form method="post" action="/update">
+<section class="card"><h2>프로젝트 정보</h2><form method="post" action="/update" data-processing-form data-processing-label="저장 중...">
 <input type="hidden" name="id" value="{esc(p['id'])}">
 <label for="goal">목표</label><textarea id="goal" name="goal" rows="4" maxlength="4000">{esc(p.get('goal',''))}</textarea>
 <label for="status">상태</label><select id="status" name="status">
 <option value="active" {"selected" if p.get("status")=="active" else ""}>진행 중</option>
 <option value="paused" {"selected" if p.get("status")=="paused" else ""}>일시 중지</option>
 <option value="completed" {"selected" if p.get("status")=="completed" else ""}>완료</option>
-</select><button type="submit">저장</button></form></section>
+</select><button type="submit">저장</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form></section>
 <section class="card"><h2>AI 관리자 · 작업 계획 (2단계 모의 기능)</h2>
 <p class="muted">현재는 모의 관리자입니다. 외부 AI API를 호출하지 않습니다. 계획을 작성한 뒤 사용자가 승인해야 다음 단계로 진행합니다.</p>
-<form method="post" action="/manager/plan"><input type="hidden" name="id" value="{esc(p['id'])}">
+<form method="post" action="/manager/plan" data-processing-form data-processing-label="작성 중..."><input type="hidden" name="id" value="{esc(p['id'])}">
 <label for="manager_goal">하고 싶은 일 / 목표</label><textarea id="manager_goal" name="manager_goal" rows="4" maxlength="4000" placeholder="원하는 일을 자연어로 입력해 주세요.">{esc(p.get('manager_goal', p.get('goal','')))}</textarea>
-<button type="submit">관리자 계획 작성</button></form>
+<button type="submit">관리자 계획 작성</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form>
 {self.render_plan(p)}
 </section>
 <section class="card"><h2>결과물 보관 폴더</h2><p class="muted">프로젝트별 결과물은 이 폴더에 보관하도록 준비되어 있습니다.</p><code>data/artifacts/{esc(p['id'])}/</code></section>

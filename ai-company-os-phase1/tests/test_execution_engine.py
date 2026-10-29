@@ -282,6 +282,50 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertIn("content_empty=True", log_message)
         self.assertNotIn("PRIVATE_PROMPT_SENTINEL", log_message)
 
+    def test_length_finish_reason_is_rejected_and_logs_token_limits(self):
+        import json
+        import os
+        from unittest.mock import patch
+        from execution_engine import MAX_RESPONSE_TOKENS, execute_task
+
+        class FakeResponse:
+            def __enter__(self):
+                return self
+
+            def __exit__(self, exc_type, exc_value, traceback):
+                return False
+
+            def read(self):
+                return (
+                    b'{"choices":[{"finish_reason":"length","message":'
+                    b'{"role":"assistant","content":"PARTIAL_RESPONSE_SENTINEL"}}],'
+                    b'"usage":{"prompt_tokens":120,"completion_tokens":4096,'
+                    b'"total_tokens":4216}}'
+                )
+
+        env = {
+            "AI_ENGINE": "openai_compatible",
+            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_MODEL": "openrouter/free",
+        }
+        with patch.dict(os.environ, env, clear=True):
+            with patch("execution_engine.urlopen", return_value=FakeResponse()) as mocked_urlopen:
+                with self.assertLogs("execution_engine", level="WARNING") as diagnostics:
+                    with self.assertRaisesRegex(RuntimeError, "응답이 중간에 끊겼습니다"):
+                        execute_task({"goal": "테스트 목표"}, {"name": "테스트 업무"})
+
+        request = mocked_urlopen.call_args.args[0]
+        request_payload = json.loads(request.data.decode("utf-8"))
+        self.assertEqual(request_payload["max_tokens"], MAX_RESPONSE_TOKENS)
+        self.assertEqual(MAX_RESPONSE_TOKENS, 4096)
+        log_message = " ".join(diagnostics.output)
+        self.assertIn("finish_reason=length", log_message)
+        self.assertIn("request_max_tokens=4096", log_message)
+        self.assertIn("prompt_tokens=120", log_message)
+        self.assertIn("completion_tokens=4096", log_message)
+        self.assertIn("total_tokens=4216", log_message)
+        self.assertNotIn("PARTIAL_RESPONSE_SENTINEL", log_message)
+
     def test_non_free_model_is_rejected_before_api_request(self):
         from unittest.mock import patch
         from execution_engine import execute_task

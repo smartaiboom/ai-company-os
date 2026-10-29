@@ -207,6 +207,94 @@ def task_requires_review(task):
     """Treat the review flag and visible review status as the same UI state."""
     return bool(task.get("review_required")) or task.get("status") == "재검토 필요"
 
+def _task_matches_input(input_name, task):
+    """Legacy plan labels are resolved once into explicit task IDs."""
+    task_name = task.get("name", "")
+    output = task.get("output", "")
+    return bool(input_name) and (
+        input_name == task_name
+        or input_name == output
+        or input_name in task_name
+        or input_name in output
+        or task_name in input_name
+        or output in input_name
+    )
+
+def _resolve_input_task_ids(task, tasks, task_index):
+    """Return only earlier task IDs required by this task, with legacy fallback."""
+    previous_tasks = tasks[:task_index]
+    if "input_task_ids" in task:
+        raw_ids = task.get("input_task_ids")
+        if not isinstance(raw_ids, list) or not all(
+            isinstance(task_id, str) and task_id.strip() for task_id in raw_ids
+        ):
+            raise ValueError(f"작업 '{task.get('name', '이름 없는 작업')}'의 선행 작업 ID 연결이 올바르지 않습니다.")
+        task_ids = list(dict.fromkeys(task_id.strip() for task_id in raw_ids))
+        previous_ids = {item.get("id") for item in previous_tasks}
+        invalid_ids = [task_id for task_id in task_ids if task_id not in previous_ids]
+        if invalid_ids:
+            raise ValueError(
+                f"작업 '{task.get('name', '이름 없는 작업')}'의 선행 작업 ID를 찾을 수 없습니다: "
+                f"{', '.join(invalid_ids)}"
+            )
+        return task_ids
+
+    task_ids = []
+    for input_name in task.get("inputs", []):
+        matched = [item for item in previous_tasks if _task_matches_input(input_name, item)]
+        if not matched and task.get("name") == "최종 보고":
+            matched = [item for item in previous_tasks if item.get("name") == "검토 및 수정"]
+        for item in matched:
+            task_id = item.get("id")
+            if task_id and task_id not in task_ids:
+                task_ids.append(task_id)
+    return task_ids
+
+def _build_previous_results(task, tasks, task_index, input_task_ids):
+    """Assemble linked result records using explicit IDs as the source of truth."""
+    linked_tasks = [
+        item for item in tasks[:task_index]
+        if item.get("id") in input_task_ids
+    ]
+    previous_results = []
+    for input_name in task.get("inputs", []):
+        matched = [item for item in linked_tasks if _task_matches_input(input_name, item)]
+        if not matched and task.get("name") == "최종 보고":
+            matched = [item for item in linked_tasks if item.get("name") == "검토 및 수정"]
+        for item in matched:
+            previous_results.append((input_name, item))
+
+    linked_ids = {item.get("id") for _, item in previous_results}
+    for item in linked_tasks:
+        if item.get("id") not in linked_ids:
+            previous_results.append((item.get("output", "선행 작업 결과"), item))
+
+    results = []
+    for input_name, item in previous_results:
+        result = item.get("result")
+        lines = result.splitlines()
+        selected_lines = []
+        capture = False
+        for line in lines:
+            if line.strip() == "모의 결과물:":
+                capture = True
+                continue
+            if line.strip() == "연결된 입력 자료와 실제 결과:":
+                capture = False
+                continue
+            if line.strip() == "현재는 실행 엔진 검증 단계입니다. 실제 AI 처리는 수행하지 않았습니다.":
+                capture = False
+            if capture:
+                selected_lines.append(line)
+        selected_result = "\n".join(selected_lines).strip() or result
+        results.append({
+            "task_id": item.get("id"),
+            "input_name": input_name,
+            "task_name": item.get("name", item.get("id", "이름 없는 작업")),
+            "result": selected_result,
+        })
+    return results
+
 def esc(value):
     return html.escape(str(value), quote=True)
 
@@ -327,8 +415,10 @@ class Handler(BaseHTTPRequestHandler):
                 tasks = project.setdefault("tasks", [])
 
                 if not tasks:
-                    for index, stage in enumerate(plan.get("stages", []), start=1):
-                        tasks.append({
+                    stages = plan.get("stages", [])
+                    new_tasks = []
+                    for index, stage in enumerate(stages, start=1):
+                        task = {
                             "id": f"TASK-{index:03d}",
                             "name": stage.get("name", f"작업 {index}"),
                             "role": stage.get("role", "미지정"),
@@ -338,7 +428,16 @@ class Handler(BaseHTTPRequestHandler):
                             "status": "대기",
                             "created_at": now(),
                             "updated_at": now(),
-                        })
+                        }
+                        if "input_task_ids" in stage:
+                            task["input_task_ids"] = stage["input_task_ids"]
+                        new_tasks.append(task)
+
+                    for index, task in enumerate(new_tasks):
+                        task["input_task_ids"] = _resolve_input_task_ids(
+                            task, new_tasks, index
+                        )
+                    tasks.extend(new_tasks)
 
                     project.setdefault("history", []).append({
                         "at": now(),
@@ -482,6 +581,25 @@ class Handler(BaseHTTPRequestHandler):
                         "이미 완료된 작업입니다. 재실행하려면 먼저 '진행 중'으로 변경해 주세요."
                     )
 
+                input_task_ids = _resolve_input_task_ids(task, tasks, task_index)
+                previous_tasks_by_id = {
+                    item.get("id"): item for item in tasks[:task_index]
+                }
+                for input_task_id in input_task_ids:
+                    previous_task = previous_tasks_by_id[input_task_id]
+                    if previous_task.get("status") != "완료" or task_requires_review(previous_task):
+                        raise ValueError(
+                            f"필수 선행 업무 '{previous_task.get('name', input_task_id)}'가 "
+                            f"완료되지 않았습니다 (현재 상태: {previous_task.get('status', '대기')}). "
+                            "앞선 작업을 먼저 완료해 주세요."
+                        )
+                    previous_result = previous_task.get("result")
+                    if not isinstance(previous_result, str) or not previous_result.strip():
+                        raise ValueError(
+                            f"필수 선행 업무 '{previous_task.get('name', input_task_id)}'의 "
+                            "결과가 비어 있어 실행을 중단했습니다."
+                        )
+
                 unfinished = [
                     t for t in tasks[:task_index]
                     if t.get("status") != "완료" or t.get("review_required")
@@ -500,73 +618,9 @@ class Handler(BaseHTTPRequestHandler):
                 task["status"] = "진행 중"
                 task["updated_at"] = now()
 
-                completed_tasks = [
-                    previous_task
-                    for previous_task in tasks[:task_index]
-                    if previous_task.get("status") == "완료"
-                    and previous_task.get("result")
-                ]
-
-                previous_results = []
-                for input_name in task.get("inputs", []):
-                    matched_tasks = [
-                        previous_task
-                        for previous_task in completed_tasks
-                        if (
-                            input_name == previous_task.get("name", "")
-                            or input_name == previous_task.get("output", "")
-                            or input_name in previous_task.get("name", "")
-                            or input_name in previous_task.get("output", "")
-                            or previous_task.get("name", "") in input_name
-                            or previous_task.get("output", "") in input_name
-                        )
-                    ]
-
-                    if not matched_tasks and task.get("name") == "최종 보고":
-                        matched_tasks = [
-                            previous_task
-                            for previous_task in completed_tasks
-                            if previous_task.get("name") == "검토 및 수정"
-                        ]
-
-                    for previous_task in matched_tasks:
-                        previous_result = previous_task.get("result", "")
-
-                        lines = previous_result.splitlines()
-                        selected_lines = []
-                        capture = False
-
-                        for line in lines:
-                            if line.strip() == "모의 결과물:":
-                                capture = True
-                                continue
-
-                            if line.strip() == "연결된 입력 자료와 실제 결과:":
-                                capture = False
-                                continue
-
-                            if (
-                                line.strip()
-                                == "현재는 실행 엔진 검증 단계입니다. 실제 AI 처리는 수행하지 않았습니다."
-                            ):
-                                capture = False
-
-                            if capture:
-                                selected_lines.append(line)
-
-                        if not selected_lines:
-                            selected_lines = [previous_result]
-
-                        previous_result = "\n".join(selected_lines).strip()
-
-                        previous_results.append({
-                            "input_name": input_name,
-                            "task_name": previous_task.get(
-                                "name",
-                                previous_task.get("id", "이름 없는 작업")
-                            ),
-                            "result": previous_result,
-                        })
+                previous_results = _build_previous_results(
+                    task, tasks, task_index, input_task_ids
+                )
 
                 try:
                     result = execute_task(

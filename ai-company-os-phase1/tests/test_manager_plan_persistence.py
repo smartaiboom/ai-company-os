@@ -74,6 +74,7 @@ class ManagerPlanPersistenceTests(unittest.TestCase):
                 "name": "요구사항 정리",
                 "role": "AI 관리자",
                 "inputs": ["프로젝트 목표"],
+                "input_task_ids": [],
                 "output": "목표와 성공 기준",
                 "risk": "요구사항 추가 확인 필요",
             },
@@ -81,6 +82,7 @@ class ManagerPlanPersistenceTests(unittest.TestCase):
                 "name": "화면 및 기능 기획",
                 "role": "제품 기획 담당",
                 "inputs": ["목표와 성공 기준"],
+                "input_task_ids": ["TASK-001"],
                 "output": "간단한 할 일 관리 프로그램 기획서",
                 "risk": "사용성 확인 필요",
             },
@@ -218,6 +220,7 @@ class ManagerPlanPersistenceTests(unittest.TestCase):
             self.assertEqual(task["output"], stage["output"])
             self.assertEqual(task["risk"], stage["risk"])
             self.assertEqual(task["status"], "대기")
+        self.assertEqual(saved["tasks"][1]["input_task_ids"], ["TASK-001"])
         self.assertEqual(
             [item["event"] for item in saved["history"]],
             ["tasks_created", "plan_approved"],

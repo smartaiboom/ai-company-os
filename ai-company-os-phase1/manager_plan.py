@@ -32,6 +32,7 @@ STARTER_STAGES = [
         "name": "작업 초안 작성",
         "role": "콘텐츠 제작 담당",
         "inputs": ["요구사항 정리 결과"],
+        "input_task_ids": ["TASK-001"],
         "output": "초안 결과물",
         "risk": "추가 정보가 필요할 수 있음",
     },
@@ -39,6 +40,7 @@ STARTER_STAGES = [
         "name": "검토 및 수정",
         "role": "품질 검토 담당",
         "inputs": ["작업 초안", "요구사항 및 성공 기준"],
+        "input_task_ids": ["TASK-001", "TASK-002"],
         "output": "검토 의견 및 수정본",
         "risk": "기준 미충족 시 수정 필요",
     },
@@ -46,6 +48,7 @@ STARTER_STAGES = [
         "name": "최종 보고",
         "role": "AI 관리자",
         "inputs": ["최종 결과물", "미해결 사항"],
+        "input_task_ids": ["TASK-003"],
         "output": "최종 결과 및 미해결 사항",
         "risk": "미해결 사항은 사용자에게 보고",
     },
@@ -54,7 +57,8 @@ STARTER_STAGES = [
 PLANNER_SYSTEM_PROMPT = """당신은 AI Company OS의 관리자입니다.
 사용자의 목표를 달성하는 데 필요한 업무를 계획하고, 각 업무에 적절한 AI 직원 역할을 배정합니다.
 목표에 따라 필요한 작업 수를 결정하세요. 무조건 4개 작업으로 만들지 마세요.
-작업은 실행 가능한 작은 단위여야 하며, 선행 작업의 결과가 후속 작업의 inputs에 연결되도록 하세요.
+작업은 실행 가능한 작은 단위여야 하며, 선행 작업의 결과가 후속 작업에 연결되도록 하세요.
+단계 순서대로 작업 ID는 TASK-001, TASK-002처럼 부여됩니다. 선행 결과가 필요한 단계에는 inputs 설명과 별도로 input_task_ids에 해당 선행 작업 ID를 모두 적으세요. 입력 자료가 프로젝트 목표나 사용자 제공 조건처럼 작업 결과가 아닌 경우에는 input_task_ids에 넣지 마세요.
 실제 조사나 실행을 한 것처럼 꾸미지 말고, 계획만 작성하세요.
 응답은 JSON 객체 하나만 반환하세요. 설명이나 마크다운 코드 펜스를 추가하지 마세요.
 JSON 형식:
@@ -66,12 +70,13 @@ JSON 형식:
       "name": "작업 이름",
       "role": "담당 AI 역할",
       "inputs": ["필요한 입력 또는 선행 작업 결과"],
+      "input_task_ids": [],
       "output": "완료 시 생성할 결과물",
       "risk": "위험 또는 확인할 사항"
     }
   ]
 }
-stages는 2개 이상 10개 이하로 작성하세요. 모든 작업에 name, role, inputs, output, risk가 필요합니다.
+stages는 2개 이상 10개 이하로 작성하세요. 모든 작업에 name, role, inputs, output, risk, input_task_ids가 필요합니다. 첫 작업은 input_task_ids를 빈 배열로 둡니다. 이후에는 실제 선행 결과를 사용하는 작업 ID만 기재하고, 현재 단계나 뒤 단계의 ID는 지정하지 마세요.
 역할은 목표에 맞게 구체적으로 정하세요. 예: 시장 조사 담당, 제품 기획 담당, 개발 담당, 품질 검토 담당, 마케팅 담당, 재무 담당, AI 관리자.
 사용자가 제공하지 않은 사실을 확정하지 말고, 확인할 사항으로 표시하세요."""
 
@@ -81,7 +86,7 @@ def validate_stages(stages):
     if not isinstance(stages, list) or not 2 <= len(stages) <= 10:
         raise ValueError("AI 관리자 계획의 작업 수는 2개 이상 10개 이하여야 합니다.")
 
-    required_fields = ("name", "role", "inputs", "output", "risk")
+    required_fields = ("name", "role", "inputs", "output", "risk", "input_task_ids")
     normalized = []
     for index, stage in enumerate(stages, start=1):
         if not isinstance(stage, dict):
@@ -97,8 +102,16 @@ def validate_stages(stages):
                 if not isinstance(value, list) or not all(
                     isinstance(entry, str) and entry.strip() for entry in value
                 ):
-                    raise ValueError(f"{index}번째 작업의 inputs 형식이 올바르지 않습니다.")
+                    raise ValueError(f"{index}번째 작업의 {field} 형식이 올바르지 않습니다.")
                 item[field] = [entry.strip() for entry in value]
+        task_ids = item["input_task_ids"]
+        valid_previous_ids = {f"TASK-{task_index:03d}" for task_index in range(1, index)}
+        invalid_ids = [task_id for task_id in task_ids if task_id not in valid_previous_ids]
+        if invalid_ids:
+            raise ValueError(
+                f"{index}번째 작업은 앞선 작업 ID만 연결할 수 있습니다: {', '.join(invalid_ids)}"
+            )
+        item["input_task_ids"] = list(dict.fromkeys(task_ids))
         normalized.append(item)
     return normalized
 

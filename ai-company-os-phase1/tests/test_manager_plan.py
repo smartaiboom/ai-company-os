@@ -61,6 +61,7 @@ class ManagerPlanTests(unittest.TestCase):
                 "task_name": "요구사항 정리",
                 "role": "AI 관리자",
                 "input": "프로젝트 목표",
+                "input_task_ids": [],
                 "deliverable": "목표 및 성공 기준",
                 "risk": "요구사항 확인 필요",
             },
@@ -68,6 +69,7 @@ class ManagerPlanTests(unittest.TestCase):
                 "task_name": "초안 작성",
                 "role": "기획 담당",
                 "input": "목표 및 성공 기준",
+                "input_task_ids": ["TASK-001"],
                 "deliverable": "초안",
                 "risk": "사용자 검토 필요",
             },
@@ -110,11 +112,28 @@ class ManagerPlanTests(unittest.TestCase):
 
     def test_stage_validation_accepts_variable_number_of_tasks(self):
         stages = [
-            {"name": "시장 조사", "role": "시장 조사 담당", "inputs": ["프로젝트 목표"], "output": "시장 조사 결과", "risk": "자료 확인 필요"},
-            {"name": "제품 기획", "role": "제품 기획 담당", "inputs": ["시장 조사 결과"], "output": "제품 기획안", "risk": "고객 검증 필요"},
-            {"name": "최종 검토", "role": "품질 검토 담당", "inputs": ["제품 기획안"], "output": "검토 보고서", "risk": "추가 검토 가능"},
+            {"name": "시장 조사", "role": "시장 조사 담당", "inputs": ["프로젝트 목표"], "input_task_ids": [], "output": "시장 조사 결과", "risk": "자료 확인 필요"},
+            {"name": "제품 기획", "role": "제품 기획 담당", "inputs": ["시장 조사 결과"], "input_task_ids": ["TASK-001"], "output": "제품 기획안", "risk": "고객 검증 필요"},
+            {"name": "최종 검토", "role": "품질 검토 담당", "inputs": ["제품 기획안"], "input_task_ids": ["TASK-002"], "output": "검토 보고서", "risk": "추가 검토 가능"},
         ]
         self.assertEqual(validate_stages(stages), stages)
+
+    def test_stage_validation_accepts_only_prior_task_id_links(self):
+        stages = [
+            {"name": "시장 조사", "role": "시장 조사 담당", "inputs": ["프로젝트 목표"], "input_task_ids": [], "output": "시장 조사 보고서", "risk": "출처 확인 필요"},
+            {"name": "제품 기획", "role": "제품 기획 담당", "inputs": ["시장 조사 보고서"], "input_task_ids": ["TASK-001"], "output": "제품 기획서", "risk": "사용자 확인 필요"},
+            {"name": "개발", "role": "개발 담당", "inputs": ["제품 기획서"], "input_task_ids": ["TASK-002"], "output": "개발 결과물", "risk": "검증 필요"},
+        ]
+        self.assertEqual(validate_stages(stages), stages)
+
+        stages[1]["input_task_ids"] = ["TASK-003"]
+        with self.assertRaisesRegex(ValueError, "앞선 작업 ID"):
+            validate_stages(stages)
+
+        stages[1]["input_task_ids"] = ["TASK-001"]
+        del stages[1]["input_task_ids"]
+        with self.assertRaisesRegex(ValueError, "input_task_ids"):
+            validate_stages(stages)
 
     def test_stage_validation_rejects_too_few_tasks(self):
         with self.assertRaises(ValueError):

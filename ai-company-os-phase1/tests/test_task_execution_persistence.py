@@ -185,6 +185,7 @@ class TaskExecutionPersistenceTests(unittest.TestCase):
             "name": "후속 업무",
             "role": "테스트 담당",
             "inputs": ["테스트 결과물"],
+            "input_task_ids": ["TASK-001"],
             "output": "후속 결과",
             "risk": "검증 필요",
             "status": "대기",

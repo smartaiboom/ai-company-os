@@ -4,6 +4,13 @@
 
 ## 최근 완료 작업
 
+### 2026-10-30 — 검토 승인 게이트 브라우저 UI 회귀 검증
+
+- 작업: 임시 설치한 Playwright 1.64.1/Chromium으로 승인·수정 요청 UI를 실제 헤드리스 브라우저에서 검증했다.
+- 검증: 브라우저 테스트 1개 및 전체 `unittest` 60개 통과, `git diff --check` 통과. 테스트 저장 경로는 임시 디렉터리이며 모의 실행기를 사용했다. 실제 AI API 호출 없음.
+- 보고서: [`review_approval_browser_ui_report.md`](../reports/review_approval_browser_ui_report.md)
+- 커밋: 작업 완료 후 기록한다.
+
 ### 2026-10-29 — 검토 승인 게이트 HTTP 통합 검증
 
 - 작업: loopback HTTP 요청으로 검토 대기 차단, 실행 성공 이력 조건, 수정 의견 검증·저장, 실패·빈 결과 보존, 재승인 후 후속 전달과 HTML 검토 폼을 검증했다. 테스트 데이터는 임시 디렉터리를 사용했다.

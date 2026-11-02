@@ -7,6 +7,7 @@ import json
 import os
 import uuid
 import hashlib
+import re
 import threading
 from weakref import WeakValueDictionary
 from execution_engine import execute_task, execute_task_mock, get_execution_engine_name
@@ -436,6 +437,34 @@ def archive_final_report(project):
     project.setdefault("history", []).append({"at": now(), "event": "final_report_confirmed", "details": f"최종 보고서 확정 v{version}"})
 
 
+def load_confirmed_snapshot(project, requested_version=None):
+    validate_final_result(project)
+    tasks = project["tasks"]
+    reference = project.get("final_report", {})
+    if reference.get("status") != "confirmed" or project["tasks"][-1].get("review_status") != REVIEW_APPROVED:
+        raise ValueError("유효한 최종 확정이 필요합니다.")
+    version = reference["version"]
+    if requested_version is not None and requested_version != version:
+        raise ValueError("현재 유효한 확정 버전만 다운로드할 수 있습니다.")
+    if type(version) is not int or version < 1:
+        raise ValueError("잘못된 보관 버전")
+    project_path(project["id"])
+    path = ARTIFACTS_DIR / project["id"] / "final_reports" / f"v{version:06d}.json"
+    if not path.resolve().is_relative_to(ARTIFACTS_DIR.resolve()):
+        raise ValueError("보관 경로가 올바르지 않습니다.")
+    snapshot = json.loads(path.read_text(encoding="utf-8"))
+    if (reference.get("snapshot_hash") != _digest(snapshot)
+            or snapshot.get("evidence") != final_evidence(project)
+            or snapshot.get("fingerprint") != reference.get("fingerprint")
+            or reference.get("fingerprint") != _digest(final_evidence(project))
+            or snapshot.get("version") != version or snapshot.get("project_id") != project["id"]
+            or snapshot.get("final_task_id") != tasks[-1]["id"]
+            or reference.get("final_task_id") != tasks[-1]["id"]
+            or snapshot.get("confirmed_at") != reference.get("confirmed_at")):
+        raise ValueError("보관 파일과 현재 결과 불일치")
+    return snapshot
+
+
 def final_report_state(project):
     reference = project.get("final_report")
     tasks = project.get("tasks", [])
@@ -451,23 +480,40 @@ def final_report_state(project):
             return "작업 결과 현황 · 미확정 (최종 검토 승인 대기)"
         if reference.get("status") != "confirmed" or tasks[-1].get("review_status") != REVIEW_APPROVED:
             raise ValueError("최종 확정 무효 · 재검토 필요")
-        version = reference["version"]
-        if type(version) is not int or version < 1:
-            raise ValueError("잘못된 보관 버전")
-        project_path(project["id"])
-        snapshot = json.loads((ARTIFACTS_DIR / project["id"] / "final_reports" / f"v{version:06d}.json").read_text(encoding="utf-8"))
-        if (reference.get("snapshot_hash") != _digest(snapshot)
-                or snapshot.get("evidence") != final_evidence(project)
-                or snapshot.get("fingerprint") != reference.get("fingerprint")
-                or reference.get("fingerprint") != _digest(final_evidence(project))
-                or snapshot.get("version") != version or snapshot.get("project_id") != project["id"]
-                or snapshot.get("final_task_id") != tasks[-1]["id"]
-                or reference.get("final_task_id") != tasks[-1]["id"]
-                or snapshot.get("confirmed_at") != reference.get("confirmed_at")):
-            raise ValueError("보관 파일과 현재 결과 불일치")
+        snapshot = load_confirmed_snapshot(project)
+        version = snapshot["version"]
         return f"최종 보고서 · 확정 v{version} · {reference['confirmed_at']}"
     except (ValueError, OSError, KeyError, TypeError, AttributeError):
         return "작업 결과 현황 · 미확정 (재실행·승인 또는 보관 확인 필요)"
+
+
+def confirmed_markdown(snapshot):
+    """Render only archived business content; no paths, settings or file writes."""
+    def block(value):
+        text = str(value or "")
+        fence = "`" * max(3, max((len(run) for run in re.findall(r"`+", text)), default=0) + 1)
+        return f"{fence}text\n{text}\n{fence}"
+
+    evidence = snapshot["evidence"]
+    lines = ["# AI Company OS 최종 확정본", "",
+             f"- 프로젝트 ID: {snapshot['project_id']}", f"- 확정 버전: v{snapshot['version']}",
+             f"- 확정 시각(KST): {snapshot['confirmed_at']}", f"- 최종 업무 ID: {snapshot['final_task_id']}",
+             "- 사용자 승인된 보관본입니다. 사실성 검증이 완료됐음을 뜻하지 않습니다.",
+             "", "## 목표", block(evidence.get("goal")), "", "## 업무별 결과"]
+    if evidence.get("manager_goal") and evidence["manager_goal"] != evidence.get("goal"):
+        lines.extend(["", "### 관리자 목표", block(evidence["manager_goal"])])
+    for task in evidence["tasks"]:
+        lines.extend(["", "### 업무", block(f"ID: {task['id']}\n이름: {task.get('name') or ''}\n담당 역할: {task.get('role') or ''}\n선행 업무: {', '.join(task.get('input_task_ids') or [])}"),
+                      "", "결과:", block(task.get("result"))])
+    return "\n".join(lines) + "\n"
+
+
+def final_download_controls(project):
+    try:
+        snapshot = load_confirmed_snapshot(project)
+    except (ValueError, OSError, KeyError, TypeError, AttributeError):
+        return "<p class='muted'>현재 유효한 최종 확정 후 Markdown 확정본을 다운로드할 수 있습니다.</p>"
+    return f"<p><a class='button' href='/report/{esc(project['id'])}/download/v{snapshot['version']:06d}.md'>Markdown 확정본 다운로드 (v{snapshot['version']})</a></p>"
 
 
 def _validate_task_predecessors(task, tasks, task_index):
@@ -1082,6 +1128,8 @@ class Handler(BaseHTTPRequestHandler):
             self.project_detail(parts[1])
         elif len(parts) == 2 and parts[0] == "report":
             self.project_report(parts[1])
+        elif len(parts) == 4 and parts[0] == "report" and parts[2] == "download":
+            self.download_report(parts[1], parts[3])
         elif parsed.path == "/health":
             self.send_html(page("Health", "<p>OK — Phase 1 app is running.</p>"))
         else:
@@ -1442,6 +1490,38 @@ class Handler(BaseHTTPRequestHandler):
                 400,
             )
 
+    def download_report(self, project_id, filename):
+        try:
+            project_path(project_id)
+            match = re.fullmatch(r"v([0-9]{6,9})\.md", filename)
+            if not match or int(match.group(1)) < 1 or filename != f"v{int(match.group(1)):06d}.md":
+                raise ValueError("잘못된 확정 버전")
+        except ValueError:
+            self.send_html(page("입력 확인", "<p>프로젝트 ID 또는 확정 버전이 올바르지 않습니다.</p>"), 400)
+            return
+        lock = project_mutation_lock(project_id)
+        if not lock.acquire(blocking=False):
+            self.send_html(page("처리 중", "<p>프로젝트를 처리 중입니다. 완료 후 다시 시도해 주세요.</p>"), 409)
+            return
+        self._mutation_lock = lock
+        try:
+            project = load_project(project_id)
+            snapshot = load_confirmed_snapshot(project, int(match.group(1)))
+            data = confirmed_markdown(snapshot).encode("utf-8")
+        except (ValueError, OSError, KeyError, TypeError, AttributeError):
+            self.send_html(page("미확정", "<p>현재 유효한 확정본을 확인할 수 없어 다운로드하지 않았습니다.</p>"), 409)
+            return
+        finally:
+            self._release_project_mutation()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/markdown; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{project_id}-v{snapshot["version"]:06d}.md"')
+        self.send_header("Content-Length", str(len(data)))
+        self.send_header("Cache-Control", "no-store")
+        self.send_header("X-Content-Type-Options", "nosniff")
+        self.end_headers()
+        self.wfile.write(data)
+
     def home(self):
         projects = load_projects()
         cards = ""
@@ -1581,6 +1661,7 @@ class Handler(BaseHTTPRequestHandler):
 <p><strong>업무 실행 완료율:</strong> {task_progress}%</p>
 <p><a class="button" href="/report/{esc(p['id'])}">작업 결과·최종 확정 확인</a></p>
 <p><strong>최종 확정 여부:</strong> {esc(final_report_state(p))}</p>
+{final_download_controls(p)}
 <p><strong>전체 작업:</strong> {total_tasks}개</p>
 <p><strong>대기:</strong> {waiting_tasks}개 · <strong>진행 중:</strong> {in_progress_tasks}개 · <strong>실행 실패:</strong> {failed_tasks}개 · <strong>재검토 필요:</strong> {review_tasks}개 · <strong>완료:</strong> {completed_tasks}개</p>
 
@@ -1661,6 +1742,7 @@ class Handler(BaseHTTPRequestHandler):
 <p><a href="/project/{esc(project_id)}">← 프로젝트로 돌아가기</a></p>
 <section class="card">
 <h2>{esc(final_report_state(p))}</h2>
+{final_download_controls(p)}
 <p><strong>프로젝트:</strong> {esc(p.get('name', ''))}</p>
 <p><strong>목표:</strong> {esc(p.get('goal', ''))}</p>
 <p><strong>업무 실행 완료율:</strong> {progress}%</p>

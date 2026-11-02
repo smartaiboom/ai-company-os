@@ -6,6 +6,8 @@ import html
 import json
 import os
 import uuid
+import threading
+from weakref import WeakValueDictionary
 from execution_engine import execute_task, get_execution_engine_name
 from manager_plan import build_manager_plan
 
@@ -15,6 +17,21 @@ PROJECTS_DIR = DATA_DIR / "projects"
 ARTIFACTS_DIR = DATA_DIR / "artifacts"
 HOST = os.environ.get("AI_COMPANY_OS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AI_COMPANY_OS_PORT", "8000"))
+# One process only: keep each project's read/check/write transaction together.
+_PROJECT_LOCKS = WeakValueDictionary()
+_PROJECT_LOCKS_GUARD = threading.Lock()
+
+
+def project_mutation_lock(project_id):
+    key = str(project_path(project_id))
+    with _PROJECT_LOCKS_GUARD:
+        lock = _PROJECT_LOCKS.get(key)
+        if lock is None:
+            lock = threading.Lock()
+            _PROJECT_LOCKS[key] = lock
+        return lock
+
+
 VALID_STATUSES = {"active", "paused", "completed"}
 REVIEW_PENDING = "pending"
 REVIEW_APPROVED = "approved"
@@ -517,6 +534,28 @@ class Handler(BaseHTTPRequestHandler):
     def do_POST(self):
         parsed = urlparse(self.path)
         form = self.read_form()
+        project_routes = {
+            "/update", "/manager/plan", "/manager/approve", "/manager/reject",
+            "/task/update", "/task/review", "/task/execute",
+        }
+        if parsed.path not in project_routes:
+            return self._handle_post(parsed, form)
+        try:
+            lock = project_mutation_lock(form.get("id", ""))
+        except ValueError:
+            self.send_html(page("입력 확인", "<p>프로젝트 ID가 올바르지 않습니다.</p>"), 400)
+            return
+        if not lock.acquire(blocking=False):
+            self.send_html(page(
+                "처리 중", "<p>이 프로젝트의 다른 요청을 처리 중입니다. 완료 후 다시 시도해 주세요.</p>"
+            ), 409)
+            return
+        try:
+            return self._handle_post(parsed, form)
+        finally:
+            lock.release()
+
+    def _handle_post(self, parsed, form):
         execution_failed = False
         try:
             if parsed.path == "/create":

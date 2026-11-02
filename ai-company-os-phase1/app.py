@@ -14,6 +14,7 @@ from execution_engine import execute_task, execute_task_mock, get_execution_engi
 from manager_plan import build_manager_plan
 from quality_review import REVIEWER_ID, RULESET_ID, evaluate_format, validate_review, inconclusive_review
 from ai_safety import request_scope, check_project_permission, MAX_CALLS, MAX_CALLS_PER_REQUEST
+import semantic_review
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -359,6 +360,10 @@ def final_evidence(project):
                       if e.get("event") in {"task_execution_succeeded", "task_execution_failed", "task_result_saved"}
                       and str(e.get("details", "")).startswith(f"{task.get('id')}:") ), {})
         evidence["execution_events"].append({k: event.get(k) for k in ("event", "at", "details")})
+    if project.get("semantic"):
+        state = project["semantic"]
+        evidence["semantic"] = {k: state.get(k) for k in
+                                ("target_task_id", "reviewer_task_id", "criteria", "approved_by", "approved_at", "review")}
     return evidence
 
 
@@ -372,6 +377,8 @@ def final_execution_context(project):
 
 
 def validate_final_result(project):
+    if project.get("semantic"):
+        validate_semantic_pass(project)
     tasks = project.get("tasks", [])
     ids = [t.get("id") for t in tasks]
     if not ids or not all(isinstance(i, str) and i for i in ids) or len(set(ids)) != len(ids):
@@ -514,7 +521,7 @@ def final_download_controls(project):
         snapshot = load_confirmed_snapshot(project)
     except (ValueError, OSError, KeyError, TypeError, AttributeError):
         return "<p class='muted'>현재 유효한 최종 확정 후 Markdown 확정본을 다운로드할 수 있습니다.</p>"
-    return f"<p><a class='button' href='/report/{esc(project['id'])}/download/v{snapshot['version']:06d}.md'>Markdown 확정본 다운로드 (v{snapshot['version']})</a></p>"
+    return f"<p><a class='button' href='/report/{esc(project['id'])}/download/v{snapshot['version']:06d}.md'>Markdown 확정본 다운로드 (v{snapshot['version']})</a> <a class='button' href='/report/{esc(project['id'])}/download/v{snapshot['version']:06d}.json'>JSON 확정본 다운로드 (v{snapshot['version']})</a></p>"
 
 
 def _validate_task_predecessors(task, tasks, task_index):
@@ -562,6 +569,7 @@ def result_revision(task):
 
 def quality_input_context(project, task_index):
     evidence = final_evidence(project)
+    evidence.pop("semantic", None)  # Semantic output must not become its own input fingerprint.
     task = project["tasks"][task_index]
     evidence["tasks"] = evidence["tasks"][:task_index]
     evidence["execution_events"] = evidence["execution_events"][:task_index]
@@ -829,7 +837,7 @@ class TaskExecutionFailure(RuntimeError):
     pass
 
 
-def execute_project_task(project_id, task_id, executor=None, *, _quality_revision=None):
+def execute_project_task(project_id, task_id, executor=None, *, _quality_revision=None, _semantic=None):
     """Execute and save one task; caller must hold the project mutation lock."""
     project = load_project(project_id)
 
@@ -843,6 +851,18 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
         raise ValueError("실행할 작업을 찾을 수 없습니다.")
 
     task_index = tasks.index(task)
+    semantic = project.get("semantic", {})
+    if semantic and task_id == semantic.get("reviewer_task_id") and _semantic is not _SEMANTIC_EXECUTION:
+        raise ValueError("이 업무는 별도 의미 검토 시작·재검토로 실행해 주세요.")
+    if semantic and task_index > next(i for i, t in enumerate(tasks) if t["id"] == semantic["reviewer_task_id"]):
+        validate_semantic_pass(project)
+    cycle = semantic.get("revision") if task_id == semantic.get("target_task_id") else None
+    if cycle is not None:
+        if cycle.get("phase") != "approved" or task.get("review_status") != REVIEW_CHANGES_REQUESTED:
+            raise ValueError("의미 수정 1회 권한을 사용했거나 사용자 승인이 필요합니다.")
+        if semantic.get("review", {}).get("binding") != semantic_binding(project):
+            raise ValueError("수정 승인 후 대상 지문이 변경됐습니다.")
+        check_project_permission(project)
     quality_revision = _quality_revision is _QUALITY_REVISION_ONCE
     if quality_revision:
         validate_quality_revision(project, task_index, reserved=True)
@@ -881,6 +901,10 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
         raise ValueError(
             f"앞선 작업을 먼저 완료해 주세요: {names}"
         )
+
+    if cycle is not None:
+        cycle.update(phase="reserved", started_at=now())
+        save_project(project)
 
     invalidate_final_report(project, "업무 재실행", task_index != len(tasks) - 1)
     old_status = task.get("status", "대기")
@@ -922,6 +946,8 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
             )
         task["result"] = result
         task["result_revision"] = next_revision
+        if cycle is not None:
+            cycle.update(phase="executed", completed_at=now())
         task["quality_execution_context"] = execution_input_context
         if task_index == len(tasks) - 1:
             task["execution_context"] = final_execution_context(project)
@@ -982,6 +1008,167 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
     if quality_revision:
         return project
     save_project(project)
+
+
+_SEMANTIC_EXECUTION = object()
+
+
+def semantic_tasks(project):
+    state = project.get("semantic", {})
+    tasks = project.get("tasks", [])
+    ids = [t.get("id") for t in tasks]
+    if len(set(ids)) != len(ids):
+        raise ValueError("고유한 업무 ID가 필요합니다.")
+    try:
+        target = ids.index(state["target_task_id"])
+        reviewer = ids.index(state["reviewer_task_id"])
+    except (KeyError, ValueError):
+        raise ValueError("의미 검토 대상·담당 업무를 확인해 주세요.") from None
+    if reviewer != target + 1 or reviewer == len(tasks) - 1 or tasks[reviewer].get("role") != "품질 검토 담당":
+        raise ValueError("대상 바로 다음의 품질 검토 담당 업무와 별도 최종 업무가 필요합니다.")
+    if tasks[target]["id"] not in _resolve_input_task_ids(tasks[reviewer], tasks, reviewer):
+        raise ValueError("품질 업무에 대상 업무의 선행 연결이 필요합니다.")
+    return target, reviewer
+
+
+def semantic_binding(project):
+    target, reviewer = semantic_tasks(project)
+    return {**quality_binding(project, target, "semantic-v1", project["tasks"][reviewer]["id"]),
+            "criteria_hash": _digest(project["semantic"]["criteria"]),
+            "reviewer_hash": _digest({k: project["tasks"][reviewer].get(k) for k in
+                                      ("id", "name", "role", "inputs", "input_task_ids", "output", "risk")})}
+
+
+def configure_semantic(project_id, target_id, reviewer_id, criteria_text):
+    project = load_project(project_id)
+    if project.get("semantic") or project.get("plan", {}).get("status") != "approved":
+        raise ValueError("승인된 계획에 한 번만 의미 검토 기준을 승인할 수 있습니다.")
+    criteria = [line.strip() for line in criteria_text.splitlines() if line.strip()]
+    if not 1 <= len(criteria) <= 8 or len(set(criteria)) != len(criteria) or any(len(c) > 500 for c in criteria):
+        raise ValueError("성공 기준을 중복 없이 1~8줄, 줄마다 500자 이내로 입력해 주세요.")
+    project["semantic"] = {"target_task_id": target_id, "reviewer_task_id": reviewer_id,
+                           "criteria": criteria, "approved_by": "사용자", "approved_at": now(), "reviews": []}
+    _, reviewer = semantic_tasks(project)
+    if any(t.get("status", "대기") != "대기" or t.get("result") for t in project["tasks"][reviewer:]):
+        raise ValueError("품질·후속 업무 실행 전에 기준을 승인해 주세요.")
+    invalidate_final_report(project, "의미 성공 기준 승인")
+    project.setdefault("history", []).append({"at": now(), "event": "semantic_criteria_approved",
+                                               "details": f"{target_id}: 사용자 성공 기준 승인"})
+    save_project(project)
+
+
+def validate_semantic_pass(project):
+    state = project["semantic"]
+    review = state.get("review")
+    semantic_review.validate(review, semantic_binding(project), state["criteria"])
+    if review["verdict"] != "pass":
+        raise ValueError("최신 의미 검토가 통과하지 않았습니다. 자동 진행을 중단합니다.")
+    _, reviewer = semantic_tasks(project)
+    task = project["tasks"][reviewer]
+    if task.get("result") != json.dumps(review, ensure_ascii=False, indent=2) or not task_has_successful_result(project, task):
+        raise ValueError("의미 검토 업무의 성공 결과가 일치하지 않습니다.")
+
+
+def run_semantic_review(project_id):
+    project = load_project(project_id)
+    check_project_permission(project)
+    target, reviewer = semantic_tasks(project)
+    state = project["semantic"]
+    target_task = project["tasks"][target]
+    if target_task.get("review_status") != REVIEW_APPROVED:
+        raise ValueError("대상 결과를 사용자가 승인·재승인한 뒤 의미 검토할 수 있습니다.")
+    binding = semantic_binding(project)
+    reviews = state["reviews"]
+    if reviews:
+        cycle = state.get("revision", {})
+        if (len(reviews) != 1 or reviews[0].get("phase") != "completed"
+                or cycle.get("phase") != "executed" or cycle.get("reevaluation_reserved")
+                or binding["result_revision"] != cycle.get("origin_revision", -2) + 1):
+            raise ValueError("초기 검토 또는 사용자 수정 후 재검토 1회만 허용합니다. 자동 재시도하지 않습니다.")
+    # Validate all predecessor approvals before consuming the single review attempt.
+    _validate_task_predecessors(project["tasks"][reviewer], project["tasks"], reviewer)
+    if reviews:
+        state["revision"]["reevaluation_reserved"] = True
+    reviews.append({"phase": "reserved", "binding": binding, "reserved_at": now()})
+    save_project(project)
+
+    def executor(current, task, previous_results=None):
+        current_state = current["semantic"]
+        if semantic_binding(current) != binding:
+            raise ValueError("의미 검토 입력 지문이 변경됐습니다.")
+        review = semantic_review.evaluate(current, task, current["tasks"][target], binding,
+                                          current_state["criteria"], previous_results)
+        current_state["review"] = review
+        current_state["reviews"][-1].update(phase="completed", completed_at=now())
+        return json.dumps(review, ensure_ascii=False, indent=2)
+
+    execute_project_task(project_id, project["tasks"][reviewer]["id"], executor=executor,
+                         _semantic=_SEMANTIC_EXECUTION)
+
+
+def decide_semantic_revision(project_id, decision, binding_hash):
+    project = load_project(project_id)
+    state = project.get("semantic", {})
+    target, _ = semantic_tasks(project)
+    task = project["tasks"][target]
+    review = state.get("review")
+    binding = semantic_binding(project)
+    semantic_review.validate(review, binding, state["criteria"])
+    if (review["verdict"] != "changes_needed" or binding_hash != _digest(binding)
+            or task.get("review_status") != REVIEW_APPROVED or state.get("revision") is not None):
+        raise ValueError("최신 수정 필요 판정과 기존 승인, 미사용 수정 권한이 필요합니다.")
+    if decision not in {"approve", "reject"}:
+        raise ValueError("수정 요청 승인 또는 거절을 선택해 주세요.")
+    if decision == "approve":
+        _, attempts, limit = check_project_permission(project)
+        if limit - len(attempts) < 2:
+            raise ValueError("수정·재검토에 필요한 최소 2회 예산이 부족합니다.")
+    state["revision"] = {"phase": "approved" if decision == "approve" else "rejected",
+                         "origin_revision": result_revision(task), "binding_hash": binding_hash,
+                         "previous_approval": {k: task.get(k) for k in ("review_status", "reviewed_at", "reviewed_by")},
+                         "decided_by": "사용자", "decided_at": now(), "previous_result": task["result"]}
+    if decision == "approve":
+        task.update(review_status=REVIEW_CHANGES_REQUESTED, reviewed_by="사용자", reviewed_at=now(),
+                    review_feedback="\n".join(f"{c['criterion']}: {c['risk']} / {c['suggestion']}" for c in review["checks"]))
+        invalidate_final_report(project, "사용자 의미 수정 요청 승인")
+        mark_downstream_for_review(project, target, "사용자가 의미 검토 수정 요청을 승인함")
+    project.setdefault("history", []).append({"at": now(), "event": "semantic_revision_decided",
+                                               "details": f"{task['id']}: 사용자 수정 요청 {decision}"})
+    save_project(project)
+
+
+def semantic_controls(project):
+    state = project.get("semantic")
+    pid = esc(project["id"])
+    if not state:
+        return f"""<section><h3>의미 검토 성공 기준 승인</h3>
+<p>품질 업무 실행 전에 대상 바로 다음의 품질 검토 담당 업무를 지정하세요. 실제 전송 동의는 별도이며 이 승인은 AI 요청을 활성화하지 않습니다.</p>
+<form method='post' action='/semantic/configure'><input type='hidden' name='id' value='{pid}'>
+<label>대상 업무 ID<input name='target_task_id' required></label><label>품질 업무 ID<input name='reviewer_task_id' required></label>
+<label>사용자 성공 기준 (한 줄에 하나)<textarea name='criteria' required></textarea></label>
+<button>성공 기준 승인</button></form></section>"""
+    review = state.get("review", {})
+    label, binding_hash = "미검토", ""
+    try:
+        binding = semantic_binding(project)
+        binding_hash = _digest(binding)
+        semantic_review.validate(review, binding, state["criteria"])
+        label = review["verdict"]
+    except (ValueError, TypeError, KeyError):
+        label = "미검토 또는 stale · 판정 불가"
+    remaining = max(0, project.get("real_ai", {}).get("limit", MAX_CALLS) - len(project.get("real_ai", {}).get("attempts", [])))
+    target = next((t for t in project.get("tasks", []) if t.get("id") == state["target_task_id"]), {})
+    return f"""<section><h3>의미 검토 (모델 주장이며 독립 확인 아님)</h3>
+<p>대상 {esc(state['target_task_id'])} · 검토 담당 {esc(state['reviewer_task_id'])} · 기존 승인 {esc(target.get('review_status'))} {esc(target.get('reviewed_at', ''))}</p>
+<p>성공 기준: {esc(' / '.join(state['criteria']))} · 판정: {esc(label)} · 남은 API 예산 {remaining}회</p>
+<pre>{esc(json.dumps(review, ensure_ascii=False, indent=2))}</pre>
+<p>검토 시도 {len(state.get('reviews', []))}/2회 · 최근 상태 {esc(state.get('reviews', [{}])[-1].get('phase', '미실행') if state.get('reviews') else '미실행')}. 예약이 남으면 중단 여부가 불명확하므로 자동 재전송하지 않습니다.</p>
+<p>수정 상태: {esc(state.get('revision', {}).get('phase', '미사용'))}. 수정·재검토 각각 최대 1회이며 자동 반복하지 않습니다. 사용자 재승인·최종 승인은 별도입니다.</p>
+<form method='post' action='/semantic/review' data-processing-form data-processing-label='의미 검토 중...'><input type='hidden' name='id' value='{pid}'><button type='submit'>의미 검토 시작·재검토 (실제 경로)</button><p data-processing-status hidden></p></form>
+<form method='post' action='/semantic/revision-decision'><input type='hidden' name='id' value='{pid}'>
+<input type='hidden' name='binding_hash' value='{binding_hash}'>
+<button name='decision' value='approve'>수정 요청 승인 (이후 대상 업무 실행, API 1회·재검토 1회)</button>
+<button name='decision' value='reject'>수정 요청 거절</button></form></section>"""
 
 
 MAX_WORKFLOW_TASKS = 5
@@ -1173,6 +1360,7 @@ class Handler(BaseHTTPRequestHandler):
         project_routes = {
             "/update", "/manager/plan", "/manager/approve", "/manager/reject",
             "/task/update", "/task/review", "/task/execute", "/workflow/run", "/workflow/run-real", "/quality/review", "/quality/revise-once",
+            "/semantic/configure", "/semantic/review", "/semantic/revision-decision",
         }
         if parsed.path not in project_routes:
             return self._handle_post(parsed, form)
@@ -1195,7 +1383,19 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_post(self, parsed, form):
         try:
-            if parsed.path == "/create":
+            if parsed.path == "/semantic/configure":
+                project_id = form.get("id", "")
+                configure_semantic(project_id, form.get("target_task_id", ""), form.get("reviewer_task_id", ""), form.get("criteria", ""))
+                self.redirect(f"/project/{project_id}")
+            elif parsed.path == "/semantic/review":
+                project_id = form.get("id", "")
+                run_semantic_review(project_id)
+                self.redirect(f"/project/{project_id}")
+            elif parsed.path == "/semantic/revision-decision":
+                project_id = form.get("id", "")
+                decide_semantic_revision(project_id, form.get("decision", ""), form.get("binding_hash", ""))
+                self.redirect(f"/project/{project_id}")
+            elif parsed.path == "/create":
                 name = form.get("name", "").strip()
                 goal = form.get("goal", "").strip()
                 if not name:
@@ -1320,6 +1520,9 @@ class Handler(BaseHTTPRequestHandler):
                 project_id = form.get("id", "")
                 task_id = form.get("task_id", "")
                 project = load_project(project_id)
+                state = project.get("semantic", {})
+                if task_id in {state.get("target_task_id"), state.get("reviewer_task_id")}:
+                    raise ValueError("의미 검토 대상·담당 결과는 전용 수정 승인 및 실행 경로로 변경해 주세요.")
 
                 tasks = project.get("tasks", [])
                 task = next(
@@ -1437,6 +1640,11 @@ class Handler(BaseHTTPRequestHandler):
                 _validate_task_predecessors(task, tasks, task_index)
 
                 review_status = task_review_status(task, has_dependents=True)
+                state = project.get("semantic", {})
+                if task_id == state.get("target_task_id") and decision == "request_changes":
+                    raise ValueError("의미 검토의 별도 수정 요청 승인 경로를 사용해 주세요.")
+                if task_id == state.get("reviewer_task_id") and decision == "approve":
+                    validate_semantic_pass(project)
                 if task_index == len(tasks) - 1:
                     validate_final_result(project)
                 if decision == "approve":
@@ -1531,8 +1739,8 @@ class Handler(BaseHTTPRequestHandler):
     def download_report(self, project_id, filename):
         try:
             project_path(project_id)
-            match = re.fullmatch(r"v([0-9]{6,9})\.md", filename)
-            if not match or int(match.group(1)) < 1 or filename != f"v{int(match.group(1)):06d}.md":
+            match = re.fullmatch(r"v([0-9]{6,9})\.(md|json)", filename)
+            if not match or int(match.group(1)) < 1 or filename != f"v{int(match.group(1)):06d}.{match.group(2)}":
                 raise ValueError("잘못된 확정 버전")
         except ValueError:
             self.send_html(page("입력 확인", "<p>프로젝트 ID 또는 확정 버전이 올바르지 않습니다.</p>"), 400)
@@ -1545,15 +1753,17 @@ class Handler(BaseHTTPRequestHandler):
         try:
             project = load_project(project_id)
             snapshot = load_confirmed_snapshot(project, int(match.group(1)))
-            data = confirmed_markdown(snapshot).encode("utf-8")
+            extension = match.group(2)
+            data = (confirmed_markdown(snapshot) if extension == "md" else
+                    json.dumps(snapshot, ensure_ascii=False, indent=2)).encode("utf-8")
         except (ValueError, OSError, KeyError, TypeError, AttributeError):
             self.send_html(page("미확정", "<p>현재 유효한 확정본을 확인할 수 없어 다운로드하지 않았습니다.</p>"), 409)
             return
         finally:
             self._release_project_mutation()
         self.send_response(200)
-        self.send_header("Content-Type", "text/markdown; charset=utf-8")
-        self.send_header("Content-Disposition", f'attachment; filename="{project_id}-v{snapshot["version"]:06d}.md"')
+        self.send_header("Content-Type", "text/markdown; charset=utf-8" if extension == "md" else "application/json; charset=utf-8")
+        self.send_header("Content-Disposition", f'attachment; filename="{project_id}-v{snapshot["version"]:06d}.{extension}"')
         self.send_header("Content-Length", str(len(data)))
         self.send_header("Cache-Control", "no-store")
         self.send_header("X-Content-Type-Options", "nosniff")
@@ -1727,6 +1937,7 @@ class Handler(BaseHTTPRequestHandler):
 <input type="hidden" name="id" value="{esc(p['id'])}">
 <button type="submit">자동 진행 시작·재개 (mock 전용)</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form></section>
 {real_ai_controls(p)}
+{semantic_controls(p)}
 <section class="card"><h2>결과물 보관 폴더</h2><p class="muted">프로젝트별 결과물은 이 폴더에 보관하도록 준비되어 있습니다.</p><code>data/artifacts/{esc(p['id'])}/</code></section>
 <section class="card"><h2>최근 변경 기록</h2><ul>{history or '<li>기록 없음</li>'}</ul></section>"""
         self.send_html(page(p.get("name", "프로젝트"), body))

@@ -8,7 +8,7 @@ import os
 import uuid
 import threading
 from weakref import WeakValueDictionary
-from execution_engine import execute_task, get_execution_engine_name
+from execution_engine import execute_task, execute_task_mock, get_execution_engine_name
 from manager_plan import build_manager_plan
 
 ROOT = Path(__file__).resolve().parent
@@ -457,6 +457,210 @@ def _build_previous_results(task, tasks, task_index, input_task_ids):
         })
     return results
 
+class TaskExecutionFailure(RuntimeError):
+    pass
+
+
+def execute_project_task(project_id, task_id, executor=None):
+    """Execute and save one task; caller must hold the project mutation lock."""
+    project = load_project(project_id)
+
+    tasks = project.get("tasks", [])
+    task = next(
+        (t for t in tasks if t.get("id") == task_id),
+        None
+    )
+
+    if not task:
+        raise ValueError("실행할 작업을 찾을 수 없습니다.")
+
+    task_index = tasks.index(task)
+    has_dependents = _task_has_dependents(tasks, task_index)
+    current_review_status = task_review_status(
+        task,
+        has_dependents=has_dependents,
+    )
+    if (
+        task.get("status") == "완료"
+        and not task.get("review_required")
+        and current_review_status != REVIEW_CHANGES_REQUESTED
+        and task_has_successful_result(project, task)
+    ):
+        raise ValueError(
+            "이미 완료된 작업입니다. 재실행하려면 먼저 '진행 중'으로 변경해 주세요."
+        )
+
+    input_task_ids = _validate_task_predecessors(task, tasks, task_index)
+
+    unfinished = [
+        t for t in tasks[:task_index]
+        if t.get("status") != "완료" or t.get("review_required")
+    ]
+
+    if unfinished:
+        names = ", ".join(
+            t.get("name", t.get("id", "이름 없는 작업"))
+            for t in unfinished
+        )
+        raise ValueError(
+            f"앞선 작업을 먼저 완료해 주세요: {names}"
+        )
+
+    old_status = task.get("status", "대기")
+    old_result = task.get("result", "")
+    review_feedback = (
+        task.get("review_feedback", "")
+        if current_review_status == REVIEW_CHANGES_REQUESTED
+        else ""
+    )
+    _reset_review_approval(task, has_dependents)
+    task["status"] = "진행 중"
+    task["updated_at"] = now()
+
+    previous_results = _build_previous_results(
+        task, tasks, task_index, input_task_ids
+    )
+    if review_feedback:
+        previous_results.append({
+            "task_id": task_id,
+            "input_name": "검토 수정 요청",
+            "task_name": "사용자 검토자",
+            "result": review_feedback,
+        })
+
+    try:
+        result = (executor or execute_task)(
+            project,
+            task,
+            previous_results=previous_results
+        )
+        if not isinstance(result, str) or not result.strip():
+            raise RuntimeError(
+                "실행기가 빈 작업 결과를 반환했습니다. 결과를 저장하지 않았습니다."
+            )
+        task["result"] = result
+        task["status"] = "완료"
+        task["review_required"] = False
+        task.pop("review_reason", None)
+        task["review_status"] = REVIEW_PENDING if has_dependents else REVIEW_NOT_REQUIRED
+        task.pop("review_feedback", None)
+        task.pop("reviewed_at", None)
+        task.pop("reviewed_by", None)
+        task["updated_at"] = now()
+
+        if old_result != result:
+            mark_downstream_for_review(
+                project,
+                task_index,
+                f"선행 업무 {task.get('name', task_id)} 결과가 다시 생성됨",
+            )
+
+        project.setdefault("history", []).append({
+            "at": now(),
+            "event": "task_execution_succeeded",
+            "details": f"{task_id}: 작업 실행 성공 (실행 엔진: {get_execution_engine_name()})"
+        })
+    except Exception as exc:
+        task["status"] = "실행 실패"
+        task["review_status"] = (
+            REVIEW_CHANGES_REQUESTED
+            if has_dependents and review_feedback
+            else REVIEW_PENDING if has_dependents else REVIEW_NOT_REQUIRED
+        )
+        task["updated_at"] = now()
+        project.setdefault("history", []).append({
+            "at": now(),
+            "event": "task_execution_failed",
+            "details": f"{task_id}: 실행 실패 — {exc}"
+        })
+        if old_status != task["status"]:
+            project.setdefault("history", []).append({
+                "at": now(),
+                "event": "task_status_changed",
+                "details": f"{task_id}: {old_status} -> {task['status']}"
+            })
+        save_project(project)
+        raise TaskExecutionFailure(str(exc)) from exc
+
+    if old_status != task["status"]:
+        project.setdefault("history", []).append({
+            "at": now(),
+            "event": "task_status_changed",
+            "details": (
+                f"{task_id}: {old_status} -> {task['status']}"
+            )
+        })
+
+    project["updated_at"] = now()
+    save_project(project)
+
+
+MAX_WORKFLOW_TASKS = 5
+
+
+def run_mock_workflow(project_id):
+    """Bounded synchronous run. Caller holds the project lock for the whole run."""
+    if get_execution_engine_name() != "mock":
+        raise ValueError("자동 진행은 mock 모드에서만 가능합니다. 외부 AI 요청은 보내지 않았습니다.")
+    executed = []
+    reason = "실행 횟수 상한에 도달했습니다. 확인 후 다시 재개해 주세요."
+    for _ in range(MAX_WORKFLOW_TASKS):
+        project = load_project(project_id)
+        if project.get("plan", {}).get("status") != "approved":
+            reason = "작업 계획을 먼저 승인해 주세요."
+            break
+        tasks = project.get("tasks", [])
+        candidate = None
+        for index, task in enumerate(tasks):
+            review = task_review_status(task, _task_has_dependents(tasks, index))
+            if review == REVIEW_CHANGES_REQUESTED:
+                reason = "수정 요청이 있습니다. 개별 작업을 수정·재실행하고 검토해 주세요."
+                break
+            if task.get("status") == "실행 실패":
+                reason = "실행 실패 업무가 있습니다. 개별 작업을 확인하고 재시도해 주세요."
+                break
+            if task.get("status") == "완료" and not task_requires_review(task):
+                if not isinstance(task.get("result"), str) or not task["result"].strip():
+                    reason = "완료 업무의 결과가 비어 있습니다. 개별 작업을 확인해 주세요."
+                    break
+                if review == REVIEW_PENDING:
+                    reason = "검토 승인 대기 중입니다. 승인 후 자동 진행을 재개해 주세요."
+                    break
+                continue
+            if task.get("status", "대기") not in {"대기", "재검토 필요"}:
+                reason = "진행 중이거나 상태를 확인해야 하는 업무가 있습니다."
+                break
+            candidate = task
+            break
+        else:
+            reason = "실행할 업무가 없습니다. 저장된 결과를 확인해 주세요."
+        if candidate is None:
+            break
+        task_id = candidate.get("id")
+        if not task_id or task_id in executed:
+            reason = "업무 ID가 없거나 중복되어 자동 진행을 중단했습니다."
+            break
+        try:
+            # Explicit mock executor makes this route incapable of selecting a real engine.
+            execute_project_task(project_id, task_id, executor=execute_task_mock)
+        except (ValueError, RuntimeError) as exc:
+            reason = str(exc)
+            break
+        executed.append(task_id)
+        latest = load_project(project_id)
+        latest_tasks = latest.get("tasks", [])
+        latest_index = next(i for i, t in enumerate(latest_tasks) if t.get("id") == task_id)
+        if task_review_status(latest_tasks[latest_index], _task_has_dependents(latest_tasks, latest_index)) == REVIEW_PENDING:
+            reason = "검토 승인 대기 중입니다. 승인 후 자동 진행을 재개해 주세요."
+            break
+    project = load_project(project_id)
+    project["workflow"] = {"reason": reason, "executed_task_ids": executed, "stopped_at": now()}
+    project.setdefault("history", []).append({
+        "at": now(), "event": "workflow_stopped", "details": f"자동 진행 중단: {reason}",
+    })
+    save_project(project)
+
+
 def esc(value):
     return html.escape(str(value), quote=True)
 
@@ -536,7 +740,7 @@ class Handler(BaseHTTPRequestHandler):
         form = self.read_form()
         project_routes = {
             "/update", "/manager/plan", "/manager/approve", "/manager/reject",
-            "/task/update", "/task/review", "/task/execute",
+            "/task/update", "/task/review", "/task/execute", "/workflow/run",
         }
         if parsed.path not in project_routes:
             return self._handle_post(parsed, form)
@@ -556,7 +760,6 @@ class Handler(BaseHTTPRequestHandler):
             lock.release()
 
     def _handle_post(self, parsed, form):
-        execution_failed = False
         try:
             if parsed.path == "/create":
                 name = form.get("name", "").strip()
@@ -836,140 +1039,15 @@ class Handler(BaseHTTPRequestHandler):
                 save_project(project)
                 self.redirect(f"/project/{project_id}#task-{task_id}")
 
+            elif parsed.path == "/workflow/run":
+                project_id = form.get("id", "")
+                run_mock_workflow(project_id)
+                self.redirect(f"/project/{project_id}")
+
             elif parsed.path == "/task/execute":
                 project_id = form.get("id", "")
                 task_id = form.get("task_id", "")
-                project = load_project(project_id)
-
-                tasks = project.get("tasks", [])
-                task = next(
-                    (t for t in tasks if t.get("id") == task_id),
-                    None
-                )
-
-                if not task:
-                    raise ValueError("실행할 작업을 찾을 수 없습니다.")
-
-                task_index = tasks.index(task)
-                has_dependents = _task_has_dependents(tasks, task_index)
-                current_review_status = task_review_status(
-                    task,
-                    has_dependents=has_dependents,
-                )
-                if (
-                    task.get("status") == "완료"
-                    and not task.get("review_required")
-                    and current_review_status != REVIEW_CHANGES_REQUESTED
-                    and task_has_successful_result(project, task)
-                ):
-                    raise ValueError(
-                        "이미 완료된 작업입니다. 재실행하려면 먼저 '진행 중'으로 변경해 주세요."
-                    )
-
-                input_task_ids = _validate_task_predecessors(task, tasks, task_index)
-
-                unfinished = [
-                    t for t in tasks[:task_index]
-                    if t.get("status") != "완료" or t.get("review_required")
-                ]
-
-                if unfinished:
-                    names = ", ".join(
-                        t.get("name", t.get("id", "이름 없는 작업"))
-                        for t in unfinished
-                    )
-                    raise ValueError(
-                        f"앞선 작업을 먼저 완료해 주세요: {names}"
-                    )
-
-                old_status = task.get("status", "대기")
-                old_result = task.get("result", "")
-                review_feedback = (
-                    task.get("review_feedback", "")
-                    if current_review_status == REVIEW_CHANGES_REQUESTED
-                    else ""
-                )
-                _reset_review_approval(task, has_dependents)
-                task["status"] = "진행 중"
-                task["updated_at"] = now()
-
-                previous_results = _build_previous_results(
-                    task, tasks, task_index, input_task_ids
-                )
-                if review_feedback:
-                    previous_results.append({
-                        "task_id": task_id,
-                        "input_name": "검토 수정 요청",
-                        "task_name": "사용자 검토자",
-                        "result": review_feedback,
-                    })
-
-                try:
-                    result = execute_task(
-                        project,
-                        task,
-                        previous_results=previous_results
-                    )
-                    if not isinstance(result, str) or not result.strip():
-                        raise RuntimeError(
-                            "실행기가 빈 작업 결과를 반환했습니다. 결과를 저장하지 않았습니다."
-                        )
-                    task["result"] = result
-                    task["status"] = "완료"
-                    task["review_required"] = False
-                    task.pop("review_reason", None)
-                    task["review_status"] = REVIEW_PENDING if has_dependents else REVIEW_NOT_REQUIRED
-                    task.pop("review_feedback", None)
-                    task.pop("reviewed_at", None)
-                    task.pop("reviewed_by", None)
-                    task["updated_at"] = now()
-
-                    if old_result != result:
-                        mark_downstream_for_review(
-                            project,
-                            task_index,
-                            f"선행 업무 {task.get('name', task_id)} 결과가 다시 생성됨",
-                        )
-
-                    project.setdefault("history", []).append({
-                        "at": now(),
-                        "event": "task_execution_succeeded",
-                        "details": f"{task_id}: 작업 실행 성공 (실행 엔진: {get_execution_engine_name()})"
-                    })
-                except Exception as exc:
-                    task["status"] = "실행 실패"
-                    task["review_status"] = (
-                        REVIEW_CHANGES_REQUESTED
-                        if has_dependents and review_feedback
-                        else REVIEW_PENDING if has_dependents else REVIEW_NOT_REQUIRED
-                    )
-                    task["updated_at"] = now()
-                    project.setdefault("history", []).append({
-                        "at": now(),
-                        "event": "task_execution_failed",
-                        "details": f"{task_id}: 실행 실패 — {exc}"
-                    })
-                    if old_status != task["status"]:
-                        project.setdefault("history", []).append({
-                            "at": now(),
-                            "event": "task_status_changed",
-                            "details": f"{task_id}: {old_status} -> {task['status']}"
-                        })
-                    save_project(project)
-                    execution_failed = True
-                    raise
-
-                if old_status != task["status"]:
-                    project.setdefault("history", []).append({
-                        "at": now(),
-                        "event": "task_status_changed",
-                        "details": (
-                            f"{task_id}: {old_status} -> {task['status']}"
-                        )
-                    })
-
-                project["updated_at"] = now()
-                save_project(project)
+                execute_project_task(project_id, task_id)
                 self.redirect(f"/project/{project_id}#task-{task_id}")
 
             else:
@@ -986,7 +1064,7 @@ class Handler(BaseHTTPRequestHandler):
                 )
             else:
                 back_link = "<a class='button' href='/'>홈으로</a>"
-            task_status = ' data-task-status="실행 실패"' if execution_failed else ""
+            task_status = ' data-task-status="실행 실패"' if isinstance(exc, TaskExecutionFailure) else ""
             self.send_html(
                 page(
                     "오류",
@@ -1152,6 +1230,12 @@ class Handler(BaseHTTPRequestHandler):
 <button type="submit">관리자 계획 작성</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form>
 {self.render_plan(p)}
 </section>
+<section class="card"><h2>모의 업무 자동 진행</h2>
+<p class="muted">mock 모드에서 요청 한 번에 최대 {MAX_WORKFLOW_TASKS}개 업무를 처리합니다. 검토 승인 대기·수정 요청·실패 시 멈춥니다. 승인 후 다시 재개해 주세요.</p>
+<p><strong>멈춘 이유:</strong> {esc(p.get('workflow', {}).get('reason', '아직 시작하지 않았습니다.'))}</p>
+<form method="post" action="/workflow/run" data-processing-form data-processing-label="진행 중...">
+<input type="hidden" name="id" value="{esc(p['id'])}">
+<button type="submit">자동 진행 시작·재개 (mock 전용)</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form></section>
 <section class="card"><h2>결과물 보관 폴더</h2><p class="muted">프로젝트별 결과물은 이 폴더에 보관하도록 준비되어 있습니다.</p><code>data/artifacts/{esc(p['id'])}/</code></section>
 <section class="card"><h2>최근 변경 기록</h2><ul>{history or '<li>기록 없음</li>'}</ul></section>"""
         self.send_html(page(p.get("name", "프로젝트"), body))

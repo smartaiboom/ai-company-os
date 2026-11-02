@@ -75,3 +75,19 @@
 검증: `python -B -m unittest tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_pending_reservation_survives_reload_and_blocks_restart tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_timeout_http_body_and_connection_errors_are_sanitized_and_consumed tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_reservation_write_failure_never_calls_transport` — 3개 통과. 기존 테스트의 임시 저장·모의 transport만 사용했다. 추가 `python -B -` 인라인 모의 진단은 socket/socket.getaddrinfo를 차단한 상태에서 가상 transport 대기 중 reserved 유지, daemon 스레드 종료 대기 제외, 가상 TimeoutError 처리 완료 시 failed 저장을 확인했다(검증 2항 통과). 이 가상 프로젝트는 메모리에만 존재하며 기존 M4 프로젝트와 무관하다. 전체 테스트·브라우저 설치는 수행하지 않았다. 코드 변경 없이 보고서만 수정하고 재읽기 및 `git diff --check`를 수행했다.
 
 다음 1단계: 실제 호출 없이 임시 실행 도구의 요청 스레드 종료 대기와 전체 시간 제한/대기 구간 진단 설계를 보완하여 모의 검증하는 작업을 진행한다. 서버 종료만으로 요청 완료를 보장한다고 간주하면 안 된다. 이번에는 수정 제안만 남기며, 기존 reserved는 계속 재전송 차단 상태로 보존한다. 외부 완료 여부 확인 없이 failed 강제 변경·예산 초기화·새 프로젝트 생성으로 우회하지 않는다. M4/v0.1 실제 인수는 여전히 미완료다.
+
+
+## 테스트 실행 도구 보강 — 2026-11-02 KST
+
+`git pull --ff-only`로 `a1c176c`까지 반영했다. **추가 실제 공급자 API 호출 0회**. 기존 임시 실행 도구는 읽기만 했고 실행·변경하지 않았다. 원본/보존 JSON은 동일하며 기존 예약 ID·reserved 1건·소모 1/7회를 유지한다. 실제 프로젝트 재생성·재전송·예산 초기화·강제 failed 변경은 없다.
+
+변경 파일: `tests/support/m4_runner.py`, `tests/test_m4_runner_shutdown.py`, 이 보고서. 운영 앱/M1~M3/실제 전송 코드는 변경하지 않았다. 재사용 가능한 작은 loopback 전용 테스트 하네스는 non-daemon 요청 스레드를 직접 추적한다. shutdown/close 및 서버 루프 종료 후 monotonic 기반 공통 대기 예산으로 각 요청 스레드를 join하고, 살아 있으면 completion_unknown을 기록한다. 상태·구간만 고정 어휘로 KST 시각/경과 시간과 함께 관측하며 예외 원문·프롬프트·응답·인증 정보는 기록하지 않는다.
+
+종료 정책: 대기 한도 초과는 외부 작업 취소가 아니다. 미완료 worker를 보유한 프로세스를 계속 유지하며 자동 종료·kill·예약 수정·재전송을 하지 않는다. non-daemon은 조용한 작업 유실을 막지만 무응답 작업이 프로세스 종료를 무기한 지연시킬 수 있다. block_on_close=False로 암묵적 무한 join을 피하고 별도 관측 대기를 사용한다. shutdown 자체는 짧은 serve_forever poll을 기다리므로 관측 예산은 전체 종료의 절대 상한도 아니다. urllib 소켓 timeout과 별개인 외부 호출 전체 wall-clock 취소는 구현하지 않았으며, 협력적 취소/전송 설계가 추가로 필요하다. 클라이언트 timeout 증가만으로 해결했다고 판단하지 않는다. 이 하네스는 실제 API 실행 도구에 자동 연결되지 않는다.
+
+검증 명령과 결과:
+- `python -B -m unittest tests.test_m4_runner_shutdown`: 최초 샌드박스 실행 4개 모두 로컬 소켓 PermissionError. 승인된 동일 명령 재실행은 **4개 통과**. 정상 완료, 가상 transport TimeoutError, 클라이언트 우선 timeout 후 worker 완료, shutdown 대기 초과 시 reserved 바이트 보존 및 이후 가상 worker 완료를 확인했다. 실제 HTTP는 loopback만 사용했고 ai_safety.build_opener는 차단했으며 transport는 모의 구현만 주입했다. 테스트 상태는 새 임시 경로/가상 목표에만 기록했다.
+- `python -B -m unittest tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_pending_reservation_survives_reload_and_blocks_restart tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_timeout_http_body_and_connection_errors_are_sanitized_and_consumed tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_reservation_write_failure_never_calls_transport`: **3개 통과**.
+- 기존 두 JSON 일치·기존 예약 유지 확인, 보고서 재읽기 및 `git diff --check` 수행. 이번 요청의 대규모 테스트 금지에 따라 전체 회귀·브라우저 설치는 하지 않았다. 미해결 테스트 실패는 없다.
+
+M4/v0.1 실제 인수는 미완료이며 기존 외부 처리 상태는 여전히 미확인이다. 다음 1단계는 운영자가 기존 예약의 외부 처리 완료 여부를 확인하는 것이다. 이번 모의 보강 결과는 기존 예약의 재전송이나 실제 호출 재개를 승인하거나 안전하다고 판정하는 근거가 아니다.

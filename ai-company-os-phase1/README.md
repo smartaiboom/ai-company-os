@@ -21,7 +21,7 @@ Then open the URL printed in the terminal (default: http://127.0.0.1:8000).
 ## Data safety
 All new data is written only under this folder's `data/` directory.
 This starter does not access, move, or modify files from the existing AI Company OS project.
-No API calls are made in Phase 1.
+The default mock mode makes no external AI requests. Real AI mode sends data to the configured provider when planning or executing tasks.
 
 ## Phase 1 acceptance checks
 1. Create a project.
@@ -38,9 +38,11 @@ No API calls are made in Phase 1.
 OpenAI 호환 Chat Completions API를 연결하려면 Codespaces의 환경변수 또는 비밀 저장소에 다음 값을 설정합니다.
 
 - `AI_ENGINE=openai_compatible`
-- `AI_API_BASE_URL`: 제공자의 API 기본 URL (예: `https://제공자-주소/v1`)
+- `AI_API_BASE_URL`: OpenRouter API 기본 URL (`https://openrouter.ai/api/v1`)
 - `AI_API_KEY`: 제공자가 요구하는 API 키
-- `AI_MODEL`: 제공자가 지원하는 모델 이름
+- `AI_MODEL=openrouter/free`: 실제 요청에 허용되는 유일한 모델 ID
 - `AI_API_TIMEOUT`: 선택 항목, 요청 제한 시간(초), 기본값 90
 
-API 키를 소스 코드나 Git 저장소에 기록하지 마세요. 실제 AI 엔진을 선택하면 프로젝트 목표, 작업 지시, 필요한 입력 자료 및 이전 작업 결과가 설정한 외부 API 제공자에게 전송됩니다. 제공자의 데이터 처리 및 요금 정책을 먼저 확인하세요. 설정이 없거나 API 호출이 실패하면 작업은 성공으로 처리되지 않습니다. 실제 AI 응답 역시 별도 검증이 필요합니다.
+`openai-compatible` 별칭도 같은 실제 실행 모드입니다. 화면에는 현재 모드와 외부 전송 안내가 표시됩니다. 계획 작성 또는 작업 실행 시 프로젝트 목표, 작업 지시, 필요한 입력 자료 및 선행 결과가 설정한 외부 제공자에게 전송될 수 있습니다. 화면 조회만으로 AI 요청을 보내지는 않습니다.
+
+실제 요청 전에 모델 ID가 정확히 `openrouter/free`인지 검사하며, 값이 없거나 다르면 중단합니다. 유료 모델 전환이나 fallback은 없습니다. 지원하지 않는 실행 모드도 요청 전에 오류로 중단합니다. API 키를 소스 코드나 Git 저장소에 기록하지 마세요. 설정 오류나 API 호출 실패는 성공으로 처리되지 않습니다. 실제 AI 응답 역시 별도 검증이 필요합니다.

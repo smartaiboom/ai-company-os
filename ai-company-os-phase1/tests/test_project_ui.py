@@ -1,6 +1,7 @@
 """User-facing rendering tests for project plan and task state screens."""
 
 import tempfile
+import os
 import unittest
 from pathlib import Path
 from unittest.mock import patch
@@ -23,6 +24,35 @@ class ProjectUITests(unittest.TestCase):
         with patch.object(app.Handler, "send_html", autospec=True) as send_html:
             method(handler, self.PROJECT_ID)
         return send_html.call_args.args[1]
+
+    def test_execution_mode_notice_matches_mode_without_requests_or_secrets(self):
+        project = {"id": self.PROJECT_ID, "name": "모드 안내", "tasks": [], "history": []}
+        for engine, expected in (
+            ("mock", "모의 실행 모드: 외부 AI 요청 없음"),
+            ("openai_compatible", "실제 AI 실행 모드"),
+            ("openai-compatible", "실제 AI 실행 모드"),
+            ("unknown", "실행 모드 설정 오류"),
+        ):
+            with self.subTest(engine=engine), patch.dict(os.environ, {
+                "AI_ENGINE": engine,
+                "AI_API_KEY": "test-secret-never-display",
+                "AI_MODEL": "invalid-model-never-display",
+            }, clear=True), patch.object(app, "PROJECTS_DIR", self.projects_dir), \
+                 patch("manager_plan.urlopen") as planner_request, \
+                 patch("execution_engine.urlopen") as task_request:
+                html = self._render(app.Handler.project_detail, project)
+                self.assertIn(expected, html)
+                self.assertNotIn("test-secret-never-display", html)
+                self.assertNotIn("invalid-model-never-display", html)
+                self.assertNotIn("현재는 모의 관리자입니다", html)
+                if engine in {"openai_compatible", "openai-compatible"}:
+                    self.assertIn("openrouter/free", html)
+                    self.assertIn("목표·업무 입력·선행 결과", html)
+                    self.assertIn("외부 제공자에 전송될 수 있습니다", html)
+                    self.assertIn("요청 전에 중단합니다", html)
+                    self.assertNotIn("외부 AI 요청 없음", html)
+                planner_request.assert_not_called()
+                task_request.assert_not_called()
 
     def test_pending_plan_is_visible_and_can_be_approved(self):
         project = {

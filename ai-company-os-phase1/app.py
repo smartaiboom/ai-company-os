@@ -443,6 +443,18 @@ def _build_previous_results(task, tasks, task_index, input_task_ids):
 def esc(value):
     return html.escape(str(value), quote=True)
 
+def execution_mode_notice():
+    engine = get_execution_engine_name()
+    if engine == "mock":
+        return "모의 실행 모드: 외부 AI 요청 없음."
+    if engine in {"openai_compatible", "openai-compatible"}:
+        return (
+            "실제 AI 실행 모드: 허용 모델은 openrouter/free입니다. "
+            "계획 작성 또는 작업 실행 시 목표·업무 입력·선행 결과가 외부 제공자에 전송될 수 있습니다. "
+            "모델 설정이 없거나 openrouter/free와 다르면 요청 전에 중단합니다."
+        )
+    return "실행 모드 설정 오류: 지원하지 않는 모드에서는 외부 AI 요청을 보내지 않습니다."
+
 def page(title, body):
     return f"""<!doctype html>
 <html lang="ko"><head><meta charset="utf-8">
@@ -1094,8 +1106,8 @@ class Handler(BaseHTTPRequestHandler):
 <option value="paused" {"selected" if p.get("status")=="paused" else ""}>일시 중지</option>
 <option value="completed" {"selected" if p.get("status")=="completed" else ""}>완료</option>
 </select><button type="submit">저장</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form></section>
-<section class="card"><h2>AI 관리자 · 작업 계획 (2단계 모의 기능)</h2>
-<p class="muted">현재는 모의 관리자입니다. 외부 AI API를 호출하지 않습니다. 계획을 작성한 뒤 사용자가 승인해야 다음 단계로 진행합니다.</p>
+<section class="card"><h2>AI 관리자 · 작업 계획</h2>
+<p class="muted">{esc(execution_mode_notice())} 계획을 작성한 뒤 사용자가 승인해야 다음 단계로 진행합니다.</p>
 <form method="post" action="/manager/plan" data-processing-form data-processing-label="작성 중..."><input type="hidden" name="id" value="{esc(p['id'])}">
 <label for="manager_goal">하고 싶은 일 / 목표</label><textarea id="manager_goal" name="manager_goal" rows="4" maxlength="4000" placeholder="원하는 일을 자연어로 입력해 주세요.">{esc(p.get('manager_goal', p.get('goal','')))}</textarea>
 <button type="submit">관리자 계획 작성</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form>

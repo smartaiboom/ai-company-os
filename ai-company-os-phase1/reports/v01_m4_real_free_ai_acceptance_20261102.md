@@ -60,3 +60,18 @@
 원본 기록은 `/tmp/ai-company-os-m4/projects/c85d9853906a.json`에 보존했다. 임시 경로 소실에 대비해 동일 기록을 Git 제외 경로 `data/m4_acceptance_preserved/projects/c85d9853906a.json`에 추가 보존했다. 기존 파일을 덮어쓰거나 예약 상태를 수정하지 않았다. 향후 이 두 경로는 동일 프로젝트의 복제본이며 별도 예산이 아니다. 프로젝트 JSON·실제 결과·임시 도구·기존 미추적 파일은 커밋하지 않는다.
 
 **판정: M4 및 v0.1 실제 인수는 미완료.** 직접 승인·격리 활성화·영속 예약까지 확인했으나 실제 모델 결과는 확인하지 못했다. 다음 1단계는 운영자가 이 기존 예약의 실제 전송/완료 여부를 확인하는 것이다. 확인 전에는 재시도·예약 초기화·새 프로젝트 생성으로 진행하지 않는다. 확인 후에도 추가 호출은 별도 명시적 재개 및 공통 안전 검사 조건에 따라 판단해야 한다.
+
+
+## 예약/타임아웃 진단 — 2026-11-02 KST
+
+`git pull --ff-only`로 `34c763f`까지 반영하고 진단 전용 지시서를 수행했다. **추가 실제 API 호출 0회, 외부 네트워크 진단 0회**. 기존 두 JSON은 바이트 단위로 동일하며, 같은 프로젝트의 예약 `b4d499324885494f9148ac4d67318075`가 `2026-11-02T15:24:16+09:00`에 plan/openrouter/free로 기록되어 있다. 상태 reserved, finished_at 없음, 누적 소모 1/7회이며 복제본을 합산하지 않는다. 원본·복제본·예산·동의·기존 미추적 파일을 변경하지 않았다.
+
+확인한 사실: 임시 실행 도구는 ThreadingHTTPServer를 사용하므로 단일 스레드 서버가 아니다. 요청마다 별도 daemon 스레드에서 처리한다. app의 프로젝트 락은 비차단 취득이며 예약 저장 콜백은 save_project로 직접 파일 교체를 수행하고 같은 락을 재취득하지 않는다. 이 경로에서 재귀 락 교착의 근거는 발견하지 못했다. 최초 예약이 저장됐으므로 최초 저장 이전 정지도 아니다. 외부 요청이 끝나야 manager/plan의 loopback 응답이 전송된다.
+
+원인 후보: 외부 urllib timeout 45초는 전체 작업의 절대 마감이 아니다. 표준 라이브러리 create_connection은 DNS 조회 뒤 주소별 소켓에 timeout을 적용하며, 연결·TLS·HTTP 응답/본문 읽기가 합쳐진 전체 시간은 이를 넘을 수 있다. 따라서 loopback 클라이언트 timeout 55초가 먼저 발생해도 모순이 아니다. 어느 구간에서 대기했는지는 당시 구간별 로그가 없어 확정할 수 없다. 외부 전송·제공자 처리 완료 여부 역시 미확인이다.
+
+예약이 남는 구조적 경로: 클라이언트 TimeoutError 뒤 임시 도구는 server.shutdown(), server_close(), serve_forever 스레드 join만 수행했다. Python의 ThreadingHTTPServer.daemon_threads=True이며 ThreadingMixIn의 종료 대기 목록은 daemon 요청 스레드를 제외한다. 따라서 아직 외부 요청 중인 작업 스레드의 종료를 기다리지 않고 프로세스가 종료될 수 있다. 이 경우 ai_safety.request_json의 except Exception 또는 성공 저장까지 도달하지 못해 reserved가 남는다. 당시 발생 원인으로는 유력한 추정이며, 모의 재현만으로 실제 대기 지점이나 외부 처리 결과를 확정하지 않는다. 단순한 loopback 클라이언트 단절 자체가 예약을 failed로 바꾸는 경로는 없다.
+
+검증: `python -B -m unittest tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_pending_reservation_survives_reload_and_blocks_restart tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_timeout_http_body_and_connection_errors_are_sanitized_and_consumed tests.test_real_ai_safety_budget.RealAISafetyBudgetTests.test_reservation_write_failure_never_calls_transport` — 3개 통과. 기존 테스트의 임시 저장·모의 transport만 사용했다. 추가 `python -B -` 인라인 모의 진단은 socket/socket.getaddrinfo를 차단한 상태에서 가상 transport 대기 중 reserved 유지, daemon 스레드 종료 대기 제외, 가상 TimeoutError 처리 완료 시 failed 저장을 확인했다(검증 2항 통과). 이 가상 프로젝트는 메모리에만 존재하며 기존 M4 프로젝트와 무관하다. 전체 테스트·브라우저 설치는 수행하지 않았다. 코드 변경 없이 보고서만 수정하고 재읽기 및 `git diff --check`를 수행했다.
+
+다음 1단계: 실제 호출 없이 임시 실행 도구의 요청 스레드 종료 대기와 전체 시간 제한/대기 구간 진단 설계를 보완하여 모의 검증하는 작업을 진행한다. 서버 종료만으로 요청 완료를 보장한다고 간주하면 안 된다. 이번에는 수정 제안만 남기며, 기존 reserved는 계속 재전송 차단 상태로 보존한다. 외부 완료 여부 확인 없이 failed 강제 변경·예산 초기화·새 프로젝트 생성으로 우회하지 않는다. M4/v0.1 실제 인수는 여전히 미완료다.

@@ -4,6 +4,12 @@
 
 ## 최근 완료 작업
 
+### 2026-11-02 (KST) — mock 품질 수정 1회 및 재평가
+
+- 최신 changes_needed와 현재 binding이 일치하는 미승인 업무에 명시적 mock 수정 1회·재평가 1회를 추가했다. 실행 전 예약을 저장해 중복/재시작 추가 실행을 막고, 실패 시 이전 성공 결과를 보존한다. 사용자 의견·승인·확정 결과는 임의 수정하지 않는다.
+- 검증: 신규 11개 통과, 전체 119개 중 118개 통과·브라우저 1개 skip. 임시 projects/artifacts, mock, 기존 loopback HTTP만 사용. 실제 AI API 호출 없음.
+- 보고서: [`mock_quality_revision_once_20261102.md`](../reports/mock_quality_revision_once_20261102.md). 구현 커밋은 이 항목을 추가한 커밋에서 확인할 수 있다.
+
 ### 2026-11-02 (KST) — mock 품질 검사 HTTP 검증
 
 - 실제 loopback HTTP에서 판정·피드백·KST 저장, GET 무쓰기, 중복 멱등성, stale/재검사, 사용자 승인·스냅샷 보존, 잘못된 요청 거절, 동일 프로젝트 409/다른 프로젝트 병행을 확인했다. 운영 코드 변경 없음.

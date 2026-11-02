@@ -540,6 +540,23 @@ def quality_binding(project, task_index, ruleset_id=RULESET_ID, reviewer_id=REVI
     }
 
 
+def attach_quality_review(project, index, ruleset_id=RULESET_ID, reviewer_id=REVIEWER_ID):
+    task = project["tasks"][index]
+    binding = quality_binding(project, index, ruleset_id, reviewer_id)
+    outcome = "succeeded"
+    try:
+        review = evaluate_format(task["result"], ruleset_id, reviewer_id)
+        validate_review(review)
+    except Exception:
+        review = inconclusive_review()
+        outcome = "error"
+    task["quality_review"] = {**review, "binding": binding, "outcome": outcome, "review_id": uuid.uuid4().hex, "checked_at": now()}
+    project.setdefault("history", []).append({
+        "at": now(), "event": "quality_review_completed" if outcome == "succeeded" else "quality_review_failed",
+        "details": f"{task['id']}: 모의 형식 검사 {review['verdict']} ({task['quality_review']['review_id']})",
+    })
+
+
 def store_quality_review(project_id, task_id, ruleset_id, reviewer_id):
     if get_execution_engine_name() != "mock":
         raise ValueError("모의 형식 검사는 mock 모드에서만 가능합니다.")
@@ -559,19 +576,75 @@ def store_quality_review(project_id, task_id, ruleset_id, reviewer_id):
             return
         except ValueError:
             pass
-    outcome = "succeeded"
-    try:
-        review = evaluate_format(task["result"], ruleset_id, reviewer_id)
-        validate_review(review)
-    except Exception:
-        review = inconclusive_review()
-        outcome = "error"
-    task["quality_review"] = {**review, "binding": binding, "outcome": outcome, "review_id": uuid.uuid4().hex, "checked_at": now()}
-    project.setdefault("history", []).append({
-        "at": now(), "event": "quality_review_completed" if outcome == "succeeded" else "quality_review_failed",
-        "details": f"{task_id}: 모의 형식 검사 {review['verdict']} ({task['quality_review']['review_id']})",
-    })
+    attach_quality_review(project, index, ruleset_id, reviewer_id)
     save_project(project)
+
+
+_QUALITY_REVISION_ONCE = object()
+
+
+def validate_quality_revision(project, index, reserved=False):
+    if get_execution_engine_name() != "mock":
+        raise ValueError("수정 1회 및 재검토는 mock 모드에서만 가능합니다.")
+    task = project["tasks"][index]
+    review = task.get("quality_review")
+    validate_review(review)
+    if not task_needs_approval(project, index):
+        raise ValueError("수정 후 사용자 승인 경계가 있는 업무만 지원합니다.")
+    if (review["verdict"] != "changes_needed" or review.get("outcome") != "succeeded"
+            or review.get("binding") != quality_binding(project, index)):
+        raise ValueError("현재 결과에 일치하는 최신 수정 필요 판정이 있어야 합니다.")
+    if (task_review_status(task, task_needs_approval(project, index)) in {REVIEW_APPROVED, REVIEW_CHANGES_REQUESTED}
+            or task.get("review_feedback") or project.get("final_report", {}).get("status") == "confirmed"):
+        raise ValueError("사용자 승인·수정 요청 또는 최종 확정을 먼저 확인해 주세요. 임의 수정하지 않습니다.")
+    cycle = task.get("quality_revision_once")
+    if reserved:
+        if (not isinstance(cycle, dict) or cycle.get("phase") != "reserved" or cycle.get("attempts") != 1
+                or cycle.get("origin_review_id") != review.get("review_id")):
+            raise ValueError("유효한 수정 시도 예약이 없습니다.")
+    elif cycle is not None:
+        raise ValueError("수정 1회 시도를 이미 사용했거나 중단됐습니다. 사용자 확인이 필요합니다.")
+
+
+def revise_quality_once(project_id, task_id):
+    if get_execution_engine_name() != "mock":
+        raise ValueError("수정 1회 및 재검토는 mock 모드에서만 가능합니다.")
+    project = load_project(project_id)
+    matches = [i for i, t in enumerate(project.get("tasks", [])) if t.get("id") == task_id]
+    if not task_id or len(matches) != 1:
+        raise ValueError("수정할 정확한 업무 ID 하나가 필요합니다.")
+    index = matches[0]
+    validate_quality_revision(project, index)
+    task = project["tasks"][index]
+    task["quality_revision_once"] = {
+        "operation_id": uuid.uuid4().hex, "origin_review_id": task["quality_review"]["review_id"],
+        "origin_binding": task["quality_review"]["binding"], "attempts": 1, "phase": "reserved",
+        "reevaluation_attempts": 0,
+        "started_at": now(), "reason": "수정 시도 예약됨. 처리 중단 시 자동 재시도하지 않습니다.",
+    }
+    project.setdefault("history", []).append({"at": now(), "event": "quality_revision_reserved", "details": f"{task_id}: mock 수정 1회 예약"})
+    save_project(project)  # Must persist the consumed attempt before invoking an executor.
+    reevaluated = False
+    try:
+        candidate = execute_project_task(project_id, task_id, _quality_revision=_QUALITY_REVISION_ONCE)
+        reevaluated = True
+        attach_quality_review(candidate, index)
+        revised = candidate["tasks"][index]
+        if revised["quality_review"]["outcome"] == "error":
+            raise RuntimeError("재평가 오류로 이전 성공 결과를 보존했습니다.")
+        cycle = revised["quality_revision_once"]
+        cycle.update(phase="stopped", reevaluation_attempts=1, reevaluation_verdict=revised["quality_review"]["verdict"], stopped_at=now(), reason=f"수정 1회 완료 · {revised['quality_review']['verdict']} · 사용자 승인 또는 확인 필요")
+        candidate.setdefault("history", []).append({"at": now(), "event": "quality_revision_stopped", "details": f"{task_id}: {cycle['reason']}"})
+        save_project(candidate)
+    except (ValueError, RuntimeError, OSError, KeyError, TypeError):
+        # Retain the reserved baseline, including when a candidate save failed.
+        original = project
+        cycle = original["tasks"][index]["quality_revision_once"]
+        cycle.update(phase="error", stopped_at=now(), reason="수정 실행·재평가 또는 저장 오류. 이전 성공 결과를 보존했으며 남은 수정 횟수는 0회입니다.")
+        cycle.update(reevaluation_attempts=int(reevaluated), reevaluation_verdict="inconclusive" if reevaluated else None)
+        original.setdefault("history", []).append({"at": now(), "event": "quality_revision_failed", "details": f"{task_id}: {cycle['reason']}"})
+        save_project(original)
+        raise RuntimeError(cycle["reason"])
 
 
 def quality_review_controls(project, task_index):
@@ -589,13 +662,24 @@ def quality_review_controls(project, task_index):
             feedback += [f"{c['expected']}: {str(c['line']) + '행' if c['satisfied'] else '누락'}" for c in review["checks"]]
         except (ValueError, TypeError, KeyError):
             label = "stale · 이전 판정 (결과·입력·정책 변경 또는 확인 필요)"
+    cycle = task.get("quality_revision_once")
+    cycle_reason = cycle.get("reason", "중단된 예약 · 사용자 확인 필요") if isinstance(cycle, dict) else "아직 수정 시도를 사용하지 않았습니다."
+    if isinstance(cycle, dict) and cycle.get("phase") == "reserved":
+        cycle_reason = "처리 중 또는 중단된 수정 예약입니다. 자동 재시도하지 않으며 사용자 확인이 필요합니다."
+    remaining = 0 if cycle is not None else 1
+    reassessment = {"pass": "형식 검사 통과", "changes_needed": "수정 필요", "inconclusive": "판정 불가"}.get(cycle.get("reevaluation_verdict") if isinstance(cycle, dict) else None, "미실행")
     return f"""<section><p><strong>모의 형식 검사:</strong> {esc(label)}</p>
 <p class='muted'>공개 규칙 required-sections-v1: 목표·결과·미확인 사항을 독립된 줄 또는 Markdown 제목으로 검사합니다. 사실성 검증·사용자 승인·자동 수정이 아닙니다.</p>
 <ul>{''.join(f'<li>{esc(item)}</li>' for item in feedback)}</ul>
 <form method='post' action='/quality/review' data-processing-form data-processing-label='검사 중...'>
 <input type='hidden' name='id' value='{esc(project['id'])}'><input type='hidden' name='task_id' value='{esc(task.get('id', ''))}'>
 <input type='hidden' name='reviewer_id' value='{REVIEWER_ID}'><input type='hidden' name='ruleset_id' value='{RULESET_ID}'>
-<button type='submit'>모의 형식 검사 (mock 전용)</button><p data-processing-status hidden></p></form></section>"""
+<button type='submit'>모의 형식 검사 (mock 전용)</button><p data-processing-status hidden></p></form>
+<p>수정 중단 이유: {esc(cycle_reason)} · 남은 수정 횟수: {remaining}회</p>
+<p>수정 후 재평가: {esc(reassessment)} · 사용자 승인은 별도입니다.</p>
+<form method='post' action='/quality/revise-once' data-processing-form data-processing-label='수정·재검토 중...'>
+<input type='hidden' name='id' value='{esc(project['id'])}'><input type='hidden' name='task_id' value='{esc(task.get('id', ''))}'>
+<button type='submit'>수정 1회 및 재검토 (mock 전용)</button><p data-processing-status hidden></p></form></section>"""
 
 
 def task_review_controls(project, task_index):
@@ -698,7 +782,7 @@ class TaskExecutionFailure(RuntimeError):
     pass
 
 
-def execute_project_task(project_id, task_id, executor=None):
+def execute_project_task(project_id, task_id, executor=None, *, _quality_revision=None):
     """Execute and save one task; caller must hold the project mutation lock."""
     project = load_project(project_id)
 
@@ -712,6 +796,10 @@ def execute_project_task(project_id, task_id, executor=None):
         raise ValueError("실행할 작업을 찾을 수 없습니다.")
 
     task_index = tasks.index(task)
+    quality_revision = _quality_revision is _QUALITY_REVISION_ONCE
+    if quality_revision:
+        validate_quality_revision(project, task_index, reserved=True)
+        executor = execute_task_mock
     has_dependents = task_needs_approval(project, task_index)
     current_review_status = task_review_status(
         task,
@@ -722,6 +810,7 @@ def execute_project_task(project_id, task_id, executor=None):
         and not task.get("review_required")
         and current_review_status != REVIEW_CHANGES_REQUESTED
         and task_has_successful_result(project, task)
+        and not quality_revision
     ):
         raise ValueError(
             "이미 완료된 작업입니다. 재실행하려면 먼저 '진행 중'으로 변경해 주세요."
@@ -767,6 +856,11 @@ def execute_project_task(project_id, task_id, executor=None):
             "input_name": "검토 수정 요청",
             "task_name": "사용자 검토자",
             "result": review_feedback,
+        })
+    if quality_revision:
+        previous_results.append({
+            "task_id": task_id, "input_name": "자동 품질 검토 수정 의견", "task_name": REVIEWER_ID,
+            "result": "\n".join(task["quality_review"]["feedback"]),
         })
 
     try:
@@ -824,7 +918,8 @@ def execute_project_task(project_id, task_id, executor=None):
                 "event": "task_status_changed",
                 "details": f"{task_id}: {old_status} -> {task['status']}"
             })
-        save_project(project)
+        if not quality_revision:
+            save_project(project)
         raise TaskExecutionFailure(str(exc)) from exc
 
     if old_status != task["status"]:
@@ -837,6 +932,8 @@ def execute_project_task(project_id, task_id, executor=None):
         })
 
     project["updated_at"] = now()
+    if quality_revision:
+        return project
     save_project(project)
 
 
@@ -995,7 +1092,7 @@ class Handler(BaseHTTPRequestHandler):
         form = self.read_form()
         project_routes = {
             "/update", "/manager/plan", "/manager/approve", "/manager/reject",
-            "/task/update", "/task/review", "/task/execute", "/workflow/run", "/quality/review",
+            "/task/update", "/task/review", "/task/execute", "/workflow/run", "/quality/review", "/quality/revise-once",
         }
         if parsed.path not in project_routes:
             return self._handle_post(parsed, form)
@@ -1300,6 +1397,11 @@ class Handler(BaseHTTPRequestHandler):
                     archive_final_report(project)
                 save_project(project)
                 self.redirect(f"/project/{project_id}#task-{task_id}")
+
+            elif parsed.path == "/quality/revise-once":
+                project_id = form.get("id", "")
+                revise_quality_once(project_id, form.get("task_id", ""))
+                self.redirect(f"/project/{project_id}")
 
             elif parsed.path == "/quality/review":
                 project_id = form.get("id", "")

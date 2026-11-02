@@ -54,6 +54,12 @@ class ObservedServer(ThreadingHTTPServer):
     def handle_error(self, request, client_address):
         pass  # Never print request/exception contents in a mock lifecycle runner.
 
+    def requests_finished(self):
+        """Evidence only after server shutdown and every tracked request exits."""
+        with self.guard:
+            return (not self.loop.is_alive() and self.socket.fileno() == -1
+                    and all(not worker.is_alive() for worker in self.workers))
+
     def stop_and_observe(self, wait_seconds):
         """Stop accepting; report unknown on deadline, leave live workers intact.
 

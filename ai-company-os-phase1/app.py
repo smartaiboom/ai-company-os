@@ -1,4 +1,5 @@
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from contextlib import contextmanager
 from urllib.parse import parse_qs, urlparse
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -213,6 +214,35 @@ def save_project(project):
     temp_path = path.with_suffix(".json.tmp")
     temp_path.write_text(json.dumps(project, ensure_ascii=False, indent=2), encoding="utf-8")
     temp_path.replace(path)
+
+
+@contextmanager
+def uncertain_project_lock(project_id, ledger):
+    """Explicit tooling only; ordinary HTTP routes keep reserved blocked."""
+    if ledger.project_path != project_path(project_id).resolve():
+        raise ValueError("판단 기록의 프로젝트 원본 경로가 일치하지 않습니다.")
+    lock = project_mutation_lock(project_id)
+    if not lock.acquire(blocking=False):
+        raise ValueError("프로젝트가 처리 중입니다.")
+    try:
+        yield load_project(project_id)
+    finally:
+        lock.release()
+
+
+def record_uncertain_decision(project_id, ledger, decision, observer):
+    """Caller must supply a real, current user judgment; never auto-approve."""
+    with uncertain_project_lock(project_id, ledger) as project:
+        ledger.record_user_decision(project, decision, observer)
+
+
+@contextmanager
+def uncertain_request_scope(project_id, ledger, observer):
+    """One explicit new attempt, preserving both application and ledger locks."""
+    with uncertain_project_lock(project_id, ledger) as project:
+        with ledger.request_scope(project, observer), request_scope(save_project):
+            yield project
+
 
 def mark_downstream_for_review(project, task_index, reason):
     """진행 중이거나 완료된 후속 작업만 재검토 대상으로 표시한다."""

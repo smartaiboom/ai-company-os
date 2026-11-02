@@ -69,6 +69,7 @@ class RunnerShutdownTests(unittest.TestCase):
             caller.start()
             try:
                 self.assertTrue(entered.wait(1))
+                self.assertFalse(server.requests_finished())
                 if client_timeout:
                     caller.join(1)
                     self.assertFalse(caller.is_alive())
@@ -76,12 +77,14 @@ class RunnerShutdownTests(unittest.TestCase):
                 if unfinished:
                     before = path.read_bytes()
                     self.assertFalse(server.stop_and_observe(0.01))
+                    self.assertFalse(server.requests_finished())
                     self.assertEqual(before, path.read_bytes())
                     self.assertEqual(json.loads(before)['real_ai']['attempts'][0]['status'], 'reserved')
                     self.assertTrue(any(w.is_alive() for w in server.workers))
                     self.assertTrue(all(not w.daemon for w in server.workers))
                 release.set()
                 self.assertTrue(server.stop_and_observe(1))
+                self.assertTrue(server.requests_finished())
                 caller.join(1)
                 self.assertFalse(caller.is_alive())
                 self.assertEqual(errors, [])

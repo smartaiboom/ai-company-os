@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import uuid
+import uncertain_reservations
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -74,7 +75,8 @@ def check_project_permission(project, goal=None):
         raise ValueError("실제 AI 예산 기록이 올바르지 않습니다.")
     if len({a["id"] for a in attempts}) != len(attempts):
         raise ValueError("중복된 AI 시도 기록이 있습니다.")
-    if any(a["status"] == "reserved" for a in attempts):
+    if (any(a["status"] == "reserved" for a in attempts)
+            and not uncertain_reservations.permits(project, effective_goal)):
         raise ValueError("완료 여부가 불명확한 AI 예약이 있습니다. 자동 재전송하지 않습니다.")
     if len(attempts) >= limit:
         raise ValueError("프로젝트 실제 AI 요청 예산을 소진했습니다.")
@@ -107,6 +109,8 @@ def request_json(project, *, model, base_url, body, api_key, timeout, transport,
     entry = {"id": uuid.uuid4().hex, "kind": kind, "task_id": task_id, "model": MODEL,
              "status": "reserved", "reserved_at": now(), "input_bytes": len(body),
              "max_tokens": payload["max_tokens"]}
+    if any(a["status"] == "reserved" for a in attempts):
+        uncertain_reservations.consume(project, entry["id"])
     state["attempts"] = attempts + [entry]
     state["limit"] = limit
     scope["persist"](project)  # No transport without a durable consumed attempt.

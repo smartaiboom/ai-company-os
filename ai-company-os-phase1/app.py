@@ -12,7 +12,8 @@ import re
 import threading
 from weakref import WeakValueDictionary
 from execution_engine import execute_task, execute_task_mock, get_execution_engine_name
-from manager_plan import build_manager_plan
+from manager_plan import build_manager_plan, validate_stages
+from copy import deepcopy
 from quality_review import REVIEWER_ID, RULESET_ID, evaluate_format, validate_review, inconclusive_review
 from ai_safety import request_scope, check_project_permission, MAX_CALLS, MAX_CALLS_PER_REQUEST
 import semantic_review
@@ -1041,6 +1042,39 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
 
 
 _SEMANTIC_EXECUTION = object()
+
+
+def edit_pending_plan(project_id, stages, feedback, expected_plan_hash):
+    """Locally edit an unapproved draft; never approve or request an AI plan."""
+    with project_mutation_lock(project_id):
+        project = load_project(project_id)
+        plan = project.get("plan", {})
+        if (plan.get("status") not in {"pending_approval", "changes_requested"}
+                or project.get("tasks") or plan.get("approved_at")):
+            raise ValueError("업무가 없는 승인 전 계획만 편집할 수 있습니다.")
+        if _digest(plan) != expected_plan_hash:
+            raise ValueError("계획이 변경되었습니다. 최신 초안을 확인해 주세요.")
+        goal = project.get("manager_goal") or project.get("goal")
+        if plan.get("goal") != goal:
+            raise ValueError("계획 목표와 프로젝트 목표가 일치하지 않습니다.")
+        if not isinstance(feedback, str) or not feedback.strip():
+            raise ValueError("계획 수정 사유가 필요합니다.")
+        normalized = validate_stages(stages)
+        project.setdefault("plan_revisions", []).append({
+            "at": now(), "source": "local_draft_edit",
+            "plan_hash": _digest(plan), "plan": deepcopy(plan),
+            "feedback": feedback.strip(),
+        })
+        plan["stages"] = normalized
+        plan["status"] = "pending_approval"
+        plan["feedback"] = feedback.strip()
+        plan["edited_at"] = now()
+        plan["edit_source"] = "local_draft_edit"
+        project.setdefault("history", []).append({
+            "at": now(), "event": "plan_draft_edited",
+            "details": "승인 전 계획 초안 편집 — 원본 보존, 사용자 승인 대기",
+        })
+        save_project(project)
 
 
 def semantic_tasks(project):

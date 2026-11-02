@@ -11,6 +11,7 @@ import threading
 from weakref import WeakValueDictionary
 from execution_engine import execute_task, execute_task_mock, get_execution_engine_name
 from manager_plan import build_manager_plan
+from quality_review import REVIEWER_ID, RULESET_ID, evaluate_format, validate_review, inconclusive_review
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -505,6 +506,98 @@ def _reset_review_approval(task, has_dependents):
     task.pop("reviewed_at", None)
     task.pop("reviewed_by", None)
 
+def result_revision(task):
+    revision = task.get("result_revision", 0)
+    if type(revision) is not int or revision < 0:
+        raise ValueError("업무 결과 버전이 올바르지 않습니다.")
+    return revision
+
+
+def quality_input_context(project, task_index):
+    evidence = final_evidence(project)
+    task = project["tasks"][task_index]
+    evidence["tasks"] = evidence["tasks"][:task_index]
+    evidence["execution_events"] = evidence["execution_events"][:task_index]
+    evidence["instructions"] = {k: task.get(k) for k in ("id", "name", "role", "inputs", "input_task_ids", "output", "risk")}
+    evidence["predecessor_revisions"] = [result_revision(t) for t in project["tasks"][:task_index]]
+    return _digest(evidence)
+
+
+def quality_binding(project, task_index, ruleset_id=RULESET_ID, reviewer_id=REVIEWER_ID):
+    task = project["tasks"][task_index]
+    if (task.get("status") != "완료" or task_requires_review(task)
+            or not isinstance(task.get("result"), str) or not task["result"].strip()
+            or not task_has_successful_result(project, task)):
+        raise ValueError("완료된 성공 결과와 재검토 해제가 있어야 형식을 검사할 수 있습니다.")
+    _validate_task_predecessors(task, project["tasks"], task_index)
+    context = quality_input_context(project, task_index)
+    if task.get("quality_execution_context", context) != context:
+        raise ValueError("업무 실행 후 입력 맥락이 변경됐습니다. 다시 실행해 주세요.")
+    return {
+        "target_task_id": task["id"], "result_revision": result_revision(task),
+        "result_hash": _digest(task["result"]), "input_context_hash": context,
+        "policy_hash": _digest({"reviewer_id": reviewer_id, "ruleset_id": ruleset_id}),
+    }
+
+
+def store_quality_review(project_id, task_id, ruleset_id, reviewer_id):
+    if get_execution_engine_name() != "mock":
+        raise ValueError("모의 형식 검사는 mock 모드에서만 가능합니다.")
+    if ruleset_id != RULESET_ID or reviewer_id != REVIEWER_ID:
+        raise ValueError("허용되지 않은 형식 검사 규칙 또는 검토자입니다.")
+    project = load_project(project_id)
+    matches = [i for i, t in enumerate(project.get("tasks", [])) if t.get("id") == task_id]
+    if not task_id or len(matches) != 1:
+        raise ValueError("검사할 정확한 업무 ID 하나를 지정해 주세요.")
+    index = matches[0]
+    task = project["tasks"][index]
+    binding = quality_binding(project, index, ruleset_id, reviewer_id)
+    previous = task.get("quality_review", {})
+    if isinstance(previous, dict) and previous.get("binding") == binding:
+        try:
+            validate_review(previous)
+            return
+        except ValueError:
+            pass
+    outcome = "succeeded"
+    try:
+        review = evaluate_format(task["result"], ruleset_id, reviewer_id)
+        validate_review(review)
+    except Exception:
+        review = inconclusive_review()
+        outcome = "error"
+    task["quality_review"] = {**review, "binding": binding, "outcome": outcome, "review_id": uuid.uuid4().hex, "checked_at": now()}
+    project.setdefault("history", []).append({
+        "at": now(), "event": "quality_review_completed" if outcome == "succeeded" else "quality_review_failed",
+        "details": f"{task_id}: 모의 형식 검사 {review['verdict']} ({task['quality_review']['review_id']})",
+    })
+    save_project(project)
+
+
+def quality_review_controls(project, task_index):
+    task = project["tasks"][task_index]
+    review = task.get("quality_review")
+    label, feedback = "미검토", []
+    if review is not None:
+        try:
+            validate_review(review)
+            if review.get("binding") != quality_binding(project, task_index):
+                raise ValueError("stale")
+            label = {"pass": "형식 검사 통과", "changes_needed": "수정 필요", "inconclusive": "판정 불가"}[review["verdict"]]
+            feedback = list(review["feedback"])
+            feedback.append(f"검사 시각(KST): {review.get('checked_at', '')}")
+            feedback += [f"{c['expected']}: {str(c['line']) + '행' if c['satisfied'] else '누락'}" for c in review["checks"]]
+        except (ValueError, TypeError, KeyError):
+            label = "stale · 이전 판정 (결과·입력·정책 변경 또는 확인 필요)"
+    return f"""<section><p><strong>모의 형식 검사:</strong> {esc(label)}</p>
+<p class='muted'>공개 규칙 required-sections-v1: 목표·결과·미확인 사항을 독립된 줄 또는 Markdown 제목으로 검사합니다. 사실성 검증·사용자 승인·자동 수정이 아닙니다.</p>
+<ul>{''.join(f'<li>{esc(item)}</li>' for item in feedback)}</ul>
+<form method='post' action='/quality/review' data-processing-form data-processing-label='검사 중...'>
+<input type='hidden' name='id' value='{esc(project['id'])}'><input type='hidden' name='task_id' value='{esc(task.get('id', ''))}'>
+<input type='hidden' name='reviewer_id' value='{REVIEWER_ID}'><input type='hidden' name='ruleset_id' value='{RULESET_ID}'>
+<button type='submit'>모의 형식 검사 (mock 전용)</button><p data-processing-status hidden></p></form></section>"""
+
+
 def task_review_controls(project, task_index):
     project_id = project["id"]
     tasks = project.get("tasks", [])
@@ -636,6 +729,9 @@ def execute_project_task(project_id, task_id, executor=None):
 
     input_task_ids = _validate_task_predecessors(task, tasks, task_index)
 
+    next_revision = result_revision(task) + 1
+    execution_input_context = quality_input_context(project, task_index)
+
     unfinished = [
         t for t in tasks[:task_index]
         if t.get("status") != "완료" or t.get("review_required")
@@ -684,6 +780,8 @@ def execute_project_task(project_id, task_id, executor=None):
                 "실행기가 빈 작업 결과를 반환했습니다. 결과를 저장하지 않았습니다."
             )
         task["result"] = result
+        task["result_revision"] = next_revision
+        task["quality_execution_context"] = execution_input_context
         if task_index == len(tasks) - 1:
             task["execution_context"] = final_execution_context(project)
         task["status"] = "완료"
@@ -849,11 +947,18 @@ button, .button {{ display:inline-block; background:#1f2937; color:white; border
 </style></head><body><div id="page-content"><h1><a href="/" style="color:inherit;text-decoration:none">AI Company OS</a></h1>{body}</div><div id="processing-modal" class="processing-modal" role="dialog" aria-modal="true" aria-labelledby="processing-modal-message" hidden><div class="processing-dialog" tabindex="-1"><div class="processing-spinner" role="status" aria-label="작업 처리 중"></div><p id="processing-modal-message">작업 처리 중입니다. 잠시만 기다려 주세요...</p></div></div>{PROCESSING_SCRIPT}</body></html>"""
 
 class Handler(BaseHTTPRequestHandler):
+    def _release_project_mutation(self):
+        lock = getattr(self, "_mutation_lock", None)
+        if lock is not None:
+            self._mutation_lock = None
+            lock.release()
+
     def log_message(self, fmt, *args):
         print("%s - %s" % (self.address_string(), fmt % args))
 
     def send_html(self, content, status=200):
         data = content.encode("utf-8")
+        self._release_project_mutation()
         self.send_response(status)
         self.send_header("Content-Type", "text/html; charset=utf-8")
         self.send_header("Content-Length", str(len(data)))
@@ -861,6 +966,7 @@ class Handler(BaseHTTPRequestHandler):
         self.wfile.write(data)
 
     def redirect(self, location):
+        self._release_project_mutation()
         self.send_response(303)
         self.send_header("Location", location)
         self.end_headers()
@@ -889,7 +995,7 @@ class Handler(BaseHTTPRequestHandler):
         form = self.read_form()
         project_routes = {
             "/update", "/manager/plan", "/manager/approve", "/manager/reject",
-            "/task/update", "/task/review", "/task/execute", "/workflow/run",
+            "/task/update", "/task/review", "/task/execute", "/workflow/run", "/quality/review",
         }
         if parsed.path not in project_routes:
             return self._handle_post(parsed, form)
@@ -903,10 +1009,11 @@ class Handler(BaseHTTPRequestHandler):
                 "처리 중", "<p>이 프로젝트의 다른 요청을 처리 중입니다. 완료 후 다시 시도해 주세요.</p>"
             ), 409)
             return
+        self._mutation_lock = lock
         try:
             return self._handle_post(parsed, form)
         finally:
-            lock.release()
+            self._release_project_mutation()
 
     def _handle_post(self, parsed, form):
         try:
@@ -1085,6 +1192,8 @@ class Handler(BaseHTTPRequestHandler):
                 result_changed = result != old_result
                 status_changed = status != old_status
 
+                if result_changed:
+                    task["result_revision"] = result_revision(task) + 1
                 task["result"] = result
                 task["status"] = status
                 task["updated_at"] = now()
@@ -1192,6 +1301,11 @@ class Handler(BaseHTTPRequestHandler):
                 save_project(project)
                 self.redirect(f"/project/{project_id}#task-{task_id}")
 
+            elif parsed.path == "/quality/review":
+                project_id = form.get("id", "")
+                store_quality_review(project_id, form.get("task_id", ""), form.get("ruleset_id", ""), form.get("reviewer_id", ""))
+                self.redirect(f"/project/{project_id}")
+
             elif parsed.path == "/workflow/run":
                 project_id = form.get("id", "")
                 run_mock_workflow(project_id)
@@ -1265,6 +1379,7 @@ class Handler(BaseHTTPRequestHandler):
 <strong>{esc(task.get('name', ''))}</strong> — 담당: {esc(task.get('role', ''))}<br>
 {f"<p><strong>⚠ 재검토 필요:</strong> {esc(task.get('review_reason', '선행 작업이 변경되었습니다.'))}</p>" if task_requires_review(task) else ""}
 {task_review_controls(p, task_index)}
+{quality_review_controls(p, task_index)}
 결과물 설명: {esc(task.get('output', ''))}<br>
 
 <form method='post' action='/task/update' data-processing-form data-processing-label='저장 중...'>

@@ -4,6 +4,12 @@
 
 ## 최근 완료 작업
 
+### 2026-11-02 (KST) — mock 품질 검사 HTTP 검증
+
+- 실제 loopback HTTP에서 판정·피드백·KST 저장, GET 무쓰기, 중복 멱등성, stale/재검사, 사용자 승인·스냅샷 보존, 잘못된 요청 거절, 동일 프로젝트 409/다른 프로젝트 병행을 확인했다. 운영 코드 변경 없음.
+- 검증: 신규 HTTP 5개 통과. 전체 108개 중 107개 통과·브라우저 1개 skip. Playwright/브라우저 부재로 HTTP/HTML 대체, 실제 클릭·모달은 미검증. 임시 projects/artifacts와 AI 실행 금지 mock 사용, 실제 AI API 호출 없음.
+- 보고서: [`mock_quality_review_http_validation_20261102.md`](../reports/mock_quality_review_http_validation_20261102.md). 검증 커밋은 이 항목을 추가한 커밋에서 확인할 수 있다.
+
 ### 2026-11-02 (KST) — mock 품질 형식 검토 저장·표시
 
 - 명시적 업무 ID의 고정 제목 규칙을 순수 mock으로 평가하고 판정·근거·피드백·KST를 저장/표시한다. revision/입력/정책 지문으로 중복과 stale을 판정하며 사용자 승인·수정 의견·최종 스냅샷을 유지한다. 자동 수정·재실행 없음.

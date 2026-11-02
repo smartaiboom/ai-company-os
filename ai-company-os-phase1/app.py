@@ -13,6 +13,7 @@ from weakref import WeakValueDictionary
 from execution_engine import execute_task, execute_task_mock, get_execution_engine_name
 from manager_plan import build_manager_plan
 from quality_review import REVIEWER_ID, RULESET_ID, evaluate_format, validate_review, inconclusive_review
+from ai_safety import request_scope, check_project_permission, MAX_CALLS, MAX_CALLS_PER_REQUEST
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -987,12 +988,21 @@ MAX_WORKFLOW_TASKS = 5
 
 
 def run_mock_workflow(project_id):
+    return _run_workflow(project_id)
+
+
+def run_real_workflow(project_id):
+    check_project_permission(load_project(project_id))
+    return _run_workflow(project_id, real=True)
+
+
+def _run_workflow(project_id, real=False):
     """Bounded synchronous run. Caller holds the project lock for the whole run."""
-    if get_execution_engine_name() != "mock":
+    if not real and get_execution_engine_name() != "mock":
         raise ValueError("자동 진행은 mock 모드에서만 가능합니다. 외부 AI 요청은 보내지 않았습니다.")
     executed = []
     reason = "실행 횟수 상한에 도달했습니다. 확인 후 다시 재개해 주세요."
-    for _ in range(MAX_WORKFLOW_TASKS):
+    for _ in range(MAX_CALLS_PER_REQUEST if real else MAX_WORKFLOW_TASKS):
         project = load_project(project_id)
         if project.get("plan", {}).get("status") != "approved":
             reason = "작업 계획을 먼저 승인해 주세요."
@@ -1031,7 +1041,7 @@ def run_mock_workflow(project_id):
             break
         try:
             # Explicit mock executor makes this route incapable of selecting a real engine.
-            execute_project_task(project_id, task_id, executor=execute_task_mock)
+            execute_project_task(project_id, task_id, executor=execute_task if real else execute_task_mock)
         except (ValueError, RuntimeError) as exc:
             reason = str(exc)
             break
@@ -1045,6 +1055,8 @@ def run_mock_workflow(project_id):
             break
     project = load_project(project_id)
     project["workflow"] = {"reason": reason, "executed_task_ids": executed, "stopped_at": now()}
+    if real:
+        project.setdefault("real_ai", {})["stop_reason"] = reason
     project.setdefault("history", []).append({
         "at": now(), "event": "workflow_stopped", "details": f"자동 진행 중단: {reason}",
     })
@@ -1065,6 +1077,26 @@ def execution_mode_notice():
             "모델 설정이 없거나 openrouter/free와 다르면 요청 전에 중단합니다."
         )
     return "실행 모드 설정 오류: 지원하지 않는 모드에서는 외부 AI 요청을 보내지 않습니다."
+
+
+def real_ai_controls(project):
+    state = project.get("real_ai", {})
+    if not isinstance(state, dict):
+        state = {}
+    attempts = state.get("attempts", [])
+    used = len(attempts) if isinstance(attempts, list) else MAX_CALLS
+    limit = state.get("limit", MAX_CALLS)
+    if type(limit) is not int or not 1 <= limit <= MAX_CALLS:
+        limit = MAX_CALLS
+    stop_reason = state.get("stop_reason", "별도 동의 및 활성화 확인 필요")
+    if isinstance(attempts, list) and any(isinstance(a, dict) and a.get("status") == "reserved" for a in attempts):
+        stop_reason = "미완료 AI 예약 · 사용자 확인 전 자동 재전송 금지"
+    return f"""<section class='card'><h2>실제 무료 AI 시작·재개</h2>
+<p>목표·업무 입력·선행 결과·의견이 외부 제공자에 전송될 수 있습니다. 서버 활성화와 해당 프로젝트의 별도 M4 동의가 없으면 요청을 보내지 않습니다. 이 화면에서는 동의를 활성화하지 않습니다.</p>
+<p>프로젝트 상한: {limit}회 · 사용/예약: {used}회 · 남은 횟수: {max(0, limit-used)}회 · 시작·재개당 최대 2회</p>
+<p>정지 이유: {esc(stop_reason)}</p>
+<form method='post' action='/workflow/run-real' data-processing-form data-processing-label='진행 중...'>
+<input type='hidden' name='id' value='{esc(project['id'])}'><button type='submit'>실제 무료 AI 시작·재개 (별도 승인 필요)</button><p data-processing-status hidden></p></form></section>"""
 
 def page(title, body):
     return f"""<!doctype html>
@@ -1140,7 +1172,7 @@ class Handler(BaseHTTPRequestHandler):
         form = self.read_form()
         project_routes = {
             "/update", "/manager/plan", "/manager/approve", "/manager/reject",
-            "/task/update", "/task/review", "/task/execute", "/workflow/run", "/quality/review", "/quality/revise-once",
+            "/task/update", "/task/review", "/task/execute", "/workflow/run", "/workflow/run-real", "/quality/review", "/quality/revise-once",
         }
         if parsed.path not in project_routes:
             return self._handle_post(parsed, form)
@@ -1156,7 +1188,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         self._mutation_lock = lock
         try:
-            return self._handle_post(parsed, form)
+            with request_scope(save_project):
+                return self._handle_post(parsed, form)
         finally:
             self._release_project_mutation()
 
@@ -1192,10 +1225,10 @@ class Handler(BaseHTTPRequestHandler):
                 if not goal:
                     raise ValueError("먼저 프로젝트 목표를 입력해 주세요.")
                 # Starter plan is isolated in manager_plan.py for future goal-driven planning.
-                plan = build_manager_plan(goal, now())
+                plan = build_manager_plan(goal, now(), project=project)
                 project["manager_goal"] = goal
                 project["plan"] = plan
-                project.setdefault("history", []).append({"at": now(), "event": "plan_created", "details": "모의 AI 관리자 작업 계획 작성 — 사용자 승인 대기"})
+                project.setdefault("history", []).append({"at": now(), "event": "plan_created", "details": "AI 관리자 작업 계획 작성 — 사용자 승인 대기"})
                 save_project(project)
                 self.redirect(f"/project/{project_id}")
             elif parsed.path == "/manager/approve":
@@ -1456,6 +1489,11 @@ class Handler(BaseHTTPRequestHandler):
                 store_quality_review(project_id, form.get("task_id", ""), form.get("ruleset_id", ""), form.get("reviewer_id", ""))
                 self.redirect(f"/project/{project_id}")
 
+            elif parsed.path == "/workflow/run-real":
+                project_id = form.get("id", "")
+                run_real_workflow(project_id)
+                self.redirect(f"/project/{project_id}")
+
             elif parsed.path == "/workflow/run":
                 project_id = form.get("id", "")
                 run_mock_workflow(project_id)
@@ -1688,6 +1726,7 @@ class Handler(BaseHTTPRequestHandler):
 <form method="post" action="/workflow/run" data-processing-form data-processing-label="진행 중...">
 <input type="hidden" name="id" value="{esc(p['id'])}">
 <button type="submit">자동 진행 시작·재개 (mock 전용)</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form></section>
+{real_ai_controls(p)}
 <section class="card"><h2>결과물 보관 폴더</h2><p class="muted">프로젝트별 결과물은 이 폴더에 보관하도록 준비되어 있습니다.</p><code>data/artifacts/{esc(p['id'])}/</code></section>
 <section class="card"><h2>최근 변경 기록</h2><ul>{history or '<li>기록 없음</li>'}</ul></section>"""
         self.send_html(page(p.get("name", "프로젝트"), body))

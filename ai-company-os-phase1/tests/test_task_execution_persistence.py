@@ -1,3 +1,4 @@
+from tests.real_ai_fixtures import approved_project
 import io
 import os
 import tempfile
@@ -13,6 +14,7 @@ class TaskExecutionPersistenceTests(unittest.TestCase):
     PROJECT_ID = "task-execution-test"
 
     def setUp(self):
+        self.enterContext(patch("ai_safety.build_opener", side_effect=AssertionError("real network forbidden")))
         self.temp_dir = tempfile.TemporaryDirectory()
         self.projects_dir = Path(self.temp_dir.name) / "projects"
         self.projects_dir.mkdir()
@@ -146,7 +148,7 @@ class TaskExecutionPersistenceTests(unittest.TestCase):
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, *args):
                 return (
                     b'{"choices":[{"finish_reason":"length","message":'
                     b'{"role":"assistant","content":"partial response"}}],'
@@ -155,11 +157,12 @@ class TaskExecutionPersistenceTests(unittest.TestCase):
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
+            "AI_REAL_REQUESTS_ENABLED": "1",
         }
         with patch.object(app, "PROJECTS_DIR", self.projects_dir):
-            app.save_project(dict(self.project))
+            app.save_project(approved_project(self.project))
             with patch.dict(os.environ, env, clear=True):
                 with patch("execution_engine.urlopen", return_value=FakeResponse()) as mocked_urlopen:
                     with self.assertLogs("execution_engine", level="WARNING"):

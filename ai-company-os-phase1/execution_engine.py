@@ -4,9 +4,7 @@ from abc import ABC, abstractmethod
 import json
 import logging
 import os
-import re
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from ai_safety import request_json, guarded_urlopen as urlopen
 
 
 OPENROUTER_FREE_MODEL = "openrouter/free"
@@ -39,9 +37,7 @@ def _log_response_diagnostics(
     raw_finish_reason = (
         choice.get("finish_reason") if isinstance(choice, dict) else None
     )
-    if isinstance(raw_finish_reason, str) and re.fullmatch(
-        r"[A-Za-z0-9_-]{1,40}", raw_finish_reason
-    ):
+    if raw_finish_reason in ("stop", "length", "content_filter", "tool_calls", "function_call", "error"):
         finish_reason = raw_finish_reason
     else:
         finish_reason = "missing" if raw_finish_reason is None else "other"
@@ -51,8 +47,7 @@ def _log_response_diagnostics(
     omitted_fields = False
     for field in raw_fields:
         if (
-            isinstance(field, str)
-            and re.fullmatch(r"[A-Za-z0-9_.-]{1,48}", field)
+            field in {"role", "content", "reasoning", "reasoning_content", "refusal", "tool_calls", "function_call", "annotations", "audio"}
         ):
             safe_fields.append(field)
         else:
@@ -361,29 +356,11 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             "max_tokens": MAX_RESPONSE_TOKENS,
         }).encode("utf-8")
 
-        headers = {"Content-Type": "application/json"}
-        if self.api_key:
-            headers["Authorization"] = f"Bearer {self.api_key}"
-
-        request = Request(
-            f"{self.base_url}/chat/completions",
-            data=body,
-            headers=headers,
-            method="POST",
+        response_data = request_json(
+            project, model=self.model, base_url=self.base_url, body=body,
+            api_key=self.api_key, timeout=self.timeout, transport=urlopen,
+            kind="task", task_id=task.get("id"),
         )
-
-        try:
-            with urlopen(request, timeout=self.timeout) as response:
-                response_data = json.loads(response.read().decode("utf-8"))
-        except HTTPError as exc:
-            detail = exc.read().decode("utf-8", errors="replace")[:1000]
-            raise RuntimeError(
-                f"AI API 요청 실패 (HTTP {exc.code}): {detail}"
-            ) from exc
-        except (URLError, TimeoutError) as exc:
-            raise RuntimeError(f"AI API 연결 실패: {exc}") from exc
-        except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-            raise RuntimeError("AI API 응답을 해석할 수 없습니다.") from exc
 
         try:
             choice = response_data["choices"][0]

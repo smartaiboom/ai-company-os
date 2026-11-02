@@ -4,8 +4,7 @@ import json
 import os
 import re
 from copy import deepcopy
-from urllib.error import HTTPError, URLError
-from urllib.request import Request, urlopen
+from ai_safety import request_json, guarded_urlopen as urlopen
 from execution_engine import validate_openrouter_free_model
 
 
@@ -195,7 +194,7 @@ def _parse_plan_content(content):
     return json.loads(cleaned)
 
 
-def _request_ai_plan(goal):
+def _request_ai_plan(goal, project=None):
     base_url = os.getenv("AI_API_BASE_URL", "").rstrip("/")
     api_key = os.getenv("AI_API_KEY", "")
     model = os.getenv("AI_MODEL", "")
@@ -221,25 +220,12 @@ def _request_ai_plan(goal):
         "max_tokens": 3000,
         "response_format": {"type": "json_object"},
     }
-    request = Request(
-        f"{base_url}/chat/completions",
-        data=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
-        headers={
-            "Content-Type": "application/json",
-            **({"Authorization": f"Bearer {api_key}"} if api_key else {}),
-        },
-        method="POST",
+    response_data = request_json(
+        project, model=model, base_url=base_url,
+        body=json.dumps(payload, ensure_ascii=False).encode("utf-8"),
+        api_key=api_key, timeout=int(os.getenv("AI_API_TIMEOUT", "90")),
+        transport=urlopen, kind="plan", goal=goal,
     )
-    try:
-        with urlopen(request, timeout=int(os.getenv("AI_API_TIMEOUT", "90"))) as response:
-            response_data = json.loads(response.read().decode("utf-8"))
-    except HTTPError as exc:
-        detail = exc.read().decode("utf-8", errors="replace")[:500]
-        raise RuntimeError(f"AI 관리자 API 요청 실패 (HTTP {exc.code}): {detail}") from exc
-    except (URLError, TimeoutError) as exc:
-        raise RuntimeError(f"AI 관리자 API 연결 실패: {exc}") from exc
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
-        raise RuntimeError("AI 관리자 API 응답을 해석할 수 없습니다.") from exc
 
     try:
         choice = response_data["choices"][0]
@@ -251,17 +237,7 @@ def _request_ai_plan(goal):
             content = message.get("reasoning_content") or message.get("reasoning")
         parsed = _parse_plan_content(content)
     except (KeyError, IndexError, TypeError, ValueError, json.JSONDecodeError) as exc:
-        # Report response metadata, never request headers or credentials.
-        choice = locals().get("choice", {})
-        message = locals().get("message", {})
-        keys = ", ".join(sorted(message.keys())) if isinstance(message, dict) else "(message 없음)"
-        finish_reason = choice.get("finish_reason", "알 수 없음") if isinstance(choice, dict) else "알 수 없음"
-        preview = str(locals().get("content", ""))[:180].replace("\n", " ")
-        raise RuntimeError(
-            "AI 관리자 응답에 읽을 수 있는 JSON이 없습니다. "
-            f"finish_reason={finish_reason}, message_fields={keys}, "
-            f"응답 일부: {preview or '(내용 없음)'}"
-        ) from exc
+        raise RuntimeError("AI 관리자 응답에 읽을 수 있는 JSON이 없습니다. 응답 원문은 표시하지 않습니다.") from None
     if not isinstance(parsed, dict):
         raise RuntimeError("AI 관리자 응답은 JSON 객체여야 합니다.")
 
@@ -276,7 +252,7 @@ def _request_ai_plan(goal):
     return stages, questions, assumptions
 
 
-def build_manager_plan(goal, created_at):
+def build_manager_plan(goal, created_at, *, project=None):
     """Build a plan using the configured engine; mock mode remains API-free."""
     normalized_goal = str(goal or "").strip()
     if not normalized_goal:
@@ -284,7 +260,7 @@ def build_manager_plan(goal, created_at):
 
     engine = os.getenv("AI_ENGINE", "mock").strip().lower()
     if engine in {"openai_compatible", "openai-compatible"}:
-        stages, questions, assumptions = _request_ai_plan(normalized_goal)
+        stages, questions, assumptions = _request_ai_plan(normalized_goal, project)
         cost_note = f"실제 AI 관리자 계획 생성: {os.getenv('AI_MODEL', '설정 모델')} 사용. 승인 전에는 작업이 생성되지 않습니다."
     elif engine == "mock":
         stages = deepcopy(STARTER_STAGES)

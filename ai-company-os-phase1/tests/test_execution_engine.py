@@ -1,9 +1,16 @@
+from unittest.mock import patch
+from tests.real_ai_fixtures import approved_project
+from ai_safety import request_scope
 import unittest
 
 from execution_engine import execute_task_mock
 
 
 class ExecutionEngineTests(unittest.TestCase):
+    def setUp(self):
+        self.enterContext(patch("ai_safety.build_opener", side_effect=AssertionError("real network forbidden")))
+        self.enterContext(request_scope(lambda project: None))
+
     def test_execute_task_mock_returns_result(self):
         project = {
             "goal": "초보자를 위한 AI 제품 개발"
@@ -21,14 +28,14 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertIn("실제 AI 처리는 수행하지 않았습니다.", result)
 
     def test_execute_task_mock_rejects_empty_goal(self):
-        project = {"goal": ""}
+        project = approved_project({"goal": ""})
         task = {"name": "시장 조사", "output": "보고서"}
 
         with self.assertRaises(ValueError):
             execute_task_mock(project, task)
 
     def test_execute_task_mock_accepts_previous_results(self):
-        project = {"goal": "초보자를 위한 AI 제품 개발"}
+        project = approved_project({"goal": "초보자를 위한 AI 제품 개발"})
         task = {
             "name": "제품 기획",
             "output": "제품 기획서"
@@ -81,7 +88,7 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertIn("목표와 성공 기준이 정리되었습니다.", result)
 
     def test_execute_task_mock_uses_role_instruction(self):
-        project = {"goal": "유튜브에 올릴 영상 제작"}
+        project = approved_project({"goal": "유튜브에 올릴 영상 제작"})
         task = {
             "name": "검토 및 수정",
             "role": "품질 검토 담당",
@@ -97,7 +104,7 @@ class ExecutionEngineTests(unittest.TestCase):
             result,
         )
     def test_execute_task_mock_generates_quality_review_result(self):
-        project = {"goal": "제품 초안 검토"}
+        project = approved_project({"goal": "제품 초안 검토"})
         task = {
             "name": "검토 및 수정",
             "role": "품질 검토 담당",
@@ -114,7 +121,7 @@ class ExecutionEngineTests(unittest.TestCase):
         self.assertIn("최종 검토 결과: 추가 검증 필요", result)
 
     def test_final_report_includes_linked_input_results(self):
-        project = {"goal": "테스트용 프로젝트"}
+        project = approved_project({"goal": "테스트용 프로젝트"})
         task = {
             "name": "최종 보고",
             "role": "AI 관리자",
@@ -176,17 +183,18 @@ class ExecutionEngineTests(unittest.TestCase):
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, *args):
                 return b'{"choices":[{"message":{"content":"ordinary result includes safe"}}]}'
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
+            "AI_REAL_REQUESTS_ENABLED": "1",
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("execution_engine.urlopen", return_value=FakeResponse()) as mocked_urlopen:
-                result = execute_task({"goal": "테스트 목표"}, {"name": "테스트 업무"})
+                result = execute_task(approved_project({"goal": "테스트 목표"}), {"name": "테스트 업무"})
 
         request = mocked_urlopen.call_args.args[0]
         payload = json.loads(request.data.decode("utf-8"))
@@ -210,7 +218,7 @@ class ExecutionEngineTests(unittest.TestCase):
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, *args):
                 return json.dumps({
                     "choices": [{
                         "finish_reason": "stop",
@@ -220,13 +228,14 @@ class ExecutionEngineTests(unittest.TestCase):
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
+            "AI_REAL_REQUESTS_ENABLED": "1",
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("execution_engine.urlopen", return_value=FakeResponse()):
                 result = execute_task(
-                    {"goal": "테스트 목표"},
+                    approved_project({"goal": "테스트 목표"}),
                     {"name": "테스트 업무"},
                 )
 
@@ -245,13 +254,14 @@ class ExecutionEngineTests(unittest.TestCase):
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, *args):
                 return b'{"choices":[{"finish_reason":"stop","message":{"role":"assistant","content":"User Safety: Safe"}}]}'
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
+            "AI_REAL_REQUESTS_ENABLED": "1",
             "AI_API_KEY": "AUTH_SENTINEL",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -262,7 +272,7 @@ class ExecutionEngineTests(unittest.TestCase):
                         "응답 내용과 라우팅된 모델의 동작을 확인",
                     ) as error:
                         execute_task(
-                            {"goal": "PRIVATE_PROMPT_SENTINEL"},
+                            approved_project({"goal": "PRIVATE_PROMPT_SENTINEL"}),
                             {
                                 "name": "테스트 업무",
                                 "inputs": ["PRIVATE_INPUT_SENTINEL"],
@@ -299,19 +309,20 @@ class ExecutionEngineTests(unittest.TestCase):
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, *args):
                 return b'{"choices":[{"finish_reason":"content_filter","message":{"role":"assistant","content":""}}]}'
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
+            "AI_REAL_REQUESTS_ENABLED": "1",
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("execution_engine.urlopen", return_value=FakeResponse()):
                 with self.assertLogs("execution_engine", level="WARNING") as diagnostics:
                     with self.assertRaisesRegex(RuntimeError, "응답 진단 로그"):
-                        execute_task({"goal": "PRIVATE_PROMPT_SENTINEL"}, {"name": "테스트 업무"})
+                        execute_task(approved_project({"goal": "PRIVATE_PROMPT_SENTINEL"}), {"name": "테스트 업무"})
 
         log_message = " ".join(diagnostics.output)
         self.assertIn("finish_reason=content_filter", log_message)
@@ -333,7 +344,7 @@ class ExecutionEngineTests(unittest.TestCase):
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, *args):
                 return (
                     b'{"choices":[{"finish_reason":"length","message":'
                     b'{"role":"assistant","content":"PARTIAL_RESPONSE_SENTINEL"}}],'
@@ -343,14 +354,15 @@ class ExecutionEngineTests(unittest.TestCase):
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
+            "AI_REAL_REQUESTS_ENABLED": "1",
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("execution_engine.urlopen", return_value=FakeResponse()) as mocked_urlopen:
                 with self.assertLogs("execution_engine", level="WARNING") as diagnostics:
                     with self.assertRaisesRegex(RuntimeError, "응답이 중간에 끊겼습니다"):
-                        execute_task({"goal": "테스트 목표"}, {"name": "테스트 업무"})
+                        execute_task(approved_project({"goal": "테스트 목표"}), {"name": "테스트 업무"})
 
         request = mocked_urlopen.call_args.args[0]
         request_payload = json.loads(request.data.decode("utf-8"))
@@ -370,13 +382,13 @@ class ExecutionEngineTests(unittest.TestCase):
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "some-provider/some-model",
         }
         with patch.dict("os.environ", env, clear=True):
             with patch("execution_engine.urlopen") as mocked_urlopen:
                 with self.assertRaisesRegex(ValueError, "openrouter/free"):
-                    execute_task({"goal": "test"}, {"name": "test"})
+                    execute_task(approved_project({"goal": "test"}), {"name": "test"})
                 mocked_urlopen.assert_not_called()
 
     def test_missing_model_is_rejected_before_api_request(self):
@@ -385,12 +397,12 @@ class ExecutionEngineTests(unittest.TestCase):
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
         }
         with patch.dict("os.environ", env, clear=True):
             with patch("execution_engine.urlopen") as mocked_urlopen:
                 with self.assertRaisesRegex(ValueError, "openrouter/free"):
-                    execute_task({"goal": "test"}, {"name": "test"})
+                    execute_task(approved_project({"goal": "test"}), {"name": "test"})
                 mocked_urlopen.assert_not_called()
 
     def test_get_execution_engine_rejects_unknown_engine(self):

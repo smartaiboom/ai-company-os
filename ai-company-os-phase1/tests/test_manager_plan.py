@@ -1,3 +1,5 @@
+from tests.real_ai_fixtures import approved_project
+from ai_safety import request_scope
 import json
 import os
 import unittest
@@ -8,6 +10,8 @@ from manager_plan import _parse_plan_content, build_manager_plan, validate_stage
 
 class ManagerPlanTests(unittest.TestCase):
     def setUp(self):
+        self.enterContext(patch("ai_safety.build_opener", side_effect=AssertionError("real network forbidden")))
+        self.enterContext(request_scope(lambda project: None))
         self.mock_engine = patch.dict(os.environ, {"AI_ENGINE": "mock"})
         self.mock_engine.start()
         self.addCleanup(self.mock_engine.stop)
@@ -35,7 +39,7 @@ class ManagerPlanTests(unittest.TestCase):
     def test_non_free_model_is_rejected_before_plan_api_request(self):
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "some-provider/some-model",
         }
         with patch.dict(os.environ, env, clear=True):
@@ -47,7 +51,7 @@ class ManagerPlanTests(unittest.TestCase):
     def test_missing_model_is_rejected_before_plan_api_request(self):
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("manager_plan.urlopen") as mocked_urlopen:
@@ -93,17 +97,18 @@ class ManagerPlanTests(unittest.TestCase):
             def __exit__(self, exc_type, exc_value, traceback):
                 return False
 
-            def read(self):
+            def read(self, *args):
                 return json.dumps(response_data).encode("utf-8")
 
         env = {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
+            "AI_REAL_REQUESTS_ENABLED": "1",
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("manager_plan.urlopen", return_value=FakeResponse()) as mocked_urlopen:
-                plan = build_manager_plan("test goal", "time")
+                plan = build_manager_plan("test goal", "time", project=approved_project({"goal": "test goal"}))
 
         self.assertEqual([stage["name"] for stage in plan["stages"]], ["요구사항 정리", "초안 작성"])
         self.assertEqual(plan["stages"][0]["inputs"], ["프로젝트 목표"])

@@ -1,3 +1,4 @@
+from tests.real_ai_fixtures import approved_project
 import io
 import json
 import os
@@ -20,7 +21,7 @@ class FakeAPIResponse:
     def __exit__(self, exc_type, exc_value, traceback):
         return False
 
-    def read(self):
+    def read(self, *args):
         return self.payload
 
 
@@ -29,6 +30,7 @@ class ManagerPlanPersistenceTests(unittest.TestCase):
     GOAL = "초보자를 위한 간단한 할 일 관리 프로그램 기획"
 
     def setUp(self):
+        self.enterContext(patch("ai_safety.build_opener", side_effect=AssertionError("real network forbidden")))
         self.temp_dir = tempfile.TemporaryDirectory()
         self.projects_dir = Path(self.temp_dir.name) / "projects"
         self.projects_dir.mkdir()
@@ -40,10 +42,12 @@ class ManagerPlanPersistenceTests(unittest.TestCase):
             "tasks": [],
             "history": [],
         }
+        self.project = approved_project(self.project)
         self.env = patch.dict(os.environ, {
             "AI_ENGINE": "openai_compatible",
-            "AI_API_BASE_URL": "https://example.invalid/v1",
+            "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
+            "AI_REAL_REQUESTS_ENABLED": "1",
         }, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)
@@ -154,14 +158,15 @@ class ManagerPlanPersistenceTests(unittest.TestCase):
                     _, redirect, send_html = self._post_manager_plan(self.GOAL)
 
             mocked_urlopen.assert_called_once()
-            save_project.assert_not_called()
+            self.assertEqual(save_project.call_count, 2)  # Reservation and received response persist even for invalid plans.
             redirect.assert_not_called()
             send_html.assert_called_once()
             self.assertEqual(send_html.call_args.args[2], 400)
             self.assertIn("2개 이상 10개 이하", send_html.call_args.args[1])
-            self.assertEqual(project_path.read_bytes(), before)
+            self.assertNotEqual(project_path.read_bytes(), before)  # Budget must not be rolled back.
             saved = app.load_project(self.PROJECT_ID)
 
+        self.assertEqual(len(saved["real_ai"]["attempts"]), 1)
         self.assertNotIn("plan", saved)
         self.assertNotIn("manager_goal", saved)
 

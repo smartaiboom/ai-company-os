@@ -123,7 +123,7 @@ class MockWorkflowTests(unittest.TestCase):
             self.assertEqual(execute.call_count, app.MAX_WORKFLOW_TASKS + 2)
             self.post("/workflow/run")
             self.assertEqual(execute.call_count, app.MAX_WORKFLOW_TASKS + 2)
-            self.assertIn("실행할 업무가 없습니다", self.saved()["workflow"]["reason"])
+            self.assertIn("승인 대기", self.saved()["workflow"]["reason"])
 
     def test_duplicate_manual_and_automatic_requests_share_project_lock(self):
         self.save()

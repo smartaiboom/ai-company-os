@@ -6,6 +6,7 @@ import html
 import json
 import os
 import uuid
+import hashlib
 import threading
 from weakref import WeakValueDictionary
 from execution_engine import execute_task, execute_task_mock, get_execution_engine_name
@@ -202,6 +203,7 @@ def load_project(project_id):
     return json.loads(project_path(project_id).read_text(encoding="utf-8"))
 
 def save_project(project):
+    invalidate_changed_final_report(project)
     project["updated_at"] = now()
     path = project_path(project["id"])
     temp_path = path.with_suffix(".json.tmp")
@@ -222,7 +224,7 @@ def mark_downstream_for_review(project, task_index, reason):
         later_task["review_reason"] = reason
         _reset_review_approval(
             later_task,
-            _task_has_dependents(tasks, later_index),
+            task_needs_approval(project, later_index),
         )
         later_task["updated_at"] = now()
         affected.append(later_task.get("name", later_task.get("id", "이름 없는 작업")))
@@ -327,6 +329,146 @@ def _task_has_dependents(tasks, task_index):
             continue
     return False
 
+def task_needs_approval(project, task_index):
+    tasks = project.get("tasks", [])
+    return task_index == len(tasks) - 1 or _task_has_dependents(tasks, task_index)
+
+
+def _digest(value):
+    return hashlib.sha256(json.dumps(value, ensure_ascii=False, sort_keys=True).encode("utf-8")).hexdigest()
+
+
+def final_evidence(project):
+    """Only business fields, never environment settings or arbitrary extra keys."""
+    fields = ("id", "name", "role", "inputs", "input_task_ids", "output", "risk",
+              "result", "status", "review_required", "review_status", "reviewed_at", "reviewed_by")
+    tasks = project.get("tasks", [])
+    evidence = {
+        "project_id": project["id"], "goal": project.get("goal", ""),
+        "manager_goal": project.get("manager_goal", ""),
+        "plan_status": project.get("plan", {}).get("status"),
+        "stages": [{k: stage.get(k) for k in fields[:8]} for stage in project.get("plan", {}).get("stages", [])],
+        "tasks": [{k: task.get(k) for k in fields} for task in tasks],
+        "execution_events": [],
+    }
+    for task in tasks:
+        event = next((e for e in reversed(project.get("history", []))
+                      if e.get("event") in {"task_execution_succeeded", "task_execution_failed", "task_result_saved"}
+                      and str(e.get("details", "")).startswith(f"{task.get('id')}:") ), {})
+        evidence["execution_events"].append({k: event.get(k) for k in ("event", "at", "details")})
+    return evidence
+
+
+def final_execution_context(project):
+    evidence = final_evidence(project)
+    final = project.get("tasks", [{}])[-1]
+    evidence["final_instructions"] = {k: final.get(k) for k in ("id", "name", "role", "inputs", "input_task_ids", "output", "risk")}
+    evidence["tasks"] = evidence["tasks"][:-1]
+    evidence["execution_events"] = evidence["execution_events"][:-1]
+    return _digest(evidence)
+
+
+def validate_final_result(project):
+    tasks = project.get("tasks", [])
+    ids = [t.get("id") for t in tasks]
+    if not ids or not all(isinstance(i, str) and i for i in ids) or len(set(ids)) != len(ids):
+        raise ValueError("최종 승인에는 고유한 업무 ID가 필요합니다.")
+    if project.get("plan") and project["plan"].get("status") != "approved":
+        raise ValueError("계획을 먼저 승인해 주세요.")
+    for index, task in enumerate(tasks):
+        if (task.get("status") != "완료" or task_requires_review(task)
+                or not isinstance(task.get("result"), str) or not task["result"].strip()):
+            raise ValueError("모든 업무의 유효한 완료 결과와 재검토 해제가 필요합니다.")
+        _validate_task_predecessors(task, tasks, index)
+    if not task_has_successful_result(project, tasks[-1]):
+        raise ValueError("최종 업무의 실행 성공 기록이 필요합니다.")
+    if tasks[-1].get("execution_context") != final_execution_context(project):
+        raise ValueError("목표·계획·선행 결과를 확인해 최종 업무를 다시 실행해 주세요.")
+
+
+def invalidate_final_report(project, reason, require_rerun=True):
+    reference = project.get("final_report")
+    if not isinstance(reference, dict) or reference.get("status") != "confirmed":
+        return
+    reference.update(status="invalidated", invalidated_at=now(), invalidated_reason=reason)
+    if require_rerun and project.get("tasks"):
+        final = project["tasks"][-1]
+        review_status = REVIEW_CHANGES_REQUESTED if final.get("review_status") == REVIEW_CHANGES_REQUESTED else REVIEW_PENDING
+        final.update(status="재검토 필요", review_required=True, review_reason=reason, review_status=review_status)
+
+
+def invalidate_changed_final_report(project):
+    reference = project.get("final_report", {})
+    if not isinstance(reference, dict):
+        return
+    if reference.get("status") == "confirmed" and reference.get("fingerprint") != _digest(final_evidence(project)):
+        invalidate_final_report(project, "확정 당시의 목표·계획·업무 결과 또는 승인 근거가 변경됐습니다.")
+
+
+def archive_final_report(project):
+    validate_final_result(project)
+    if project["tasks"][-1].get("review_status") != REVIEW_APPROVED:
+        raise ValueError("최종 검토 승인 후에만 보관할 수 있습니다.")
+    project_path(project["id"])  # Validate ID before using it in the artifacts path.
+    folder = ARTIFACTS_DIR / project["id"] / "final_reports"
+    folder.mkdir(parents=True, exist_ok=True)
+    versions = [int(p.stem[1:]) for p in folder.glob("v*.json") if p.stem[1:].isdigit()]
+    previous_version = project.get("final_report", {}).get("version", 0)
+    version = max(versions + [previous_version if type(previous_version) is int else 0]) + 1
+    evidence = final_evidence(project)
+    snapshot = {
+        "format_version": 1, "version": version, "project_id": project["id"],
+        "final_task_id": project["tasks"][-1]["id"], "confirmed_at": now(),
+        "approved_by": "사용자", "review_status": REVIEW_APPROVED,
+        "fingerprint": _digest(evidence), "evidence": evidence,
+    }
+    path = folder / f"v{version:06d}.json"
+    content = json.dumps(snapshot, ensure_ascii=False, indent=2)
+    with path.open("x", encoding="utf-8") as stream:
+        stream.write(content)
+    if json.loads(path.read_text(encoding="utf-8")) != snapshot:
+        raise RuntimeError("최종 스냅샷 재독 검증에 실패했습니다. 확정하지 않았습니다.")
+    project["final_report"] = {
+        **{k: snapshot[k] for k in ("format_version", "version", "final_task_id", "confirmed_at", "fingerprint")},
+        "status": "confirmed", "snapshot_hash": _digest(snapshot), "confirmed_by": "사용자",
+    }
+    project.setdefault("history", []).append({"at": now(), "event": "final_report_confirmed", "details": f"최종 보고서 확정 v{version}"})
+
+
+def final_report_state(project):
+    reference = project.get("final_report")
+    tasks = project.get("tasks", [])
+    if not tasks:
+        return "작업 결과 현황 · 미확정 (최종 결과 없음)"
+    try:
+        validate_final_result(project)
+        if tasks[-1].get("review_status") == REVIEW_CHANGES_REQUESTED:
+            return "작업 결과 현황 · 미확정 (최종 수정 요청됨)"
+        if not reference:
+            if tasks[-1].get("review_status") == REVIEW_APPROVED:
+                return "작업 결과 현황 · 미확정 (보관 확인 필요)"
+            return "작업 결과 현황 · 미확정 (최종 검토 승인 대기)"
+        if reference.get("status") != "confirmed" or tasks[-1].get("review_status") != REVIEW_APPROVED:
+            raise ValueError("최종 확정 무효 · 재검토 필요")
+        version = reference["version"]
+        if type(version) is not int or version < 1:
+            raise ValueError("잘못된 보관 버전")
+        project_path(project["id"])
+        snapshot = json.loads((ARTIFACTS_DIR / project["id"] / "final_reports" / f"v{version:06d}.json").read_text(encoding="utf-8"))
+        if (reference.get("snapshot_hash") != _digest(snapshot)
+                or snapshot.get("evidence") != final_evidence(project)
+                or snapshot.get("fingerprint") != reference.get("fingerprint")
+                or reference.get("fingerprint") != _digest(final_evidence(project))
+                or snapshot.get("version") != version or snapshot.get("project_id") != project["id"]
+                or snapshot.get("final_task_id") != tasks[-1]["id"]
+                or reference.get("final_task_id") != tasks[-1]["id"]
+                or snapshot.get("confirmed_at") != reference.get("confirmed_at")):
+            raise ValueError("보관 파일과 현재 결과 불일치")
+        return f"최종 보고서 · 확정 v{version} · {reference['confirmed_at']}"
+    except (ValueError, OSError, KeyError, TypeError, AttributeError):
+        return "작업 결과 현황 · 미확정 (재실행·승인 또는 보관 확인 필요)"
+
+
 def _validate_task_predecessors(task, tasks, task_index):
     input_task_ids = _resolve_input_task_ids(task, tasks, task_index)
     previous_tasks_by_id = {
@@ -367,7 +509,7 @@ def task_review_controls(project, task_index):
     project_id = project["id"]
     tasks = project.get("tasks", [])
     task = tasks[task_index]
-    if not _task_has_dependents(tasks, task_index):
+    if not task_needs_approval(project, task_index):
         return ""
 
     review_status = task_review_status(task, has_dependents=True)
@@ -378,6 +520,8 @@ def task_review_controls(project, task_index):
         REVIEW_NOT_REQUIRED: "검토 불필요",
     }
     html_parts = [f"<p class='status'>업무 결과 검토: {esc(labels[review_status])}</p>"]
+    if task_index == len(tasks) - 1:
+        html_parts.append(f"<p><strong>최종 승인 대상:</strong> {esc(task.get('id', ''))} · {esc(task.get('name', ''))}</p>")
     feedback = task.get("review_feedback", "")
     if feedback:
         html_parts.append(f"<p><strong>수정 요청:</strong> {esc(feedback)}</p>")
@@ -475,7 +619,7 @@ def execute_project_task(project_id, task_id, executor=None):
         raise ValueError("실행할 작업을 찾을 수 없습니다.")
 
     task_index = tasks.index(task)
-    has_dependents = _task_has_dependents(tasks, task_index)
+    has_dependents = task_needs_approval(project, task_index)
     current_review_status = task_review_status(
         task,
         has_dependents=has_dependents,
@@ -506,6 +650,7 @@ def execute_project_task(project_id, task_id, executor=None):
             f"앞선 작업을 먼저 완료해 주세요: {names}"
         )
 
+    invalidate_final_report(project, "업무 재실행", task_index != len(tasks) - 1)
     old_status = task.get("status", "대기")
     old_result = task.get("result", "")
     review_feedback = (
@@ -539,6 +684,8 @@ def execute_project_task(project_id, task_id, executor=None):
                 "실행기가 빈 작업 결과를 반환했습니다. 결과를 저장하지 않았습니다."
             )
         task["result"] = result
+        if task_index == len(tasks) - 1:
+            task["execution_context"] = final_execution_context(project)
         task["status"] = "완료"
         task["review_required"] = False
         task.pop("review_reason", None)
@@ -612,7 +759,7 @@ def run_mock_workflow(project_id):
         tasks = project.get("tasks", [])
         candidate = None
         for index, task in enumerate(tasks):
-            review = task_review_status(task, _task_has_dependents(tasks, index))
+            review = task_review_status(task, task_needs_approval(project, index))
             if review == REVIEW_CHANGES_REQUESTED:
                 reason = "수정 요청이 있습니다. 개별 작업을 수정·재실행하고 검토해 주세요."
                 break
@@ -624,7 +771,8 @@ def run_mock_workflow(project_id):
                     reason = "완료 업무의 결과가 비어 있습니다. 개별 작업을 확인해 주세요."
                     break
                 if review == REVIEW_PENDING:
-                    reason = "검토 승인 대기 중입니다. 승인 후 자동 진행을 재개해 주세요."
+                    reason = ("최종 검토 승인 대기 중입니다." if index == len(tasks) - 1
+                              else "검토 승인 대기 중입니다. 승인 후 자동 진행을 재개해 주세요.")
                     break
                 continue
             if task.get("status", "대기") not in {"대기", "재검토 필요"}:
@@ -650,8 +798,9 @@ def run_mock_workflow(project_id):
         latest = load_project(project_id)
         latest_tasks = latest.get("tasks", [])
         latest_index = next(i for i, t in enumerate(latest_tasks) if t.get("id") == task_id)
-        if task_review_status(latest_tasks[latest_index], _task_has_dependents(latest_tasks, latest_index)) == REVIEW_PENDING:
-            reason = "검토 승인 대기 중입니다. 승인 후 자동 진행을 재개해 주세요."
+        if task_review_status(latest_tasks[latest_index], task_needs_approval(latest, latest_index)) == REVIEW_PENDING:
+            reason = ("최종 검토 승인 대기 중입니다." if latest_index == len(latest_tasks) - 1
+                      else "검토 승인 대기 중입니다. 승인 후 자동 진행을 재개해 주세요.")
             break
     project = load_project(project_id)
     project["workflow"] = {"reason": reason, "executed_task_ids": executed, "stopped_at": now()}
@@ -929,7 +1078,7 @@ class Handler(BaseHTTPRequestHandler):
                 old_result = task.get("result", "")
                 old_review_status = task_review_status(
                     task,
-                    has_dependents=_task_has_dependents(tasks, tasks.index(task)),
+                    has_dependents=task_needs_approval(project, tasks.index(task)),
                 )
 
                 task_index = tasks.index(task)
@@ -943,13 +1092,13 @@ class Handler(BaseHTTPRequestHandler):
                 if result_changed:
                     _reset_review_approval(
                         task,
-                        _task_has_dependents(tasks, task_index),
+                        task_needs_approval(project, task_index),
                     )
                     task.pop("review_feedback", None)
                 elif status_changed and old_review_status == REVIEW_APPROVED:
                     _reset_review_approval(
                         task,
-                        _task_has_dependents(tasks, task_index),
+                        task_needs_approval(project, task_index),
                     )
 
                 # 작업 결과/상태가 바뀌면 모든 후속 작업을 재검토 필요로 바꾸고 결과는 보존한다.
@@ -987,7 +1136,7 @@ class Handler(BaseHTTPRequestHandler):
                     raise ValueError("검토할 업무를 찾을 수 없습니다.")
 
                 task_index = tasks.index(task)
-                if not _task_has_dependents(tasks, task_index):
+                if not task_needs_approval(project, task_index):
                     raise ValueError("후속 업무가 연결되지 않은 결과는 이 승인 단계가 필요하지 않습니다.")
                 if task.get("status") != "완료":
                     raise ValueError("완료된 업무 결과만 검토할 수 있습니다.")
@@ -1001,6 +1150,8 @@ class Handler(BaseHTTPRequestHandler):
                 _validate_task_predecessors(task, tasks, task_index)
 
                 review_status = task_review_status(task, has_dependents=True)
+                if task_index == len(tasks) - 1:
+                    validate_final_result(project)
                 if decision == "approve":
                     if review_status == REVIEW_APPROVED:
                         raise ValueError("이미 승인된 업무 결과입니다.")
@@ -1036,6 +1187,8 @@ class Handler(BaseHTTPRequestHandler):
                     "event": event,
                     "details": details,
                 })
+                if decision == "approve" and task_index == len(tasks) - 1:
+                    archive_final_report(project)
                 save_project(project)
                 self.redirect(f"/project/{project_id}#task-{task_id}")
 
@@ -1208,8 +1361,9 @@ class Handler(BaseHTTPRequestHandler):
 <section class="card"><h2>{esc(p.get('name',''))}</h2>
 <p><strong>프로젝트 ID:</strong> {esc(p['id'])}</p>
 
-<p><strong>작업 진행률:</strong> {task_progress}%</p>
-<p><a class="button" href="/report/{esc(p['id'])}">최종 보고서 보기</a></p>
+<p><strong>업무 실행 완료율:</strong> {task_progress}%</p>
+<p><a class="button" href="/report/{esc(p['id'])}">작업 결과·최종 확정 확인</a></p>
+<p><strong>최종 확정 여부:</strong> {esc(final_report_state(p))}</p>
 <p><strong>전체 작업:</strong> {total_tasks}개</p>
 <p><strong>대기:</strong> {waiting_tasks}개 · <strong>진행 중:</strong> {in_progress_tasks}개 · <strong>실행 실패:</strong> {failed_tasks}개 · <strong>재검토 필요:</strong> {review_tasks}개 · <strong>완료:</strong> {completed_tasks}개</p>
 
@@ -1289,10 +1443,10 @@ class Handler(BaseHTTPRequestHandler):
         body = f"""
 <p><a href="/project/{esc(project_id)}">← 프로젝트로 돌아가기</a></p>
 <section class="card">
-<h2>최종 보고서</h2>
+<h2>{esc(final_report_state(p))}</h2>
 <p><strong>프로젝트:</strong> {esc(p.get('name', ''))}</p>
 <p><strong>목표:</strong> {esc(p.get('goal', ''))}</p>
-<p><strong>작업 진행률:</strong> {progress}%</p>
+<p><strong>업무 실행 완료율:</strong> {progress}%</p>
 <p><strong>전체 작업:</strong> {total_tasks}개</p>
 <p><strong>대기:</strong> {waiting_tasks}개 ·
 <strong>진행 중:</strong> {in_progress_tasks}개 ·

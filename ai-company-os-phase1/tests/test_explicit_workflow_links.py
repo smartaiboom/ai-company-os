@@ -109,7 +109,7 @@ class ExplicitWorkflowLinkTests(unittest.TestCase):
         self.assertEqual([task["result"] for task in saved["tasks"]], outputs)
         self.assertEqual(saved["tasks"][0]["review_status"], "approved")
         self.assertEqual(saved["tasks"][1]["review_status"], "approved")
-        self.assertEqual(saved["tasks"][2]["review_status"], "not_required")
+        self.assertEqual(saved["tasks"][2]["review_status"], "pending")
 
     def test_required_predecessor_without_result_blocks_execution(self):
         for missing_result in (None, "   "):

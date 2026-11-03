@@ -1147,6 +1147,52 @@ def propose_manager_decision(project_id, task_id, provider):
         return deepcopy(proposal)
 
 
+def _manager_review_input(project, task_id):
+    task = next((t for t in project.get("tasks", []) if t.get("id") == task_id), None)
+    if task is None or not task_has_successful_result(project, task):
+        raise ValueError("성공한 완료 결과만 검토할 수 있습니다.")
+    _validate_task_predecessors(task, project["tasks"], project["tasks"].index(task))
+    return manager_decision.employee_review_input(project, task_id)
+
+
+def _proposal_context(project, proposal):
+    purpose = proposal.get("purpose")
+    binding = proposal["decision"]["binding"]
+    if purpose == manager_decision.REVIEW_PURPOSE and binding.get("purpose") == purpose:
+        return _manager_review_input(project, binding["task_id"])
+    if purpose is not None or binding.get("purpose") is not None:
+        raise ValueError("관리자 제안 목적이 일치하지 않습니다.")
+    return _manager_decision_input(project, binding["task_id"])
+
+
+def propose_employee_result_review_offline(project_id, task_id, provider):
+    """Mock-only review preparation; no real provider, approval or employee execution."""
+    if type(provider) is not manager_decision.MockDecisionProvider:
+        raise ValueError("오프라인 모의 검토 공급자만 지원합니다.")
+    with manager_decision_transaction(project_id) as project:
+        state = manager_decision.require_enabled(project)
+        if state.get("provider") != "mock":
+            raise ValueError("실사용 관리자 설정에 모의 제안을 연결하지 않습니다.")
+        context = _manager_review_input(project, task_id)
+        if (len(state["proposals"]) >= 50 or any(p["decision"]["binding"] == context["binding"] for p in state["proposals"])):
+            raise ValueError("동일 검토 제안이 있거나 제안 한도에 도달했습니다.")
+        snapshot = manager_decision.digest(project)
+        raw = provider.generate(context)
+        decision = manager_decision.validate_provider_response(
+            {"choices": [{"finish_reason": "stop", "message": {"content": raw}}]}, context)
+        if manager_decision.digest(load_project(project_id)) != snapshot:
+            raise ValueError("검토 중 프로젝트가 변경되었습니다.")
+        proposal = {"id": uuid.uuid4().hex, "version": len(state["proposals"]) + 1,
+            "purpose": manager_decision.REVIEW_PURPOSE, "provider": "mock", "at": now(),
+            "status": "pending_user_decision", "decision": decision}
+        state["proposals"].append(proposal)
+        project.setdefault("history", []).append({"at": now(), "event": "manager_proposal_created",
+            "purpose": manager_decision.REVIEW_PURPOSE, "provider": "mock", "proposal_id": proposal["id"],
+            "binding": decision["binding"], "details": "미승인 직원 결과 모의 검토 — 사용자 결정 대기"})
+        save_project(project)
+        return deepcopy(proposal)
+
+
 def manager_decision_view(project_id):
     """Read-only tool interface for questions, proposals and optimistic tokens."""
     project = load_project(project_id)
@@ -1155,7 +1201,7 @@ def manager_decision_view(project_id):
     for proposal in state["proposals"]:
         item = deepcopy(proposal)
         try:
-            context = _manager_decision_input(project, item["decision"]["binding"]["task_id"])
+            context = _proposal_context(project, proposal)
             manager_decision.parse_and_validate(json.dumps(item["decision"], ensure_ascii=False), context)
             item["stale"] = False
         except ValueError:
@@ -1174,20 +1220,21 @@ def respond_manager_decision(project_id, proposal_id, expected_hash, response, a
                 or manager_decision.digest(proposal) != expected_hash):
             raise ValueError("제안이 없거나 이미 결정되었거나 변경되었습니다.")
         decision = proposal["decision"]
-        context = _manager_decision_input(project, decision["binding"]["task_id"])
+        context = _proposal_context(project, proposal)
         manager_decision.parse_and_validate(json.dumps(decision, ensure_ascii=False), context)
         if response == "answer":
             if decision["action"] != "ask_user":
                 raise ValueError("사용자 질문 제안에만 답변할 수 있습니다.")
             manager_decision.text(answer, 2000)
             state["answers"].append({"task_id": decision["binding"]["task_id"], "proposal_id": proposal_id,
-                                      "answer": answer, "at": now()})
+                                      "answer": answer, "at": now(),
+                                      **({"purpose": manager_decision.REVIEW_PURPOSE} if proposal.get("purpose") == manager_decision.REVIEW_PURPOSE else {})})
             proposal["status"] = "answered"
         elif response in {"approve", "reject"}:
             if answer:
                 raise ValueError("답변은 별도 answer 결정으로 기록해 주세요.")
             proposal["status"] = ("rejected" if response == "reject" else
-                                   "approved" if decision["action"] == "proceed" else "accepted_for_review")
+                                   "approved" if decision["action"] == "proceed" and proposal.get("purpose") != manager_decision.REVIEW_PURPOSE else "accepted_for_review")
         else:
             raise ValueError("사용자 결정은 approve/reject/answer 중 하나여야 합니다.")
         proposal["decided_at"] = now()
@@ -1195,6 +1242,7 @@ def respond_manager_decision(project_id, proposal_id, expected_hash, response, a
         project.setdefault("history", []).append({"at": now(),
             "event": "manager_question_answered" if response == "answer" else "manager_user_decision",
             "proposal_id": proposal_id, "response": response, "binding": decision["binding"],
+            **({"purpose": manager_decision.REVIEW_PURPOSE} if proposal.get("purpose") == manager_decision.REVIEW_PURPOSE else {}),
             "details": "사용자 판단 기록 — 추가 실행·계획 변경·결과 수정 자동 적용 없음"})
         save_project(project)
 

@@ -21,11 +21,13 @@ import semantic_review
 import manager_decision
 import workflow_guidance
 import project_budget
+import autonomous_company
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
 PROJECTS_DIR = DATA_DIR / "projects"
 ARTIFACTS_DIR = DATA_DIR / "artifacts"
+AUTONOMOUS_MOCK_ROOT = ROOT / "autonomous_mock"
 HOST = os.environ.get("AI_COMPANY_OS_HOST", "127.0.0.1")
 PORT = int(os.environ.get("AI_COMPANY_OS_PORT", "8000"))
 # One process only: keep each project's read/check/write transaction together.
@@ -1897,6 +1899,8 @@ class Handler(BaseHTTPRequestHandler):
         parts = [p for p in parsed.path.split("/") if p]
         if not parts:
             self.home()
+        elif len(parts) == 3 and parts[:2] == ["autonomous", "mock"]:
+            self.autonomous_mock_detail(parts[2])
         elif len(parts) == 2 and parts[0] == "project":
             self.project_detail(parts[1])
         elif len(parts) == 2 and parts[0] == "report":
@@ -2268,6 +2272,15 @@ class Handler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(data)
 
+    def autonomous_mock_detail(self, project_id):
+        try:
+            project = autonomous_company.Store(AUTONOMOUS_MOCK_ROOT).result(project_id)
+            body = autonomous_company.render(project)
+        except (ValueError, OSError, KeyError, TypeError):
+            self.send_html(page("자율 모의 회사", "<p>유효한 모의 실행 기록을 찾을 수 없습니다.</p>"), 404)
+            return
+        self.send_html(page("자율 모의 회사 결과", body))
+
     def home(self):
         projects = load_projects()
         cards = ""
@@ -2277,8 +2290,17 @@ class Handler(BaseHTTPRequestHandler):
 <p class="muted">상태: <span class="status">{esc(p.get('status','active'))}</span> · 최근 수정: {esc(p.get('updated_at',''))}</p></section>"""
         if not cards:
             cards = '<p class="muted">아직 프로젝트가 없습니다. 아래에서 첫 프로젝트를 만들어 보세요.</p>'
-        body = f"""<p>프로젝트를 만들고 저장된 작업 상태를 관리하는 1단계 기본 버전입니다.</p>
-<section class="card"><h2>새 프로젝트</h2><form method="post" action="/create" data-processing-form data-processing-label="처리 중...">
+        mock_cards = []
+        store = autonomous_company.Store(AUTONOMOUS_MOCK_ROOT)
+        for path in sorted(AUTONOMOUS_MOCK_ROOT.glob("*.json"))[:50]:
+            try:
+                project = store.load(path.stem)
+                mock_cards.append(f"<li><a href='/autonomous/mock/{esc(project['id'])}'>{esc(project['goal'])}</a> · {esc(project['status'])}</li>")
+            except (ValueError, OSError, KeyError, TypeError):
+                continue
+        mock_panel = "<section class='card'><h2>AI 회사 자율 운영 · mock-only</h2><p>모의 관리자·직원의 계획·작업·검토·수정·최종 결과를 확인합니다. 기존 실사용 프로젝트를 자동 전환하거나 실제 호출을 시작하지 않습니다.</p><ul>" + ("".join(mock_cards) or "<li>아직 저장된 자율 모의 실행이 없습니다.</li>") + "</ul></section>"
+        body = f"""{mock_panel}<p>기존 프로젝트와 수동 운영 기능을 함께 보존합니다.</p>
+<section class="card"><h2>새 프로젝트 (기존 수동 모드)</h2><form method="post" action="/create" data-processing-form data-processing-label="처리 중...">
 <label for="name">프로젝트 이름</label><input id="name" name="name" required maxlength="120" placeholder="예: 신규 서비스 조사">
 <label for="goal">목표 (선택)</label><textarea id="goal" name="goal" rows="3" maxlength="4000" placeholder="무엇을 이루고 싶은지 자유롭게 적어 주세요."></textarea>
 <button type="submit">프로젝트 만들기</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form></section>

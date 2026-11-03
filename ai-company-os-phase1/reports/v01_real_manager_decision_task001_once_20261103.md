@@ -2,17 +2,17 @@
 
 작성: 2026-11-03 KST(UTC+9). `git pull --ff-only`로 main `3216737` 반영 후 수행했다.
 
-**판정: 실제 관리자 판단 검증 미완료.** 실제 transport 진입은 **1회**, 제공자 응답·판단 제안은 확보하지 못했다. 클라이언트 시간 초과 및 요청 worker 종료 미확인으로 완료 불명이며, 예약과 실행 프로세스를 보존했다. 재시도·다른 모델·TASK-002 실행은 없다.
+**최종 판정: 실제 관리자 판단 검증 미완료.** 실제 transport 진입은 **1회**다. 처음에는 클라이언트 시간 초과와 worker 미종료로 완료 불명이었으나 추가 전송 없이 기존 worker가 뒤늦게 응답 처리를 끝냈다. **최종 원장은 completed 3/20, failed 0, reserved 0**이다. 관리자 제안 검증·저장 경로는 중단되어 유효한 제안은 0개이며 action을 확보하지 못했다. 재시도·다른 모델·TASK-002 실행은 없다.
 
 ## 실제 실행과 현재 예산
 
-대상 프로젝트 cb44b605b498, 사용자 승인된 TASK-001 조사 결과에 대한 관리자 판단 요청이다. 모델 `openrouter/free`, kind=`manager_decision`, task_id=`TASK-001`로 1건을 **2026-11-03 10:13:26 KST**에 요청 전 영속 예약했다. 전송 경로 진입은 1회이며 실제 제공자 수신·처리·완료 여부는 확인할 수 없다.
+대상 프로젝트 cb44b605b498, 사용자 승인된 TASK-001 조사 결과에 대한 관리자 판단 요청이다. 모델 `openrouter/free`, kind=`manager_decision`, task_id=`TASK-001`로 1건을 **2026-11-03 10:13:26 KST**에 요청 전 영속 예약했다. 전송 경로 진입은 1회다. 이후 원장의 completed 기록은 공통 transport가 제공자 응답 JSON 객체를 처리했다는 뜻이며, 관리자 판단 계약 통과를 뜻하지 않는다.
 
-로컬 클라이언트 timeout=55초 뒤 응답 미확보, 추가 worker 관측 5초 뒤인 **10:14:26 KST**에 requests_finished=false를 기록했다. 이후 **10:15:16 KST** 읽기 전용 확인에서도 예산은 **3/20회 소모**, completed **2**, failed **0**, reserved **1**, 미확정 **1**이고 제안은 0개다. 이 값은 해당 시각 관측이며 살아 있는 worker가 이후 완료하면 바뀔 수 있다. 실제 응답 확보·action 선택·판정 성공으로 보고하지 않는다.
+로컬 클라이언트 timeout=55초 뒤 응답 미확보, 추가 worker 관측 5초 뒤인 **10:14:26 KST**에 requests_finished=false를 기록했다. 이후 **10:15:16 KST** 읽기 전용 확인에서도 예산은 **3/20회 소모**, completed **2**, failed **0**, reserved **1**, 미확정 **1**이고 제안은 0개다. 이 값은 당시의 중간 관측이다. **10:17:42 KST 재읽기에서 completed 3건·제안 0개로 변경됨을 확인**했고, **10:25:41 KST 최종 재읽기**에서 관리자 attempt의 finished_at이 **10:15:35 KST**, status=completed이며 같은 시각 real_manager_stopped 감사 이력이 남은 것을 확인했다. 따라서 최종 사용 3/20, completed 3, failed 0, reserved/미확정 0, 잔여 17이다. API 원장 완료와 별개로 관리자 제안은 검증·저장되지 않아 이번 인수는 미완료다.
 
-클라이언트 timeout만으로 제공자 실패나 작업 종료를 추정하지 않았다. 프로세스/worker를 kill하거나 reserved를 failed/completed로 강제 변경하지 않았다. 실행 도구 세션은 종료되지 않은 상태로 유지했다. 전체 wall-clock 취소 보장은 여전히 없으며 중복 전송하지 않는다. HTTP 200/409 결과도 클라이언트에서 확보하지 못했다.
+클라이언트 timeout만으로 제공자 실패나 작업 종료를 추정하지 않았다. 프로세스/worker를 kill하거나 reserved를 failed/completed로 강제 변경하지 않았다. 중간에는 실행 도구 세션을 종료하지 않고 유지했다. 최종 확인 시 기존 실행 세션이 **exit_code=0**으로 끝났으며 non-daemon 요청 worker를 가진 프로세스의 종료를 확인했다. 기존 관측 파일의 requests_finished=false는 10:14:26의 역사적 기록으로 그대로 보존한다. 전체 wall-clock 취소 보장은 여전히 없으며 중복 전송하지 않는다. HTTP 200/409 결과는 클라이언트에서 확보하지 못했다.
 
-TASK-001의 조사 원문·사용자 승인 및 TASK-002/003/004 대기 상태는 그대로다. 실제 관리자 질문·지침·근거는 아직 없으므로 요약할 수 없다. 사용자 제안 자동 승인·직원 실행·의미 검토·재계획·MP4 제작/업로드는 수행하지 않았다.
+TASK-001의 조사 원문·사용자 승인 및 TASK-002/003/004 대기 상태는 그대로다. strict 검증을 통과한 실제 관리자 질문·지침·근거가 없으므로 요약할 수 없다. 중단 이력은 요청/응답/지문 검증의 공통 정지 메시지만 남긴다. 원문을 저장하지 않아 finish_reason·content 형식·binding 등 구체적으로 어떤 검사에서 거절됐는지는 이 실행 기록만으로 확정할 수 없다. 공통 transport의 completed를 유효한 관리자 판단으로 해석하지 않는다. 사용자 제안 자동 승인·직원 실행·의미 검토·재계획·MP4 제작/업로드는 수행하지 않았다.
 
 ## 구현 파일과 실제 경로
 
@@ -28,7 +28,7 @@ TASK-001의 조사 원문·사용자 승인 및 TASK-002/003/004 대기 상태�
 
 ## 판단 계약 및 지문/예약 충돌 해결
 
-모델에게 proceed/ask_user/request_revision/propose_plan_change 중 하나를 고르게 하며 영상 항목 수·선택 팁·행동은 하드코딩하지 않는다. 최상위 schema_version/binding/action/rationale/evidence/next_step/uncertainty/source=model_claim/payload와 action별 필드·TASK ID·크기 상한은 기존 strict 계약을 재사용한다. 직원 결과의 ‘검증됨’ 표현도 독립 검증 사실로 취급하지 않으며 웹·도구 사용을 주장하지 않도록 system 안내와 user 자료를 분리했다. 실제 모델이 이 안내를 준수했는지는 이번 미확정 응답으로 검증하지 못했다.
+모델에게 proceed/ask_user/request_revision/propose_plan_change 중 하나를 고르게 하며 영상 항목 수·선택 팁·행동은 하드코딩하지 않는다. 최상위 schema_version/binding/action/rationale/evidence/next_step/uncertainty/source=model_claim/payload와 action별 필드·TASK ID·크기 상한은 기존 strict 계약을 재사용한다. 직원 결과의 ‘검증됨’ 표현도 독립 검증 사실로 취급하지 않으며 웹·도구 사용을 주장하지 않도록 system 안내와 user 자료를 분리했다. 실제 모델이 이 안내를 준수했는지는 유효한 제안 부재로 검증하지 못했다.
 
 기존 input_hash에서 **permission_summary의 used_calls와 unresolved_reservations 두 집계값만 제외**했다. 모델에게 보내는 자료에서는 실제 당시 값이 그대로 보이고 감사/원장도 보존한다. 목표·결과 원문/버전/사용자 승인 시각·계획·선호·후속 업무·사용자 답변·limit·권한 요약의 나머지는 계속 지문에 결속된다. 반환한 binding을 새 값으로 덮어쓰지 않는다.
 
@@ -55,9 +55,9 @@ timeout 소모·무재시도 및 변경 보존 확인 추가 후 같은 명령�
 
 실행 명령: `python -B /tmp/real_manager_task001_once_20261103.py` (허용된 격리 로컬 실행). 일반 앱에는 endpoint를 추가하지 않고 도구 내부 loopback 전용 서버에서 명시적 로컬 handler를 1회 호출했다. ObservedServer의 non-daemon worker 및 stop_and_observe를 사용했다. 로컬 요청 1회와 실제 transport 진입 1회 가드를 각각 두고, 배타 guard 파일·기존 관리자 시도/상태 검사로 재실행을 차단한다. 모델 요청 직전 디스크의 정확한 kind/task/reserved·기존 두 attempts·계획/업무 불변·무료 주소/모델을 검사했다. 영구 환경은 바꾸지 않고 실행 프로세스에만 실제 활성화 및 45초 소켓 timeout을 설정했다.
 
-실제 프로젝트 위치는 `data/video-real-plan-20261103/projects/cb44b605b498.json`이다. 새 manager_decisions.authorization에는 이번 승인 범위와 대상 binding이 있고 proposals는 현재 비어 있다. 원장 마지막 항목이 관리자 reserved다. 기존 두 시도·동의·계획·조사 원문·TASK-002~004·사용자 선호는 변경 전후 동일함을 실행 도구에서 확인했다.
+실제 프로젝트 위치는 `data/video-real-plan-20261103/projects/cb44b605b498.json`이다. 새 manager_decisions.authorization에는 이번 승인 범위와 대상 binding이 있고 proposals는 현재 비어 있다. 원장 마지막 항목은 처음 reserved였고 최종적으로 completed로 저장됐다. 완료 상태를 수동 변경하지 않았다. 기존 두 시도·동의·계획·조사 원문·TASK-002~004·사용자 선호는 변경 전후 동일함을 실행 도구에서 확인했다.
 
-실행 도구는 `real-manager-task001-once.guard`와 `real-manager-task001-observation.json`을 동일 Git 제외 격리 경로에 보존했다. worker 종료 미관측 상태가 저장돼 있다. 실행 도구를 다시 호출하거나 guard를 지워 재실행하면 안 된다. 살아 있는 기존 worker는 이후 결과를 저장할 수 있으므로 재개 판단 전 원장·제안을 읽기 전용으로 재확인해야 한다.
+실행 도구는 `real-manager-task001-once.guard`와 `real-manager-task001-observation.json`을 동일 Git 제외 격리 경로에 보존했다. 중간 worker 종료 미관측 상태가 저장돼 있다. 실행 도구를 다시 호출하거나 guard를 지워 재실행하면 안 된다. 기존 worker는 이후 완료됐고 프로세스 종료도 도구 세션에서 확인했다. 새 빈 서버를 종료 증거로 대신하지 않았다. 재개 판단 전에는 원장·제안·정지 사유를 다시 읽어야 하며 기존 시도나 guard를 초기화하면 안 된다.
 
 기존 data/backups 15개 파일의 시작 전 SHA를 기록했다. 대상 영상 JSON 이외 **14개 기존 파일 SHA 불변**을 확인했다. 새 파일은 위 도구 guard/관측 자료뿐이다. 기존 재고 프로젝트 c85d9853906a와 그 미확정 예약·보존본·판단 원장, 다른 프로젝트·백업·미추적 파일을 수정/복사/삭제/초기화하지 않았다. 새 일일 백업도 생성하지 않았다.
 
@@ -65,4 +65,4 @@ timeout 소모·무재시도 및 변경 보존 확인 추가 후 같은 명령�
 
 ## 다음 한 단계
 
-**기존 관리자 요청 worker와 예약의 종료/완료 상태를 추가 전송 없이 읽기 전용으로 관측**하는 것이 다음 단계다. 완료 증거가 없으면 reserved를 유지하며 실제 요청 재시도·TASK-002 대체 실행·제안 자동 승인 없이 멈춘다. 실제 관리자 action과 사용자 제안 확인 대기에 도달해야 하는 이번 성공 기준은 아직 충족하지 못했다.
+다음 사용자 판단은 **추가 실제 호출 없이 관리자 응답 거절 사유를 구분해 기록하는 오프라인 진단 보완을 진행할지**다. 이번 실행의 정확한 응답 원문/개별 거절 원인은 보존되지 않아 뒤늦게 복원할 수 없다. 현재 예산 소모는 유지하고 실제 요청 재시도·TASK-002 대체 실행·제안 자동 승인 없이 멈춘다. 실제 관리자 action과 사용자 제안 확인 대기에 도달해야 하는 이번 성공 기준은 충족하지 못했다.

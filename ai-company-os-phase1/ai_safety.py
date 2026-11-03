@@ -9,6 +9,7 @@ import os
 import uuid
 import uncertain_reservations
 import project_budget
+import ai_provider_adapter
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
@@ -105,6 +106,7 @@ def request_json(project, *, model, base_url, body, api_key, timeout, transport,
         raise ValueError("무료 모델 보호: AI_MODEL은 정확히 openrouter/free여야 합니다.")
     if base_url.rstrip("/") != BASE_URL:
         raise ValueError("허용된 OpenRouter HTTPS API 주소만 사용할 수 있습니다.")
+    adapter = ai_provider_adapter.require_live_adapter(model=model, base_url=base_url, api_key=api_key)
     state, attempts, limit = check_project_permission(project, goal)
     scope = _scope.get()
     if scope is None or scope["used"] >= MAX_CALLS_PER_REQUEST:
@@ -132,10 +134,7 @@ def request_json(project, *, model, base_url, body, api_key, timeout, transport,
     scope["persist"](project)  # No transport without a durable consumed attempt.
     scope["used"] += 1
     scope["project_id"] = project["id"]
-    headers = {"Content-Type": "application/json"}
-    if api_key:
-        headers["Authorization"] = f"Bearer {api_key}"
-    request = Request(BASE_URL + "/chat/completions", data=body, headers=headers, method="POST")
+    request = adapter.build_request(body, api_key)
     try:
         with transport(request, timeout=min(90, max(1, int(timeout)))) as response:
             raw = response.read(MAX_RESPONSE_BYTES + 1)

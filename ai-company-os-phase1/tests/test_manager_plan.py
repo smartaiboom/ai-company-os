@@ -105,6 +105,7 @@ class ManagerPlanTests(unittest.TestCase):
             "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
             "AI_REAL_REQUESTS_ENABLED": "1",
+            "AI_API_KEY": "FICTIONAL_TEST_KEY",
         }
         with patch.dict(os.environ, env, clear=True):
             with patch("manager_plan.urlopen", return_value=FakeResponse()) as mocked_urlopen:

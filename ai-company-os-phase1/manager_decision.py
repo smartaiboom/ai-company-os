@@ -4,6 +4,7 @@ import hashlib
 import json
 import re
 import project_budget
+from ai_provider_adapter import classify_finish_reason, FinishClass
 import os
 from ai_safety import request_json, guarded_urlopen as urlopen, MODEL, BASE_URL
 
@@ -249,7 +250,7 @@ def validate_provider_response(response, context):
         content = choice['message']['content']
     except (TypeError, KeyError, IndexError):
         raise DecisionDiagnosticError('provider_response', 'structure') from None
-    if finish != 'stop':
+    if classify_finish_reason(finish) is not FinishClass.STOP:
         raise DecisionDiagnosticError('provider_response', 'finish_reason')
     if not isinstance(content, str):
         raise DecisionDiagnosticError('provider_response', 'content_type')

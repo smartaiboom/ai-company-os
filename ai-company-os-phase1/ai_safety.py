@@ -37,6 +37,15 @@ class NoRedirect(HTTPRedirectHandler):
         return None
 
 
+def unique_response_object(pairs):
+    result = {}
+    for key, value in pairs:
+        if key in result:
+            raise ValueError("AI 응답 JSON에 중복 필드가 있습니다.")
+        result[key] = value
+    return result
+
+
 def guarded_urlopen(request, timeout):
     # Never forward authorization to a redirect host or an environment proxy.
     return build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout)
@@ -132,7 +141,7 @@ def request_json(project, *, model, base_url, body, api_key, timeout, transport,
             raw = response.read(MAX_RESPONSE_BYTES + 1)
         if len(raw) > MAX_RESPONSE_BYTES:
             raise RuntimeError("AI 응답 크기 상한을 초과했습니다.")
-        parsed = json.loads(raw.decode("utf-8"))
+        parsed = json.loads(raw.decode("utf-8"), object_pairs_hook=unique_response_object)
         if not isinstance(parsed, dict):
             raise RuntimeError("AI 응답 형식이 올바르지 않습니다.")
     except Exception as exc:

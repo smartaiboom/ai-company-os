@@ -949,12 +949,98 @@ def _manager_decision_input(project, task_id):
     return manager_decision.decision_input(project, task_id)
 
 
+def propose_real_manager_decision_once(project_id, task_id, expected_project_hash, *, user_confirmed=False, reason=""):
+    """Local owner tool: one task/result-specific authorization, no public HTTP route."""
+    with manager_decision_transaction(project_id) as project:
+        if (user_confirmed is not True or not isinstance(reason, str) or not reason.strip()
+                or manager_decision.digest(project) != expected_project_hash
+                or project.get("manager_decisions")
+                or any(a.get("kind") == "manager_decision" for a in project.get("real_ai", {}).get("attempts", []))):
+            raise ValueError("직접 승인·최신 상태가 필요하며 기존 관리자 호출/설정은 재사용하지 않습니다.")
+        check_project_permission(project)
+        if (os.getenv("AI_MODEL") != "openrouter/free"
+                or os.getenv("AI_API_BASE_URL", "").rstrip("/") != "https://openrouter.ai/api/v1"
+                or not os.getenv("AI_API_KEY")):
+            raise ValueError("실제 관리자 무료 모델·주소·인증키 조건을 확인해 주세요.")
+        project["manager_decisions"] = {"enabled": True, "provider": "real_openrouter_free", "proposals": [], "answers": []}
+        context = _manager_decision_input(project, task_id)
+        project["manager_decisions"]["authorization"] = {
+            "task_id": task_id, "binding": context["binding"], "max_calls": 1, "approved_at": now(),
+            "scope": "목표·관련 승인 계획·허용 선호·승인된 대상 결과·후속 업무 요약", "reason": reason}
+        project.setdefault("history", []).append({"at": now(), "event": "real_manager_once_authorized",
+            "details": reason, "task_id": task_id, "binding": context["binding"], "max_calls": 1})
+        save_project(project)
+        before = deepcopy(project)
+        previous_attempts = deepcopy(before["real_ai"]["attempts"])
+
+        def immutable_state(value):
+            result = deepcopy(value)
+            result.pop("updated_at", None)
+            result["real_ai"].pop("attempts", None)
+            result["real_ai"].pop("stop_reason", None)
+            return result
+
+        def persist_single_attempt(value):
+            observed = load_project(project_id)
+            new_attempts = value["real_ai"]["attempts"]
+            old_attempts = observed["real_ai"]["attempts"]
+            if (immutable_state(observed) != immutable_state(before)
+                    or immutable_state(value) != immutable_state(before)
+                    or len(new_attempts) != len(previous_attempts) + 1
+                    or new_attempts[:-1] != previous_attempts
+                    or old_attempts[:len(previous_attempts)] != previous_attempts
+                    or len(old_attempts) not in (len(previous_attempts), len(previous_attempts) + 1)
+                    or (len(old_attempts) > len(previous_attempts)
+                        and (old_attempts[-1]["id"] != new_attempts[-1]["id"] or old_attempts[-1]["status"] != "reserved"))):
+                raise ValueError("단일 예약 저장 중 프로젝트 또는 원장 경합을 감지했습니다.")
+            if len(old_attempts) > len(previous_attempts):
+                expected_reserved = deepcopy(new_attempts[-1])
+                expected_reserved["status"] = "reserved"
+                expected_reserved.pop("finished_at", None)
+                if old_attempts[-1] != expected_reserved:
+                    raise ValueError("기존 예약의 지문이 변경되었습니다.")
+            save_project(value)
+
+        try:
+            with request_scope(persist_single_attempt):
+                decision = manager_decision.RealManagerDecisionProvider().generate(project, context)
+            current = load_project(project_id)
+            attempts = current["real_ai"]["attempts"]
+            if (len(attempts) != len(previous_attempts) + 1 or attempts[:-1] != previous_attempts
+                    or attempts[-1].get("kind") != "manager_decision" or attempts[-1].get("task_id") != task_id
+                    or attempts[-1].get("status") != "completed" or attempts[-1].get("model") != "openrouter/free"):
+                raise ValueError("허용된 단일 관리자 호출 이외의 원장 변경을 감지했습니다.")
+            comparison = deepcopy(current)
+            comparison["real_ai"]["attempts"] = deepcopy(previous_attempts)
+            comparison["updated_at"] = before["updated_at"]
+            if comparison != before or _manager_decision_input(current, task_id)["binding"] != context["binding"]:
+                raise ValueError("판단 중 승인 결과·계획 또는 프로젝트가 변경되었습니다.")
+            manager_decision.parse_and_validate(json.dumps(decision, ensure_ascii=False), context)
+            proposal = {"id": uuid.uuid4().hex, "version": 1, "status": "pending_user_decision",
+                "provider": "real_openrouter_free", "at": now(), "decision": decision, "attempt_id": attempts[-1]["id"]}
+            current["manager_decisions"]["proposals"].append(proposal)
+            current.setdefault("history", []).append({"at": now(), "event": "manager_proposal_created",
+                "details": "실제 무료 AI 관리자 제안 — 사용자 결정 대기", "provider": "real_openrouter_free",
+                "binding": decision["binding"], "attempt_id": attempts[-1]["id"], "proposal_id": proposal["id"]})
+            save_project(current)
+            return deepcopy(proposal)
+        except Exception:
+            # Reload, never overwrite concurrent changes or reinterpret reservations.
+            current = load_project(project_id)
+            current.setdefault("history", []).append({"at": now(), "event": "real_manager_stopped",
+                "details": "관리자 요청/응답/지문 검증 중단 — 추가 전송 없음", "task_id": task_id})
+            save_project(current)
+            raise RuntimeError("실제 관리자 판단이 완료되지 않았습니다. 저장된 예산·예약을 보존하고 재시도하지 않습니다.") from None
+
+
 def propose_manager_decision(project_id, task_id, provider):
     """Generate one explicit mock proposal; never execute workers or apply plans."""
     if type(provider) is not manager_decision.MockDecisionProvider:
         raise ValueError("명시적인 모의 판단 공급자만 지원합니다. 실제 모델 연결은 없습니다.")
     with manager_decision_transaction(project_id) as project:
         state = manager_decision.require_enabled(project)
+        if state.get("provider") != "mock":
+            raise ValueError("실제 관리자 설정에 모의 공급자를 자동 연결하지 않습니다.")
         context = _manager_decision_input(project, task_id)
         if any(p["decision"]["binding"] == context["binding"] for p in state["proposals"]):
             raise ValueError("같은 입력에 대한 관리자 제안이 이미 있습니다.")

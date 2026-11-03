@@ -6,6 +6,7 @@ from datetime import datetime, timezone, timedelta
 import html
 import json
 import os
+import sys
 import uuid
 import hashlib
 import re
@@ -18,6 +19,7 @@ from quality_review import REVIEWER_ID, RULESET_ID, evaluate_format, validate_re
 from ai_safety import request_scope, check_project_permission, MAX_CALLS, MAX_CALLS_PER_REQUEST
 import semantic_review
 import manager_decision
+import workflow_guidance
 import project_budget
 
 ROOT = Path(__file__).resolve().parent
@@ -397,6 +399,13 @@ def final_evidence(project):
         state = project["semantic"]
         evidence["semantic"] = {k: state.get(k) for k in
                                 ("target_task_id", "reviewer_task_id", "criteria", "approved_by", "approved_at", "review")}
+    state = project.get("manager_decisions", {})
+    if state.get("enabled"):
+        evidence["manager_decisions"] = {
+            "proposals": [{k: proposal[k] for k in ("id", "provider", "purpose", "status", "decision", "decided_at", "decided_by")
+                           if k in proposal} for proposal in state.get("proposals", [])],
+            "answers": [{k: answer[k] for k in ("task_id", "proposal_id", "answer", "at", "purpose") if k in answer}
+                        for answer in state.get("answers", [])]}
     return evidence
 
 
@@ -603,6 +612,7 @@ def result_revision(task):
 def quality_input_context(project, task_index):
     evidence = final_evidence(project)
     evidence.pop("semantic", None)  # Semantic output must not become its own input fingerprint.
+    evidence.pop("manager_decisions", None)  # Post-result decisions are not employee execution inputs.
     task = project["tasks"][task_index]
     evidence["tasks"] = evidence["tasks"][:task_index]
     evidence["execution_events"] = evidence["execution_events"][:task_index]
@@ -1211,8 +1221,10 @@ def manager_decision_view(project_id):
     return result
 
 
-def respond_manager_decision(project_id, proposal_id, expected_hash, response, answer="", *, expected_project_hash=None):
+def respond_manager_decision(project_id, proposal_id, expected_hash, response, answer="", *, expected_project_hash=None, user_authorization=None):
     """Caller supplies the actual user's decision; non-proceed acceptance never applies edits."""
+    if user_authorization is not None:
+        manager_decision.text(user_authorization, 4000)
     with manager_decision_transaction(project_id) as project:
         if expected_project_hash is not None and manager_decision.digest(project) != expected_project_hash:
             raise ValueError("사용자 결정 대상 프로젝트가 변경되었습니다.")
@@ -1245,6 +1257,8 @@ def respond_manager_decision(project_id, proposal_id, expected_hash, response, a
             "event": "manager_question_answered" if response == "answer" else "manager_user_decision",
             "proposal_id": proposal_id, "response": response, "binding": decision["binding"],
             **({"purpose": manager_decision.REVIEW_PURPOSE} if proposal.get("purpose") == manager_decision.REVIEW_PURPOSE else {}),
+            **({"user_authorization": user_authorization, "answer_hash": manager_decision.digest(answer)}
+               if user_authorization is not None else {}),
             "details": "사용자 판단 기록 — 추가 실행·계획 변경·결과 수정 자동 적용 없음"})
         if expected_project_hash is not None and manager_decision.digest(load_project(project_id)) != expected_project_hash:
             raise ValueError("사용자 결정 저장 중 프로젝트 경합을 감지했습니다.")
@@ -1417,6 +1431,7 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
         task, tasks, task_index, input_task_ids
     )
     previous_results.extend(manager_guidance)
+    previous_results.extend(manager_decision.user_answer_inputs(project, input_task_ids))
     if review_feedback:
         previous_results.append({
             "task_id": task_id,
@@ -1562,10 +1577,14 @@ def semantic_tasks(project):
 
 def semantic_binding(project):
     target, reviewer = semantic_tasks(project)
-    return {**quality_binding(project, target, "semantic-v1", project["tasks"][reviewer]["id"]),
-            "criteria_hash": _digest(project["semantic"]["criteria"]),
-            "reviewer_hash": _digest({k: project["tasks"][reviewer].get(k) for k in
-                                      ("id", "name", "role", "inputs", "input_task_ids", "output", "risk")})}
+    binding = {**quality_binding(project, target, "semantic-v1", project["tasks"][reviewer]["id"]),
+               "criteria_hash": _digest(project["semantic"]["criteria"]),
+               "reviewer_hash": _digest({k: project["tasks"][reviewer].get(k) for k in
+                                         ("id", "name", "role", "inputs", "input_task_ids", "output", "risk")})}
+    answers = manager_decision.user_answer_inputs(project, [project["tasks"][target]["id"]])
+    if answers:
+        binding["user_answers_hash"] = manager_decision.digest(answers)
+    return binding
 
 
 def configure_semantic(project_id, target_id, reviewer_id, criteria_text):
@@ -1615,7 +1634,8 @@ def run_semantic_review(project_id):
                 or binding["result_revision"] != cycle.get("origin_revision", -2) + 1):
             raise ValueError("초기 검토 또는 사용자 수정 후 재검토 1회만 허용합니다. 자동 재시도하지 않습니다.")
     # Validate all predecessor approvals before consuming the single review attempt.
-    _validate_task_predecessors(project["tasks"][reviewer], project["tasks"], reviewer)
+    input_ids = _validate_task_predecessors(project["tasks"][reviewer], project["tasks"], reviewer)
+    manager_decision.require_proceed(project, project["tasks"][reviewer]["id"], input_ids)
     if reviews:
         state["revision"]["reevaluation_reserved"] = True
     reviews.append({"phase": "reserved", "binding": binding, "reserved_at": now()})
@@ -1670,11 +1690,13 @@ def semantic_controls(project):
     state = project.get("semantic")
     pid = esc(project["id"])
     if not state:
+        target, reviewer, draft = workflow_guidance.criteria_draft(project)
         return f"""<section><h3>의미 검토 성공 기준 승인</h3>
 <p>품질 업무 실행 전에 대상 바로 다음의 품질 검토 담당 업무를 지정하세요. 실제 전송 동의는 별도이며 이 승인은 AI 요청을 활성화하지 않습니다.</p>
 <form method='post' action='/semantic/configure'><input type='hidden' name='id' value='{pid}'>
-<label>대상 업무 ID<input name='target_task_id' required></label><label>품질 업무 ID<input name='reviewer_task_id' required></label>
-<label>사용자 성공 기준 (한 줄에 하나)<textarea name='criteria' required></textarea></label>
+<label>대상 업무 ID<input name='target_task_id' value='{esc(target)}' required></label><label>품질 업무 ID<input name='reviewer_task_id' value='{esc(reviewer)}' required></label>
+<p>아래는 미승인 초안입니다. 답변에 적은 검토 방향도 기준 승인과 다릅니다. 내용을 검토한 뒤 직접 승인하세요. 외부 출처를 확인할 수 없으면 미확인으로 구분해야 합니다.</p>
+<label>사용자 성공 기준 (한 줄에 하나)<textarea name='criteria' required>{esc(draft)}</textarea></label>
 <button>성공 기준 승인</button></form></section>"""
     review = state.get("review", {})
     label, binding_hash = "미검토", ""
@@ -1915,7 +1937,15 @@ class Handler(BaseHTTPRequestHandler):
 
     def _handle_post(self, parsed, form):
         try:
-            if parsed.path == "/semantic/configure":
+            if parsed.path == "/manager/decision":
+                project_id = form.get("id", "")
+                if not form.get("expected_project_hash"):
+                    raise ValueError("최신 프로젝트 지문이 필요합니다.")
+                respond_manager_decision(project_id, form.get("proposal_id", ""), form.get("expected_hash", ""),
+                    form.get("response", ""), answer=form.get("answer", "") if form.get("response") == "answer" else "",
+                    expected_project_hash=form["expected_project_hash"])
+                self.redirect(f"/project/{project_id}")
+            elif parsed.path == "/semantic/configure":
                 project_id = form.get("id", "")
                 configure_semantic(project_id, form.get("target_task_id", ""), form.get("reviewer_task_id", ""), form.get("criteria", ""))
                 self.redirect(f"/project/{project_id}")
@@ -2404,6 +2434,7 @@ class Handler(BaseHTTPRequestHandler):
 <form method="post" action="/workflow/run" data-processing-form data-processing-label="진행 중...">
 <input type="hidden" name="id" value="{esc(p['id'])}">
 <button type="submit">자동 진행 시작·재개 (mock 전용)</button><p class="muted" data-processing-status aria-live="polite" hidden></p></form></section>
+{workflow_guidance.render(p, runtime=sys.modules[__name__])}
 {real_ai_controls(p)}
 {semantic_controls(p)}
 <section class="card"><h2>결과물 보관 폴더</h2><p class="muted">프로젝트별 결과물은 이 폴더에 보관하도록 준비되어 있습니다.</p><code>data/artifacts/{esc(p['id'])}/</code></section>

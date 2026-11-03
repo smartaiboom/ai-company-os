@@ -94,6 +94,27 @@ def validate_openrouter_free_model(model):
         )
 
 
+def approved_task_context(project, task):
+    """Allow only this task's approved plan stage and explicit preference values."""
+    plan = project.get("plan", {})
+    if plan.get("status") != "approved":
+        return {}
+    for index, stage in enumerate(plan.get("stages", []), 1):
+        if task.get("id") == f"TASK-{index:03d}":
+            context = {"해당 업무의 승인 계획": {
+                key: stage[key] for key in
+                ("name", "role", "inputs", "input_task_ids", "output", "risk")
+                if key in stage
+            }}
+            preferences = project.get("user_preferences", {})
+            context["사용자 선호"] = {
+                key: preferences[key] for key in ("focus", "video_style")
+                if isinstance(preferences.get(key), str) and preferences[key].strip()
+            }
+            return context
+    return {}
+
+
 class ExecutionEngine(ABC):
     """모든 작업 실행 엔진이 따라야 하는 공통 인터페이스."""
 
@@ -319,6 +340,7 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             "사용자 승인 성공 기준": project.get("semantic", {}).get("criteria", []),
             "이전 작업 결과": previous_results,
         }
+        user_payload.update(approved_task_context(project, task))
         user_content = (
             "아래 업무 정보를 참고해 실제 결과물을 작성하세요. "
             "정보를 되풀이하지 말고 결과물 내용부터 시작하세요. "
@@ -328,7 +350,8 @@ class OpenAICompatibleExecutionEngine(ExecutionEngine):
             "목표 도메인에 맞게 담당 역할과 요청 결과물에 집중하세요. "
             "승인된 성공 기준을 대조하고 선행 AI 주장은 미검증으로 구별하세요. "
             "사용자가 승인한 수정 의견이 있으면 해당 업무의 결과만 수정하세요. "
-            "도구·웹 검색·코드 실행이나 외부 조사를 수행했다고 주장하지 마세요."
+            "도구·웹 검색·코드 실행이나 외부 조사를 수행했다고 주장하지 마세요. "
+            "최신 정보나 제시한 출처를 확인하지 못했으면 미검증으로 명시하세요."
         )
         body = json.dumps({
             "model": self.model,

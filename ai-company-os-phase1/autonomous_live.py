@@ -240,9 +240,19 @@ class LiveCompany(Company):
             p['active_operation']=entry['id'];self.used+=1
         self.store.save(p)
 
+    def _check_session(self, grant):
+        require(self.used<grant['body']['per_start'],'session_limit')
+
+    def _request_json(self, p, **kwargs):
+        return ai_safety.request_json(p, **kwargs)
+
+    def _prepare_payload(self, payload):return payload
+
+    def _before_transport(self, p):pass
+
     def _call(self,p,provider,phase,task_id,context):
         grant=self._preflight(p)
-        require(self.used<grant['body']['per_start'],'session_limit')
+        self._check_session(grant)
         require(not p['active_operation'],'uncertain_operation')
         role='manager' if type(provider) is LiveManagerProvider else 'employee'
         allowed={'goal','mode','limits','data_notice'}
@@ -262,7 +272,7 @@ class LiveCompany(Company):
             {'role':'system','content':system},
             {'role':'user','content':json.dumps({'role':role,'phase':phase,'output_contract':CONTRACTS[phase],
                                                'data':context},ensure_ascii=False)}]}
-        body=json.dumps(payload,ensure_ascii=False).encode()
+        body=json.dumps(self._prepare_payload(payload),ensure_ascii=False).encode()
         require(self.config.api_key.encode() not in body,'secret_in_prompt')
         self.current={'phase':phase,'role_kind':'ai_'+role,'provider':provider.name,
                       'context_hash':digest(context),'grant_id':grant['id'],
@@ -270,6 +280,7 @@ class LiveCompany(Company):
                       'result_hash':digest(context.get('result'))}
         def transport(request,timeout):
             # Reservation has already reached disk. Recheck revocation and exact state.
+            self._before_transport(p)
             self.store.grant(p)
             disk=self.store.load(p['id']);entry=self._attempts(p)[-1]
             require(disk['storage_hash']==p['storage_hash'] and p['active_operation']==entry['id']
@@ -277,9 +288,10 @@ class LiveCompany(Company):
             entry['transport_started_at']=now();self.store.save(p)
             return urlopen(request,timeout=timeout)
         try:
-            envelope=ai_safety.request_json(p,model=self.config.model,base_url=self.config.endpoint,
+            envelope=self._request_json(p,model=self.config.model,base_url=self.config.endpoint,
                 body=body,api_key=self.config.api_key,timeout=90,transport=transport,
                 kind='autonomous_'+role,task_id=task_id,goal=p['goal'])
+        except CompanyError:raise
         except (ValueError,RuntimeError):raise CompanyError('live_request_failed') from None
         try:
             choices=envelope['choices'];require(isinstance(choices,list) and len(choices)==1,'invalid_choices')

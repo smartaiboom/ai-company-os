@@ -964,8 +964,36 @@ def propose_real_manager_second_authorized(project_id, task_id, expected_project
         user_confirmed=user_confirmed, reason=reason, second_authorization_id=authorization_id)
 
 
+def validate_third_manager_authorization(project, task_id, authorization_id):
+    state = project.get("manager_decisions", {})
+    attempts = project.get("real_ai", {}).get("attempts", [])
+    managers = [a for a in attempts if a.get("kind") == "manager_decision"]
+    additional = state.get("additional_authorizations", [])
+    history = project.get("history", [])
+    if (task_id != "TASK-001" or len(attempts) != 4 or len(managers) != 2
+            or any(a.get("status") != "completed" for a in attempts)
+            or any(a.get("task_id") != task_id or a.get("model") != "openrouter/free" for a in managers)
+            or state.get("provider") != "real_openrouter_free" or state.get("enabled") is not True
+            or state.get("proposals") != [] or state.get("answers") != []
+            or not state.get("authorization") or len(additional) != 1
+            or additional[0].get("attempt_number") != 2 or additional[0].get("id") == authorization_id
+            or sum(h.get("event") == "real_manager_stopped" for h in history) != 2
+            or any(h.get("event") == "real_manager_third_authorized" or h.get("authorization_id") == authorization_id for h in history)):
+        raise ValueError("새 3차 승인 사전조건 불일치 또는 이미 사용된 승인입니다.")
+
+
+def propose_real_manager_third_authorized(project_id, task_id, expected_project_hash, *,
+                                          authorization_id, user_confirmed=False, reason=""):
+    """Local owner third approval; previous one-shot entrypoints stay closed."""
+    if not isinstance(authorization_id, str) or not re.fullmatch(r"[a-f0-9]{32}", authorization_id):
+        raise ValueError("고유한 새 승인 ID가 필요합니다.")
+    return _propose_real_manager_decision(project_id, task_id, expected_project_hash,
+        user_confirmed=user_confirmed, reason=reason, second_authorization_id=authorization_id,
+        authorization_number=3)
+
+
 def _propose_real_manager_decision(project_id, task_id, expected_project_hash, *,
-                                   user_confirmed, reason, second_authorization_id=None):
+                                   user_confirmed, reason, second_authorization_id=None, authorization_number=2):
     with manager_decision_transaction(project_id) as project:
         if (user_confirmed is not True or not isinstance(reason, str) or not reason.strip()
                 or manager_decision.digest(project) != expected_project_hash):
@@ -976,6 +1004,8 @@ def _propose_real_manager_decision(project_id, task_id, expected_project_hash, *
         if second_authorization_id is None:
             if state or managers:
                 raise ValueError("기존 관리자 호출/설정은 재사용하지 않습니다.")
+        elif authorization_number == 3:
+            validate_third_manager_authorization(project, task_id, second_authorization_id)
         elif (task_id != "TASK-001" or len(attempts) != 3 or len(managers) != 1
                 or any(a.get("status") != "completed" for a in attempts)
                 or managers[0].get("task_id") != task_id or managers[0].get("model") != "openrouter/free"
@@ -998,14 +1028,16 @@ def _propose_real_manager_decision(project_id, task_id, expected_project_hash, *
         if second_authorization_id is None:
             project["manager_decisions"]["authorization"] = authorization
         else:
-            authorization.update(id=second_authorization_id, attempt_number=2,
+            authorization.update(id=second_authorization_id, attempt_number=authorization_number,
                 previous_attempt_id=managers[0]["id"], goal_hash=manager_decision.digest(project.get("manager_goal") or project["goal"]),
-                user_approval="ai관리자 호출 승인할게")
+                user_approval="응 호출 승인할게 다음 진행해줘" if authorization_number == 3 else "ai관리자 호출 승인할게")
+            if authorization_number == 3:
+                authorization.update(project_id=project_id, previous_attempt_ids=[a["id"] for a in managers])
             project["manager_decisions"].setdefault("additional_authorizations", []).append(authorization)
         project.setdefault("history", []).append({"at": now(),
-            "event": "real_manager_second_authorized" if second_authorization_id else "real_manager_once_authorized",
+            "event": ("real_manager_third_authorized" if authorization_number == 3 else "real_manager_second_authorized") if second_authorization_id else "real_manager_once_authorized",
             "details": reason, "task_id": task_id, "binding": context["binding"], "max_calls": 1,
-            **({"authorization_id": second_authorization_id, "attempt_number": 2} if second_authorization_id else {})})
+            **({"authorization_id": second_authorization_id, "attempt_number": authorization_number} if second_authorization_id else {})})
         save_project(project)
         before = deepcopy(project)
         previous_attempts = deepcopy(before["real_ai"]["attempts"])

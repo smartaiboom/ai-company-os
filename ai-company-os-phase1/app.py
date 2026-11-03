@@ -1199,8 +1199,9 @@ def respond_manager_decision(project_id, proposal_id, expected_hash, response, a
         save_project(project)
 
 
-def execute_project_task(project_id, task_id, executor=None, *, _quality_revision=None, _semantic=None):
+def execute_project_task(project_id, task_id, executor=None, *, _quality_revision=None, _semantic=None, _persist=None):
     """Execute and save one task; caller must hold the project mutation lock."""
+    persist_project = _persist or save_project
     project = load_project(project_id)
 
     tasks = project.get("tasks", [])
@@ -1270,7 +1271,7 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
 
     if cycle is not None:
         cycle.update(phase="reserved", started_at=now())
-        save_project(project)
+        persist_project(project)
 
     invalidate_final_report(project, "업무 재실행", task_index != len(tasks) - 1)
     old_status = task.get("status", "대기")
@@ -1359,7 +1360,7 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
                 "details": f"{task_id}: {old_status} -> {task['status']}"
             })
         if not quality_revision:
-            save_project(project)
+            persist_project(project)
         raise TaskExecutionFailure(str(exc)) from exc
 
     if old_status != task["status"]:
@@ -1374,7 +1375,7 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
     project["updated_at"] = now()
     if quality_revision:
         return project
-    save_project(project)
+    persist_project(project)
 
 
 _SEMANTIC_EXECUTION = object()

@@ -8,14 +8,17 @@ import json
 import os
 import uuid
 import uncertain_reservations
+import project_budget
 from urllib.error import HTTPError, URLError
 from urllib.request import HTTPRedirectHandler, ProxyHandler, Request, build_opener
 
 MODEL = "openrouter/free"
 BASE_URL = "https://openrouter.ai/api/v1"
-MAX_CALLS = 7
+DEFAULT_PROJECT_CALL_BUDGET = project_budget.DEFAULT_PROJECT_CALL_BUDGET
+MAX_CALLS = DEFAULT_PROJECT_CALL_BUDGET  # Compatibility alias; not a hard maximum.
 MAX_CALLS_PER_REQUEST = 2
 MAX_INPUT_BYTES = 131072
+MAX_TOTAL_INPUT_BYTES = project_budget.MAX_PROJECT_CALL_BUDGET * MAX_INPUT_BYTES
 MAX_RESPONSE_BYTES = 262144
 MAX_OUTPUT_TOKENS = 4096
 _scope = ContextVar("real_ai_scope", default=None)
@@ -66,8 +69,8 @@ def check_project_permission(project, goal=None):
             or consent.get("data_scope") != "goal_task_inputs_predecessors_feedback"):
         raise ValueError("해당 목표·업무 입력·선행 결과·의견의 외부 전송 동의와 활성화가 필요합니다.")
     attempts = state.get("attempts", [])
-    limit = state.get("limit", MAX_CALLS)
-    if (type(limit) is not int or not 1 <= limit <= MAX_CALLS or not isinstance(attempts, list)
+    limit = project_budget.limit(project)
+    if (not isinstance(attempts, list)
             or any(not isinstance(a, dict) or a.get("status") not in {"reserved", "completed", "failed"}
                    or not isinstance(a.get("id"), str) or not a["id"]
                    or type(a.get("input_bytes")) is not int or not 0 <= a["input_bytes"] <= MAX_INPUT_BYTES
@@ -79,6 +82,10 @@ def check_project_permission(project, goal=None):
             and not uncertain_reservations.permits(project, effective_goal)):
         raise ValueError("완료 여부가 불명확한 AI 예약이 있습니다. 자동 재전송하지 않습니다.")
     if len(attempts) >= limit:
+        scope = _scope.get()
+        if scope is not None:
+            project_budget.ensure_shortage_request(project, [{"purpose": "다음 승인된 AI 업무 실행", "calls": 1}])
+            scope["persist"](project)
         raise ValueError("프로젝트 실제 AI 요청 예산을 소진했습니다.")
     return state, attempts, limit
 
@@ -104,7 +111,7 @@ def request_json(project, *, model, base_url, body, api_key, timeout, transport,
     if (not isinstance(payload, dict) or payload.get("model") != MODEL
             or type(payload.get("max_tokens")) is not int or not 1 <= payload["max_tokens"] <= MAX_OUTPUT_TOKENS):
         raise ValueError("AI 모델 또는 출력 토큰 상한이 올바르지 않습니다.")
-    if sum(a.get("input_bytes", 0) for a in attempts) + len(body) > MAX_CALLS * MAX_INPUT_BYTES:
+    if sum(a.get("input_bytes", 0) for a in attempts) + len(body) > min(limit * MAX_INPUT_BYTES, MAX_TOTAL_INPUT_BYTES):
         raise ValueError("프로젝트 누적 AI 입력 상한을 초과했습니다.")
     entry = {"id": uuid.uuid4().hex, "kind": kind, "task_id": task_id, "model": MODEL,
              "status": "reserved", "reserved_at": now(), "input_bytes": len(body),

@@ -30,6 +30,7 @@ class UncertainReservationTests(unittest.TestCase):
         self.projects = self.root / 'projects'
         self.projects.mkdir()
         for context in (
+            patch('project_budget.KEY_PATH', self.root / '.budget.key'),
             patch.object(app, 'PROJECTS_DIR', self.projects),
             patch.dict(os.environ, {'AI_REAL_REQUESTS_ENABLED':'1',
                                     'AI_ENGINE':'openai_compatible'}, clear=True),

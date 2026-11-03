@@ -39,6 +39,7 @@ class RealAISafetyBudgetTests(unittest.TestCase):
         self.project = approved_project(handlers.ConcurrentExecutionSafetyTests.project(self))
         self.project["plan"] = {"status": "approved"}
         for context in (
+            patch('project_budget.KEY_PATH', self.projects / '.budget.key'),
             patch.object(app, "PROJECTS_DIR", self.projects),
             patch.object(app, "ARTIFACTS_DIR", self.projects / "artifacts"),
             patch.dict(os.environ, {"AI_ENGINE": "openai_compatible", "AI_MODEL": safety.MODEL,

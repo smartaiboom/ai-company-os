@@ -18,6 +18,7 @@ from quality_review import REVIEWER_ID, RULESET_ID, evaluate_format, validate_re
 from ai_safety import request_scope, check_project_permission, MAX_CALLS, MAX_CALLS_PER_REQUEST
 import semantic_review
 import manager_decision
+import project_budget
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -894,6 +895,52 @@ def configure_mock_manager_decisions(project_id, expected_project_hash):
         save_project(project)
 
 
+def request_project_budget(project_id, additional, reason, usage_plan):
+    """Local owner tool only; never accepts public HTTP budget approvals."""
+    with manager_decision_transaction(project_id) as project:
+        proposal = project_budget.request_more(project, additional, reason, usage_plan)
+        save_project(project)
+        return deepcopy(proposal)
+
+
+def prepare_project_budget(project_id, usage_plan):
+    """Deterministic forecast supplied by the caller, not AI inference."""
+    with manager_decision_transaction(project_id) as project:
+        proposal = project_budget.ensure_shortage_request(project, usage_plan)
+        if proposal is not None:
+            save_project(project)
+        return deepcopy(proposal)
+
+
+def project_budget_requests(project_id):
+    project = load_project(project_id)
+    return [{**deepcopy(r), "expected_hash": project_budget.digest(r),
+             "stale": r["body"]["binding"] != project_budget.binding(project)}
+            for r in project.get("budget_requests", [])]
+
+
+def decide_project_budget(project_id, request_id, expected_hash, response, *, user_confirmed=False, reason=""):
+    """Trusted local caller must verify the owner's actual decision, never model_claim."""
+    with manager_decision_transaction(project_id) as project:
+        project_budget.decide(project, request_id, expected_hash, response, user_confirmed, reason)
+        save_project(project)
+
+
+def raise_project_budget_to_default(project_id, expected_project_hash, *, user_confirmed=False, reason=""):
+    """Explicit policy migration; never migrate other stored small limits implicitly."""
+    with manager_decision_transaction(project_id) as project:
+        if (user_confirmed is not True or not reason.strip()
+                or project_budget.digest(project) != expected_project_hash
+                or project_budget.limit(project) >= project_budget.DEFAULT_PROJECT_CALL_BUDGET):
+            raise ValueError("기존 프로젝트의 기본 예산 상향에는 최신 상태와 사용자 승인이 필요합니다.")
+        before = project_budget.limit(project)
+        project.setdefault("real_ai", {})["limit"] = project_budget.DEFAULT_PROJECT_CALL_BUDGET
+        project.setdefault("history", []).append({"at": now(), "event": "budget_policy_user_approved",
+            "before_limit": before, "after_limit": project_budget.DEFAULT_PROJECT_CALL_BUDGET,
+            "details": reason, "execution_authorized": False})
+        save_project(project)
+
+
 def _manager_decision_input(project, task_id):
     task = next((t for t in project.get("tasks", []) if t.get("id") == task_id), None)
     if task is None or not task_has_successful_result(project, task):
@@ -1336,7 +1383,7 @@ def semantic_controls(project):
         label = review["verdict"]
     except (ValueError, TypeError, KeyError):
         label = "미검토 또는 stale · 판정 불가"
-    remaining = max(0, project.get("real_ai", {}).get("limit", MAX_CALLS) - len(project.get("real_ai", {}).get("attempts", [])))
+    remaining = project_budget.summary(project)["remaining"]
     target = next((t for t in project.get("tasks", []) if t.get("id") == state["target_task_id"]), {})
     return f"""<section><h3>의미 검토 (모델 주장이며 독립 확인 아님)</h3>
 <p>대상 {esc(state['target_task_id'])} · 검토 담당 {esc(state['reviewer_task_id'])} · 기존 승인 {esc(target.get('review_status'))} {esc(target.get('reviewed_at', ''))}</p>
@@ -1452,15 +1499,18 @@ def real_ai_controls(project):
         state = {}
     attempts = state.get("attempts", [])
     used = len(attempts) if isinstance(attempts, list) else MAX_CALLS
-    limit = state.get("limit", MAX_CALLS)
-    if type(limit) is not int or not 1 <= limit <= MAX_CALLS:
-        limit = MAX_CALLS
+    try:
+        limit = project_budget.limit(project)
+    except ValueError:
+        limit = 0
     stop_reason = state.get("stop_reason", "별도 동의 및 활성화 확인 필요")
     if isinstance(attempts, list) and any(isinstance(a, dict) and a.get("status") == "reserved" for a in attempts):
         stop_reason = "미완료 AI 예약 · 사용자 확인 전 자동 재전송 금지"
     return f"""<section class='card'><h2>실제 무료 AI 시작·재개</h2>
 <p>목표·업무 입력·선행 결과·의견이 외부 제공자에 전송될 수 있습니다. 서버 활성화와 해당 프로젝트의 별도 M4 동의가 없으면 요청을 보내지 않습니다. 이 화면에서는 동의를 활성화하지 않습니다.</p>
 <p>프로젝트 상한: {limit}회 · 사용/예약: {used}회 · 남은 횟수: {max(0, limit-used)}회 · 시작·재개당 최대 2회</p>
+<p>기본 예산 20회는 제공자 무료 할당량이나 비용을 보장하지 않습니다. 실패·시간 초과·예약도 소모하며 자동 재시도하지 않습니다. 증액은 실행 허가가 아닙니다.</p>
+<p>추가 예산 요청: {esc([(r['body']['additional'], r['status']) for r in project.get('budget_requests', [])])} · 조회·승인·거절은 소유자가 확인된 로컬 도구에서만 가능합니다.</p>
 <p>정지 이유: {esc(stop_reason)}</p>
 <form method='post' action='/workflow/run-real' data-processing-form data-processing-label='진행 중...'>
 <input type='hidden' name='id' value='{esc(project['id'])}'><button type='submit'>실제 무료 AI 시작·재개 (별도 승인 필요)</button><p data-processing-status hidden></p></form></section>"""
@@ -1595,6 +1645,7 @@ class Handler(BaseHTTPRequestHandler):
                     "updated_at": now(),
                     "schema_version": 1
                 }
+                project["real_ai"] = {"enabled": False, "limit": project_budget.DEFAULT_PROJECT_CALL_BUDGET, "attempts": []}
                 save_project(project)
                 (ARTIFACTS_DIR / project_id).mkdir(parents=True, exist_ok=True)
                 self.redirect(f"/project/{project_id}")

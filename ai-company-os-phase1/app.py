@@ -17,6 +17,7 @@ from copy import deepcopy
 from quality_review import REVIEWER_ID, RULESET_ID, evaluate_format, validate_review, inconclusive_review
 from ai_safety import request_scope, check_project_permission, MAX_CALLS, MAX_CALLS_PER_REQUEST
 import semantic_review
+import manager_decision
 
 ROOT = Path(__file__).resolve().parent
 DATA_DIR = ROOT / "data"
@@ -868,6 +869,116 @@ class TaskExecutionFailure(RuntimeError):
     pass
 
 
+@contextmanager
+def manager_decision_transaction(project_id):
+    """Explicit tool handlers own their lock; do not call from locked POST routes."""
+    lock = project_mutation_lock(project_id)
+    if not lock.acquire(blocking=False):
+        raise ValueError("프로젝트의 다른 변경을 처리 중입니다.")
+    try:
+        yield load_project(project_id)
+    finally:
+        lock.release()
+
+
+def configure_mock_manager_decisions(project_id, expected_project_hash):
+    """Explicit local opt-in only; never changes any real AI authorization."""
+    with manager_decision_transaction(project_id) as project:
+        if manager_decision.digest(project) != expected_project_hash or project.get("manager_decisions"):
+            raise ValueError("프로젝트가 변경되었거나 이미 관리자 판단이 설정되었습니다.")
+        if project.get("plan", {}).get("status") != "approved":
+            raise ValueError("승인된 계획이 필요합니다.")
+        project["manager_decisions"] = {"enabled": True, "provider": "mock", "proposals": [], "answers": []}
+        project.setdefault("history", []).append({"at": now(), "event": "mock_manager_configured",
+                                                   "details": "모의 관리자 판단 사용자 결정 게이트 설정"})
+        save_project(project)
+
+
+def _manager_decision_input(project, task_id):
+    task = next((t for t in project.get("tasks", []) if t.get("id") == task_id), None)
+    if task is None or not task_has_successful_result(project, task):
+        raise ValueError("성공한 직원 결과만 관리자 판단에 사용할 수 있습니다.")
+    _validate_task_predecessors(task, project["tasks"], project["tasks"].index(task))
+    return manager_decision.decision_input(project, task_id)
+
+
+def propose_manager_decision(project_id, task_id, provider):
+    """Generate one explicit mock proposal; never execute workers or apply plans."""
+    if type(provider) is not manager_decision.MockDecisionProvider:
+        raise ValueError("명시적인 모의 판단 공급자만 지원합니다. 실제 모델 연결은 없습니다.")
+    with manager_decision_transaction(project_id) as project:
+        state = manager_decision.require_enabled(project)
+        context = _manager_decision_input(project, task_id)
+        if any(p["decision"]["binding"] == context["binding"] for p in state["proposals"]):
+            raise ValueError("같은 입력에 대한 관리자 제안이 이미 있습니다.")
+        if len(state["proposals"]) >= 50:
+            raise ValueError("프로젝트의 모의 관리자 제안 상한에 도달했습니다.")
+        snapshot = manager_decision.digest(project)
+        decision = manager_decision.parse_and_validate(provider.generate(context), context)
+        if manager_decision.digest(load_project(project_id)) != snapshot:
+            raise ValueError("판단 중 프로젝트가 변경되었습니다. 제안을 저장하지 않습니다.")
+        proposal = {"id": uuid.uuid4().hex, "version": len(state["proposals"]) + 1,
+                    "status": "pending_user_decision", "provider": "mock", "at": now(), "decision": decision}
+        state["proposals"].append(proposal)
+        project.setdefault("history", []).append({"at": now(), "event": "manager_proposal_created",
+            "details": "모의 관리자 제안 — 사용자 결정 대기", "proposal_id": proposal["id"],
+            "version": proposal["version"], "binding": decision["binding"], "provider": "mock"})
+        save_project(project)
+        return deepcopy(proposal)
+
+
+def manager_decision_view(project_id):
+    """Read-only tool interface for questions, proposals and optimistic tokens."""
+    project = load_project(project_id)
+    state = manager_decision.require_enabled(project)
+    result = []
+    for proposal in state["proposals"]:
+        item = deepcopy(proposal)
+        try:
+            context = _manager_decision_input(project, item["decision"]["binding"]["task_id"])
+            manager_decision.parse_and_validate(json.dumps(item["decision"], ensure_ascii=False), context)
+            item["stale"] = False
+        except ValueError:
+            item["stale"] = True
+        item["expected_hash"] = manager_decision.digest(proposal)
+        result.append(item)
+    return result
+
+
+def respond_manager_decision(project_id, proposal_id, expected_hash, response, answer=""):
+    """Caller supplies the actual user's decision; non-proceed acceptance never applies edits."""
+    with manager_decision_transaction(project_id) as project:
+        state = manager_decision.require_enabled(project)
+        proposal = next((p for p in state["proposals"] if p["id"] == proposal_id), None)
+        if (proposal is None or proposal["status"] != "pending_user_decision"
+                or manager_decision.digest(proposal) != expected_hash):
+            raise ValueError("제안이 없거나 이미 결정되었거나 변경되었습니다.")
+        decision = proposal["decision"]
+        context = _manager_decision_input(project, decision["binding"]["task_id"])
+        manager_decision.parse_and_validate(json.dumps(decision, ensure_ascii=False), context)
+        if response == "answer":
+            if decision["action"] != "ask_user":
+                raise ValueError("사용자 질문 제안에만 답변할 수 있습니다.")
+            manager_decision.text(answer, 2000)
+            state["answers"].append({"task_id": decision["binding"]["task_id"], "proposal_id": proposal_id,
+                                      "answer": answer, "at": now()})
+            proposal["status"] = "answered"
+        elif response in {"approve", "reject"}:
+            if answer:
+                raise ValueError("답변은 별도 answer 결정으로 기록해 주세요.")
+            proposal["status"] = ("rejected" if response == "reject" else
+                                   "approved" if decision["action"] == "proceed" else "accepted_for_review")
+        else:
+            raise ValueError("사용자 결정은 approve/reject/answer 중 하나여야 합니다.")
+        proposal["decided_at"] = now()
+        proposal["decided_by"] = "사용자"
+        project.setdefault("history", []).append({"at": now(),
+            "event": "manager_question_answered" if response == "answer" else "manager_user_decision",
+            "proposal_id": proposal_id, "response": response, "binding": decision["binding"],
+            "details": "사용자 판단 기록 — 추가 실행·계획 변경·결과 수정 자동 적용 없음"})
+        save_project(project)
+
+
 def execute_project_task(project_id, task_id, executor=None, *, _quality_revision=None, _semantic=None):
     """Execute and save one task; caller must hold the project mutation lock."""
     project = load_project(project_id)
@@ -915,6 +1026,10 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
         )
 
     input_task_ids = _validate_task_predecessors(task, tasks, task_index)
+    if project.get("manager_decisions", {}).get("enabled") is True:
+        for predecessor_id in input_task_ids:
+            _manager_decision_input(project, predecessor_id)
+    manager_guidance = manager_decision.require_proceed(project, task_id, input_task_ids)
 
     next_revision = result_revision(task) + 1
     execution_input_context = quality_input_context(project, task_index)
@@ -952,6 +1067,7 @@ def execute_project_task(project_id, task_id, executor=None, *, _quality_revisio
     previous_results = _build_previous_results(
         task, tasks, task_index, input_task_ids
     )
+    previous_results.extend(manager_guidance)
     if review_feedback:
         previous_results.append({
             "task_id": task_id,

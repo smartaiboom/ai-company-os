@@ -1211,9 +1211,11 @@ def manager_decision_view(project_id):
     return result
 
 
-def respond_manager_decision(project_id, proposal_id, expected_hash, response, answer=""):
+def respond_manager_decision(project_id, proposal_id, expected_hash, response, answer="", *, expected_project_hash=None):
     """Caller supplies the actual user's decision; non-proceed acceptance never applies edits."""
     with manager_decision_transaction(project_id) as project:
+        if expected_project_hash is not None and manager_decision.digest(project) != expected_project_hash:
+            raise ValueError("사용자 결정 대상 프로젝트가 변경되었습니다.")
         state = manager_decision.require_enabled(project)
         proposal = next((p for p in state["proposals"] if p["id"] == proposal_id), None)
         if (proposal is None or proposal["status"] != "pending_user_decision"
@@ -1244,7 +1246,85 @@ def respond_manager_decision(project_id, proposal_id, expected_hash, response, a
             "proposal_id": proposal_id, "response": response, "binding": decision["binding"],
             **({"purpose": manager_decision.REVIEW_PURPOSE} if proposal.get("purpose") == manager_decision.REVIEW_PURPOSE else {}),
             "details": "사용자 판단 기록 — 추가 실행·계획 변경·결과 수정 자동 적용 없음"})
+        if expected_project_hash is not None and manager_decision.digest(load_project(project_id)) != expected_project_hash:
+            raise ValueError("사용자 결정 저장 중 프로젝트 경합을 감지했습니다.")
         save_project(project)
+
+
+def review_task_result(project_id, task_id, decision, feedback="", *, expected_project_hash=None, approval_audit=None):
+    """Shared route/owner review logic; caller must hold the project mutation lock."""
+    project = load_project(project_id)
+    if expected_project_hash is not None and manager_decision.digest(project) != expected_project_hash:
+        raise ValueError("승인할 프로젝트 지문이 변경되었습니다.")
+    tasks = project.get("tasks", [])
+    task = next((item for item in tasks if item.get("id") == task_id), None)
+    if not task:
+        raise ValueError("검토할 업무를 찾을 수 없습니다.")
+
+    task_index = tasks.index(task)
+    if not task_needs_approval(project, task_index):
+        raise ValueError("후속 업무가 연결되지 않은 결과는 이 승인 단계가 필요하지 않습니다.")
+    if task.get("status") != "완료":
+        raise ValueError("완료된 업무 결과만 검토할 수 있습니다.")
+    result = task.get("result")
+    if not isinstance(result, str) or not result.strip():
+        raise ValueError("결과가 비어 있어 검토할 수 없습니다.")
+    if not task_has_successful_result(project, task):
+        raise ValueError("실행에 성공해 저장된 결과만 검토할 수 있습니다. 작업을 다시 실행해 주세요.")
+    if task_requires_review(task):
+        raise ValueError("선행 결과가 바뀌어 업무를 다시 실행해야 검토할 수 있습니다.")
+    _validate_task_predecessors(task, tasks, task_index)
+
+    review_status = task_review_status(task, has_dependents=True)
+    state = project.get("semantic", {})
+    if task_id == state.get("target_task_id") and decision == "request_changes":
+        raise ValueError("의미 검토의 별도 수정 요청 승인 경로를 사용해 주세요.")
+    if task_id == state.get("reviewer_task_id") and decision == "approve":
+        validate_semantic_pass(project)
+    if task_index == len(tasks) - 1:
+        validate_final_result(project)
+    if decision == "approve":
+        if review_status == REVIEW_APPROVED:
+            raise ValueError("이미 승인된 업무 결과입니다.")
+        if review_status == REVIEW_CHANGES_REQUESTED:
+            raise ValueError("수정 요청 내용을 반영해 다시 실행한 후 검토해 주세요.")
+        task["review_status"] = REVIEW_APPROVED
+        task["reviewed_by"] = "사용자"
+        task["reviewed_at"] = now()
+        task.pop("review_feedback", None)
+        event = "task_review_approved"
+        details = f"{task_id}: 업무 결과 검토 승인"
+    elif decision == "request_changes":
+        feedback = feedback.strip()
+        if not feedback:
+            raise ValueError("수정 요청 내용을 입력해 주세요.")
+        task["review_status"] = REVIEW_CHANGES_REQUESTED
+        task["review_feedback"] = feedback
+        task["reviewed_by"] = "사용자"
+        task["reviewed_at"] = now()
+        mark_downstream_for_review(
+            project,
+            task_index,
+            f"선행 업무 {task.get('name', task_id)}에 수정 요청이 등록됨",
+        )
+        event = "task_review_changes_requested"
+        details = f"{task_id}: 업무 결과 수정 요청"
+    else:
+        raise ValueError("검토 결정 값이 올바르지 않습니다.")
+
+    task["updated_at"] = now()
+    project.setdefault("history", []).append({
+        "at": now(),
+        "event": event,
+        "details": details,
+    })
+    if decision == "approve" and task_index == len(tasks) - 1:
+        archive_final_report(project)
+    if approval_audit is not None:
+        project.setdefault("history", []).append(deepcopy(approval_audit))
+    if expected_project_hash is not None and manager_decision.digest(load_project(project_id)) != expected_project_hash:
+        raise ValueError("결과 승인 중 프로젝트 경합을 감지했습니다.")
+    save_project(project)
 
 
 def execute_project_task(project_id, task_id, executor=None, *, _quality_revision=None, _semantic=None, _persist=None):
@@ -2072,72 +2152,7 @@ class Handler(BaseHTTPRequestHandler):
                 project_id = form.get("id", "")
                 task_id = form.get("task_id", "")
                 decision = form.get("decision", "")
-                project = load_project(project_id)
-                tasks = project.get("tasks", [])
-                task = next((item for item in tasks if item.get("id") == task_id), None)
-                if not task:
-                    raise ValueError("검토할 업무를 찾을 수 없습니다.")
-
-                task_index = tasks.index(task)
-                if not task_needs_approval(project, task_index):
-                    raise ValueError("후속 업무가 연결되지 않은 결과는 이 승인 단계가 필요하지 않습니다.")
-                if task.get("status") != "완료":
-                    raise ValueError("완료된 업무 결과만 검토할 수 있습니다.")
-                result = task.get("result")
-                if not isinstance(result, str) or not result.strip():
-                    raise ValueError("결과가 비어 있어 검토할 수 없습니다.")
-                if not task_has_successful_result(project, task):
-                    raise ValueError("실행에 성공해 저장된 결과만 검토할 수 있습니다. 작업을 다시 실행해 주세요.")
-                if task_requires_review(task):
-                    raise ValueError("선행 결과가 바뀌어 업무를 다시 실행해야 검토할 수 있습니다.")
-                _validate_task_predecessors(task, tasks, task_index)
-
-                review_status = task_review_status(task, has_dependents=True)
-                state = project.get("semantic", {})
-                if task_id == state.get("target_task_id") and decision == "request_changes":
-                    raise ValueError("의미 검토의 별도 수정 요청 승인 경로를 사용해 주세요.")
-                if task_id == state.get("reviewer_task_id") and decision == "approve":
-                    validate_semantic_pass(project)
-                if task_index == len(tasks) - 1:
-                    validate_final_result(project)
-                if decision == "approve":
-                    if review_status == REVIEW_APPROVED:
-                        raise ValueError("이미 승인된 업무 결과입니다.")
-                    if review_status == REVIEW_CHANGES_REQUESTED:
-                        raise ValueError("수정 요청 내용을 반영해 다시 실행한 후 검토해 주세요.")
-                    task["review_status"] = REVIEW_APPROVED
-                    task["reviewed_by"] = "사용자"
-                    task["reviewed_at"] = now()
-                    task.pop("review_feedback", None)
-                    event = "task_review_approved"
-                    details = f"{task_id}: 업무 결과 검토 승인"
-                elif decision == "request_changes":
-                    feedback = form.get("feedback", "").strip()
-                    if not feedback:
-                        raise ValueError("수정 요청 내용을 입력해 주세요.")
-                    task["review_status"] = REVIEW_CHANGES_REQUESTED
-                    task["review_feedback"] = feedback
-                    task["reviewed_by"] = "사용자"
-                    task["reviewed_at"] = now()
-                    mark_downstream_for_review(
-                        project,
-                        task_index,
-                        f"선행 업무 {task.get('name', task_id)}에 수정 요청이 등록됨",
-                    )
-                    event = "task_review_changes_requested"
-                    details = f"{task_id}: 업무 결과 수정 요청"
-                else:
-                    raise ValueError("검토 결정 값이 올바르지 않습니다.")
-
-                task["updated_at"] = now()
-                project.setdefault("history", []).append({
-                    "at": now(),
-                    "event": event,
-                    "details": details,
-                })
-                if decision == "approve" and task_index == len(tasks) - 1:
-                    archive_final_report(project)
-                save_project(project)
+                review_task_result(project_id, task_id, decision, form.get("feedback", ""))
                 self.redirect(f"/project/{project_id}#task-{task_id}")
 
             elif parsed.path == "/quality/revise-once":

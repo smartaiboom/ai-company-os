@@ -950,25 +950,62 @@ def _manager_decision_input(project, task_id):
 
 
 def propose_real_manager_decision_once(project_id, task_id, expected_project_hash, *, user_confirmed=False, reason=""):
-    """Local owner tool: one task/result-specific authorization, no public HTTP route."""
+    """Original one-shot path remains closed after any manager attempt."""
+    return _propose_real_manager_decision(project_id, task_id, expected_project_hash,
+        user_confirmed=user_confirmed, reason=reason)
+
+
+def propose_real_manager_second_authorized(project_id, task_id, expected_project_hash, *,
+                                           authorization_id, user_confirmed=False, reason=""):
+    """Local owner only: a new, explicitly confirmed second authorization, never HTTP."""
+    if not isinstance(authorization_id, str) or not re.fullmatch(r"[a-f0-9]{32}", authorization_id):
+        raise ValueError("고유한 새 승인 ID가 필요합니다.")
+    return _propose_real_manager_decision(project_id, task_id, expected_project_hash,
+        user_confirmed=user_confirmed, reason=reason, second_authorization_id=authorization_id)
+
+
+def _propose_real_manager_decision(project_id, task_id, expected_project_hash, *,
+                                   user_confirmed, reason, second_authorization_id=None):
     with manager_decision_transaction(project_id) as project:
         if (user_confirmed is not True or not isinstance(reason, str) or not reason.strip()
-                or manager_decision.digest(project) != expected_project_hash
-                or project.get("manager_decisions")
-                or any(a.get("kind") == "manager_decision" for a in project.get("real_ai", {}).get("attempts", []))):
-            raise ValueError("직접 승인·최신 상태가 필요하며 기존 관리자 호출/설정은 재사용하지 않습니다.")
+                or manager_decision.digest(project) != expected_project_hash):
+            raise ValueError("직접 승인과 최신 프로젝트 상태가 필요합니다.")
+        state = project.get("manager_decisions", {})
+        attempts = project.get("real_ai", {}).get("attempts", [])
+        managers = [a for a in attempts if a.get("kind") == "manager_decision"]
+        if second_authorization_id is None:
+            if state or managers:
+                raise ValueError("기존 관리자 호출/설정은 재사용하지 않습니다.")
+        elif (task_id != "TASK-001" or len(attempts) != 3 or len(managers) != 1
+                or any(a.get("status") != "completed" for a in attempts)
+                or managers[0].get("task_id") != task_id or managers[0].get("model") != "openrouter/free"
+                or state.get("provider") != "real_openrouter_free" or state.get("enabled") is not True
+                or state.get("proposals") != [] or state.get("answers") != []
+                or not state.get("authorization") or state.get("additional_authorizations")
+                or not any(h.get("event") == "real_manager_stopped" for h in project.get("history", []))):
+            raise ValueError("새 2차 승인 사전조건 불일치 또는 이미 사용된 승인입니다.")
         check_project_permission(project)
         if (os.getenv("AI_MODEL") != "openrouter/free"
                 or os.getenv("AI_API_BASE_URL", "").rstrip("/") != "https://openrouter.ai/api/v1"
                 or not os.getenv("AI_API_KEY")):
             raise ValueError("실제 관리자 무료 모델·주소·인증키 조건을 확인해 주세요.")
-        project["manager_decisions"] = {"enabled": True, "provider": "real_openrouter_free", "proposals": [], "answers": []}
+        if second_authorization_id is None:
+            project["manager_decisions"] = {"enabled": True, "provider": "real_openrouter_free", "proposals": [], "answers": []}
         context = _manager_decision_input(project, task_id)
-        project["manager_decisions"]["authorization"] = {
+        authorization = {
             "task_id": task_id, "binding": context["binding"], "max_calls": 1, "approved_at": now(),
             "scope": "목표·관련 승인 계획·허용 선호·승인된 대상 결과·후속 업무 요약", "reason": reason}
-        project.setdefault("history", []).append({"at": now(), "event": "real_manager_once_authorized",
-            "details": reason, "task_id": task_id, "binding": context["binding"], "max_calls": 1})
+        if second_authorization_id is None:
+            project["manager_decisions"]["authorization"] = authorization
+        else:
+            authorization.update(id=second_authorization_id, attempt_number=2,
+                previous_attempt_id=managers[0]["id"], goal_hash=manager_decision.digest(project.get("manager_goal") or project["goal"]),
+                user_approval="ai관리자 호출 승인할게")
+            project["manager_decisions"].setdefault("additional_authorizations", []).append(authorization)
+        project.setdefault("history", []).append({"at": now(),
+            "event": "real_manager_second_authorized" if second_authorization_id else "real_manager_once_authorized",
+            "details": reason, "task_id": task_id, "binding": context["binding"], "max_calls": 1,
+            **({"authorization_id": second_authorization_id, "attempt_number": 2} if second_authorization_id else {})})
         save_project(project)
         before = deepcopy(project)
         previous_attempts = deepcopy(before["real_ai"]["attempts"])
@@ -1026,6 +1063,8 @@ def propose_real_manager_decision_once(project_id, task_id, expected_project_has
             phase = "proposal_persist"
             proposal = {"id": uuid.uuid4().hex, "version": 1, "status": "pending_user_decision",
                 "provider": "real_openrouter_free", "at": now(), "decision": decision, "attempt_id": attempts[-1]["id"]}
+            if second_authorization_id:
+                proposal["authorization_id"] = second_authorization_id
             current["manager_decisions"]["proposals"].append(proposal)
             current.setdefault("history", []).append({"at": now(), "event": "manager_proposal_created",
                 "details": "실제 무료 AI 관리자 제안 — 사용자 결정 대기", "provider": "real_openrouter_free",
@@ -1040,7 +1079,8 @@ def propose_real_manager_decision_once(project_id, task_id, expected_project_has
             current = load_project(project_id)
             current.setdefault("history", []).append({"at": now(), "event": "real_manager_stopped",
                 "details": "관리자 요청/응답/지문 검증 중단 — 추가 전송 없음", "task_id": task_id,
-                "stage": stage, "error_code": code})
+                "stage": stage, "error_code": code,
+                **({"authorization_id": second_authorization_id} if second_authorization_id else {})})
             try:
                 save_project(current)
             except Exception:

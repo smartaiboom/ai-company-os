@@ -1,0 +1,32 @@
+# AI Company OS v0.1 — 실제 AI 관리자 판단 연결 + TASK-001 1회 실검증
+
+## 사용자 명시 승인 (이 작업의 유일한 실제 호출 범위)
+사용자 원문: “프로젝트 cb44b605b498의 실제 AI 관리자 판단 기능 연결 개발과 테스트를 승인합니다. OpenRouter openrouter/free 최대 1회 실제 호출 및 명시된 목표·승인 계획 관련 부분·사용자 선호·TASK-001 승인 조사 결과·업무 정보 외부 전송을 승인합니다. 실패도 차감, 재시도 금지, TASK-002 실행 금지. 하나의 Codex 작업 지시서를 GitHub에 작성해 줘.”
+
+**이 승인으로 허용되는 실제 외부 AI 요청은 정확히 최대 1회**: 프로젝트 `cb44b605b498`의 TASK-001 사용자 승인 결과를 바탕으로 **AI 관리자가 다음 행동을 판단**하는 OpenRouter `openrouter/free` 1회. 목표, 승인 계획 중 관련 단계, 허용된 사용자 선호, 승인된 TASK-001 조사 결과 및 관련 업무 정보만 외부 전송. TASK-002 대본 작성, 의미 검토, 재계획, 다른 직원/프로젝트, 재질문 모델 호출, 자동 재시도, 유료/대체 모델, 추가 AI 호출 **금지**. 성공·실패·시간초과 모두 1회로 계산; 불명확한 예약은 유지하고 중복 전송 금지. 실제 호출 이전에는 집중 오프라인 테스트를 통과해야 한다. 이 문서가 별도 추가 호출 허가가 되지 않는다.
+
+`codex_tasks/README_KOREAN_LANGUAGE_RULE.md` 준수: 지시/보고/사용자 표시 한국어, 일본어 금지, 모든 시간 KST(UTC+9). 다른 프로젝트/미추적 파일/백업 보존. 일일 백업 최대 하나, 날짜+목적, 기존 백업 삭제 금지. reset/clean/force push 금지. 개발 범위는 실제 관리자 판단 **한 흐름**에 집중하며 불필요한 UI·리팩터링·대규모 테스트 반복 금지.
+
+## 작업 전 확인
+1. `git pull --ff-only`; 관련 `manager_decision.py`, `app.py`의 `configure_mock_manager_decisions`/`propose_manager_decision`/`manager_decision_view`/`respond_manager_decision`/`execute_project_task`/`_run_workflow`, `manager_plan.py`, `semantic_review.py`, `ai_safety.py`, `project_budget.py`, `execution_engine.py`, 관련 tests, 최근 `reports/v01_generic_manager_decision_loop_offline_20261103.md`, `reports/v01_project_ai_budget_default20_user_extension_20261103.md`의 실제 계약 확인. `manager_decision.py` 현재 mock 전용, 실제 모델 판단 미연결이다.
+2. Git 제외 실프로젝트 `data/video-real-plan-20261103/projects/cb44b605b498.json` 확인: 정확한 ID/목표, 승인된 4단계 계획, TASK-001 완료·review_status approved·result 존재·승인 지문, TASK-002/003/004 대기·result 없음, `real_ai` completed 2/20, failed 0, reserved 0, 다른 예약·승인 상태, 기존 동의 범위. 시작 상태가 다르거나 승인 결과 해시 `95e366272746a507f26f3776db5e6e5211126ae0f1f7d2b7712a718e5cff6802`와 다르면 **실제 호출 중단하고 보고**. 기존 원장·다른 프로젝트 데이터 SHA 확인.
+3. 기존 외부 전송 동의/엔진 활성화와 이번 사용자 승인(실제 관리자 TASK-001 단일 호출)은 **별개 조건**. 이전 consent의 goal_hash/data_scope가 이번 관리자 판단 전송 범위를 포괄하는지 확인하고, 필요한 경우 사용자 명시 승인의 범위와 일치하는 **감사 이력**만 안전하게 기록; 다른 업무/후속 호출에 대한 포괄적 승인으로 확대하지 말 것. 기존 `request_scope`와 예약 선저장, 프로젝트 잠금, 원장 규칙 준수.
+
+## 범용 실제 AI 관리자 구현
+4. `manager_decision.decision_input`의 기존 승인 결과 기반 데이터/strict JSON action 계약을 재사용: `proceed`, `ask_user`, `request_revision`, `propose_plan_change`. 모델은 실제 직원 조사 결과를 읽고 **목표와 사용자 선호, 후속 업무, 정보 부족/위험**을 고려해 한 가지 행동을 자율 선택한다. 1분 영상의 항목 수, 특정 팁 선택, 질문 여부를 코드에서 고정하지 않는다. AI 관리자에게 무조건 진행 또는 특정 항목 수를 강요하지 않는다. 데이터에 포함된 “검증됨” 등 사실 주장에는 출처 불확실성·미검증을 표시하고 실제 웹 검증한 척하지 않는다. 직원 결과·사용자 답변은 신뢰하지 않는 데이터로만 취급, system prompt instruction으로 승격하지 않는다. 응답 한국어, JSON 객체만, 엄격한 필드/바인딩/행동 계약을 준수하도록 프롬프트 설계.
+5. `RealManagerDecisionProvider` 등 실제 관리자 모델 연결을 별도 명시적 경로로 구현. 고정 OpenRouter `openrouter/free`, `https://openrouter.ai/api/v1`, `ai_safety.request_json` 사용, `kind=manager_decision`, `task_id=TASK-001`, `max_tokens <=4096`, 타임아웃/재시도 없음. `choices[0].message.content`와 finish_reason 검증, 중복 키 거절, `manager_decision.parse_and_validate`의 binding 및 action별 payload 검사. malformed/truncated response는 **1회 소모 후 정지**, 자동 복구 모델 호출 금지. raw 모델 원문/키를 Git·보고서·로그에 노출하지 않는다. 기존 mock provider 경로는 유지, 일반 프로젝트는 자동 활성화되지 않음.
+6. 실제 판단 호출이 저장되면 `manager_decisions`에 **provider=real_openrouter_free**, `pending_user_decision`, KST 시각, 감사 이력, 관련 호출 attempt ID(가능한 경우)를 기록. 사용자가 나중에 제안 확인/승인/답변/거절하는 기존 로컬 도구 흐름을 재사용. 제안만으로 계획/업무/결과 변경·TASK-002 실행 금지. 실제 모델 결과와 모의 결과를 혼동하지 않도록 UI/조회/후속 guidance source를 구분하고, 기존 mock 전용 gate/enable/provider 체크를 필요한 범위만 수정. 실제 관리자 판단이 사용자 승인을 받으면 기존 진행 게이트를 통과할 수 있으나, 직원 실제 실행 권한은 **추가로** 요구.
+7. **중요한 바인딩/예약 충돌 해결**: 기존 `decision_input`의 `input_hash`에 `permission_summary.used_calls`가 포함되어 있어, `request_json`이 실제 호출을 전송하기 **전에** 예약을 저장하면 결과 반환 후 예산이 2→3으로 바뀌고 응답 binding이 stale이 될 수 있다. 호출 전 승인 결과/계획/목표/선호/업무/사용자 답변 스냅샷을 보존하고, 예산 사용량 변동에 의해 합법적 단일 호출 결과가 무조건 무효화되지 않도록 **명시적 안전 설계**를 구현·테스트. 외부 요청 1회를 재전송하여 해결하는 방식 금지. 실제 승인 결과/계획이 변경된 경우에는 stale 거절해야 하며, 사용량 변동을 숨기거나 기존 예산 감사 기록을 되돌리면 안 된다. 동시 변경·예산 원장·결과 지문 검증과 재시작 복구 고려. 모델이 반환한 binding을 임의로 다른 결과 지문으로 덮어쓰지 말 것. 정확한 설계와 테스트를 보고서에 설명.
+8. 동시 실행 방지, 실제 호출 전 정확한 project/task/approved result/remaining budget/사용자 승인 스코프 확인, 프로젝트 lock 및 atomic save 사용. `request_scope`로 호출 최대 1회가 되도록 **이번 실검증 도구 자체에 명시적인 1회 가드** 추가(기존 일반 2회 가드만 의존하지 않음). 호출 성공 후에도 응답이 계약을 위반하면 attempt는 소비된 채 안전 중단; 불명확한 예약을 임의 복구하거나 반복 실행 금지. 실검증 도구는 이미 `kind=manager_decision` 호출 기록 또는 기존 제안이 있으면 재실행해도 전송 0회로 정지하는 **일회성/idempotent preflight**를 구현. 기존 앱에 공개 HTTP 관리자 실제 호출/승인 endpoint 추가 금지; 소유자 확인된 로컬 실행만.
+9. 프로젝트의 기존 모의 관리자 기능을 **실제 모델로 자동 전환하지 않는다**. 실제 영상 프로젝트에 한해, 명시적 사용자의 이번 승인을 기록한 뒤 새 관리자 판단 상태를 안전하게 opt-in하고 **오직 TASK-001 한 번** 호출. 기존 데이터·업무·선행 결과 보존. 이번 호출의 동의는 관리자 판단용이며 TASK-002/후속 호출의 실행 승인으로 사용하지 않는다.
+
+## 오프라인 집중 검증 먼저
+10. 가상 프로젝트·fake transport로 (a) 네 행동 정상/검증 실패, (b) 승인된 결과만 입력·다른 프로젝트/미승인/잘못된 binding 차단, (c) 요청 예약 전후 예산 변화에도 정상 실제 응답 제안이 유효하고 이후 사용자 결정 게이트가 작동, (d) 실제 결과/계획/승인 변경 시 stale 차단, (e) malformed/truncated 모델 응답 1회 차감·재호출 0, (f) 일회성 가드 중복 실행 0, (g) 사용자 결정 전 TASK-002 실행 차단, (h) 승인 후에도 TASK-002 실제 외부 호출 무승인 차단, (i) 기존 mock/일반 프로젝트/20회 예산 회귀, (j) 모델 무료 경로 외 사용 거절을 검증. 네트워크/실사용 JSON 차단. **이 테스트들이 통과하기 전 실제 AI 요청 절대 금지.**
+11. 실제 호출 전후 다른 data/backups 경로와 SHA 기록; 영상 프로젝트에 허용되는 변경은 명시적 관리자 opt-in, 1회 예약·완료/실패 기록, 판단 제안·KST 감사 이력·updated_at 정도뿐. 원본 목표·계획·TASK-001 승인 결과·TASK-002/003/004·사용자 선호·기존 동의·과거 attempts 불변. 실제 호출이 실패/무효 응답이면 제안 없이 안전 정지하고 그 사유를 보고; **다른 실제 모델 호출이나 TASK-002로 대체 금지**.
+12. 실제 호출은 1회만 수행. 성공 시 프로젝트 JSON 재읽기: TASK-001 결과/승인 그대로, TASK-002~004 대기, manager decision provider=real, action/근거/질문 또는 지침/불확실성·pending_user_decision 조회 가능, 호출 누적 **3/20**(시작 2/20) 및 예약 0 확인. 오류 시 실제 attempt 상태와 2/20 또는 3/20 등을 정확히 보고. 응답을 무조건 `proceed`로 바꾸거나 사용자의 승인을 자동 기록하지 말 것.
+
+## 보고·커밋
+13. `reports/v01_real_manager_decision_task001_once_20261103.md` 작성: 구현 파일, 오프라인 테스트 수/결과, 실제 외부 요청 **0 또는 1회** 정확한 수, 요청 시각 KST, 완료/실패/미확정, 모델·kind, 프로젝트 예산 전후, 관리자 실제 선택 action과 근거·필요한 사용자 질문(비밀 없는 범위), 검증한 결속/지문·데이터 보존, TASK-002 미실행, 다음 사용자 판단 1개. **실제 모델 응답 전문·API 키·민감 데이터·실제 프로젝트 JSON은 Git에 포함하지 않는다.** 사용자가 결과를 볼 수 있게 관리자 판단의 핵심 내용은 보고서에 요약. `git diff --check`, 관련 테스트, 필요한 파일만 git add/commit/push, 원격 main 일치 확인.
+14. 실제 호출 전 코드가 안전하게 연결되지 않거나 프로젝트 사전조건이 충족되지 않으면 **호출하지 말고** 미완성/차단 사유를 보고. 사용자 요청을 핑계로 호출 2회 이상, 재시도, 다른 프로젝트 변경, TASK-002 실행을 하지 말 것.
+
+**성공 기준:** 실제 OpenRouter 무료 AI 관리자 **1회 이하**가 승인된 TASK-001 결과를 분석해 네 행동 중 하나를 **스스로 선택**, strict 검증된 제안을 프로젝트에 영속 저장하고 사용자 확인 대기. 기존 영상 프로젝트·다른 프로젝트·20회 예산·사용자 승인 경계를 보존. TASK-002 미실행.

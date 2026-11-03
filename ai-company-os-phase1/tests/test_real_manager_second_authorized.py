@@ -63,7 +63,7 @@ class SecondAuthorizationTests(RealManagerDecisionTests):
             with self.subTest(mode=mode):
                 app.save_project(deepcopy(original)); self.guard = app.PROJECTS_DIR / (mode+'.guard')
                 def mutate(d):
-                    if mode == 'binding': d['binding']['project_id'] = 'other'
+                    if mode == 'binding': d['binding'] = {'project_id': 'other'}
                     if mode in ('result', 'ledger'):
                         p = self.saved()
                         if mode == 'result': p['tasks'][0]['result'] = '경합 결과'

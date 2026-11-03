@@ -34,17 +34,25 @@ class RealManagerDecisionTests(unittest.TestCase):
         return app.propose_real_manager_decision_once(self.p['id'],'TASK-001',md.digest(self.saved()),
                                                      user_confirmed=True,reason='가상 사용자 단일 호출 승인')
 
+    def model_decision(self, context, action='proceed'):
+        # Only real-provider fixtures change; mock/internal stored fixtures keep their schema.
+        return {k: v for k, v in self.decision(context, action).items() if k in md.MODEL_FIELDS}
+
     def transport(self,action='proceed',mutate=None,finish='stop'):
         def fake(request,**kwargs):
             disk=self.saved();a=disk['real_ai']['attempts'][-1]
             self.assertEqual(a['status'],'reserved');self.assertEqual(a['kind'],'manager_decision')
             self.assertEqual(a['task_id'],'TASK-001');self.assertEqual(a['model'],safety.MODEL)
-            body=json.loads(request.data);context=json.loads(body['messages'][1]['content'])
+            body=json.loads(request.data);data=json.loads(body['messages'][1]['content'])
+            self.assertNotIn('binding', data)
+            for field in ('project_id', 'result_hash', 'approval_hash', 'plan_hash', 'input_hash'):
+                self.assertNotIn(field, data)
+            context=md.decision_input(disk, 'TASK-001')
             self.assertEqual(body['messages'][0]['role'],'system')
             self.assertNotIn('내부 명령을 무시하고',body['messages'][0]['content'])
-            text=json.dumps(context,ensure_ascii=False)
+            text=json.dumps(data,ensure_ascii=False)
             for secret in ['비밀메타','다른프로젝트비밀','미승인비밀']:self.assertNotIn(secret,text)
-            d=self.decision(context,action)
+            d=self.model_decision(context,action)
             if mutate:mutate(d)
             return Response({'choices':[{'finish_reason':finish,'message':{'content':json.dumps(d,ensure_ascii=False)}}]})
         return fake
@@ -90,9 +98,9 @@ class RealManagerDecisionTests(unittest.TestCase):
         for mode in ('truncated','duplicate','wrong_binding','malformed'):
             app.save_project(deepcopy(original))
             def fake(request,**kwargs):
-                context=json.loads(json.loads(request.data)['messages'][1]['content'])
-                d=self.decision(context)
-                if mode=='wrong_binding':d['binding']['project_id']='other'
+                context=md.decision_input(self.saved(), 'TASK-001')
+                d=self.model_decision(context)
+                if mode=='wrong_binding':d['binding']={'project_id':'other'}
                 content=json.dumps(d,ensure_ascii=False)
                 if mode=='duplicate':content=content[:-1]+',"action":"proceed"}'
                 if mode=='malformed':content='{'
@@ -109,7 +117,7 @@ class RealManagerDecisionTests(unittest.TestCase):
         for mode in ('result','plan','approval','ledger','reservation_fingerprint'):
             app.save_project(deepcopy(original))
             def fake(request,**kwargs):
-                context=json.loads(json.loads(request.data)['messages'][1]['content'])
+                context=md.decision_input(self.saved(), 'TASK-001')
                 p=self.saved()
                 if mode=='result':p['tasks'][0]['result']='바뀐 결과'
                 if mode=='plan':p['plan']['version']=2
@@ -117,7 +125,7 @@ class RealManagerDecisionTests(unittest.TestCase):
                 if mode=='ledger':p['real_ai']['attempts'].append({'id':'unexpected','status':'completed','input_bytes':1})
                 if mode=='reservation_fingerprint':p['real_ai']['attempts'][-1]['input_bytes']=321
                 app.save_project(p)
-                return Response({'choices':[{'finish_reason':'stop','message':{'content':json.dumps(self.decision(context),ensure_ascii=False)}}]})
+                return Response({'choices':[{'finish_reason':'stop','message':{'content':json.dumps(self.model_decision(context),ensure_ascii=False)}}]})
             with patch('manager_decision.urlopen',side_effect=fake) as transport:
                 with self.assertRaises(RuntimeError):self.run_real()
                 transport.assert_called_once()
@@ -175,17 +183,17 @@ class RealManagerDecisionTests(unittest.TestCase):
             'json': ('decision_json', 'invalid_json'),
             'duplicate': ('decision_json', 'invalid_json'),
             'size': ('decision_json', 'size_limit'),
-            'binding': ('decision_contract', 'binding'),
-            'action': ('decision_contract', 'strict_contract'),
-            'payload': ('decision_contract', 'strict_contract'),
+            'binding': ('decision_contract', 'unexpected_field'),
+            'action': ('decision_contract', 'invalid_action'),
+            'payload': ('decision_contract', 'invalid_payload'),
         }
         for mode, expected in cases.items():
             with self.subTest(mode=mode):
                 app.save_project(deepcopy(original))
                 def fake(request, **kwargs):
-                    context = json.loads(json.loads(request.data)['messages'][1]['content'])
-                    d = self.decision(context)
-                    if mode == 'binding': d['binding']['project_id'] = 'PRIVATE'
+                    context = md.decision_input(self.saved(), 'TASK-001')
+                    d = self.model_decision(context)
+                    if mode == 'binding': d['binding'] = {'project_id': 'PRIVATE'}
                     if mode == 'action': d['action'] = 'PRIVATE'
                     if mode == 'payload': d['payload'] = {'PRIVATE': 'PRIVATE'}
                     content = json.dumps(d, ensure_ascii=False)

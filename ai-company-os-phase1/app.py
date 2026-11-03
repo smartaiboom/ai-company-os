@@ -980,7 +980,11 @@ def propose_real_manager_decision_once(project_id, task_id, expected_project_has
             result["real_ai"].pop("stop_reason", None)
             return result
 
+        phase = "transport"
+
         def persist_single_attempt(value):
+            nonlocal phase
+            phase = "reservation_persist" if value["real_ai"]["attempts"][-1]["status"] == "reserved" else "ledger_persist"
             observed = load_project(project_id)
             new_attempts = value["real_ai"]["attempts"]
             old_attempts = observed["real_ai"]["attempts"]
@@ -1000,10 +1004,12 @@ def propose_real_manager_decision_once(project_id, task_id, expected_project_has
                 if old_attempts[-1] != expected_reserved:
                     raise ValueError("기존 예약의 지문이 변경되었습니다.")
             save_project(value)
+            phase = "transport"
 
         try:
             with request_scope(persist_single_attempt):
                 decision = manager_decision.RealManagerDecisionProvider().generate(project, context)
+            phase = "project_binding"
             current = load_project(project_id)
             attempts = current["real_ai"]["attempts"]
             if (len(attempts) != len(previous_attempts) + 1 or attempts[:-1] != previous_attempts
@@ -1015,7 +1021,9 @@ def propose_real_manager_decision_once(project_id, task_id, expected_project_has
             comparison["updated_at"] = before["updated_at"]
             if comparison != before or _manager_decision_input(current, task_id)["binding"] != context["binding"]:
                 raise ValueError("판단 중 승인 결과·계획 또는 프로젝트가 변경되었습니다.")
+            phase = "decision_contract"
             manager_decision.parse_and_validate(json.dumps(decision, ensure_ascii=False), context)
+            phase = "proposal_persist"
             proposal = {"id": uuid.uuid4().hex, "version": 1, "status": "pending_user_decision",
                 "provider": "real_openrouter_free", "at": now(), "decision": decision, "attempt_id": attempts[-1]["id"]}
             current["manager_decisions"]["proposals"].append(proposal)
@@ -1024,12 +1032,19 @@ def propose_real_manager_decision_once(project_id, task_id, expected_project_has
                 "binding": decision["binding"], "attempt_id": attempts[-1]["id"], "proposal_id": proposal["id"]})
             save_project(current)
             return deepcopy(proposal)
-        except Exception:
+        except Exception as exc:
+            stage = exc.stage if isinstance(exc, manager_decision.DecisionDiagnosticError) else phase
+            code = exc.code if isinstance(exc, manager_decision.DecisionDiagnosticError) else "operation_failed"
+            # Fixed codes only. The transaction lock remains held during audit save.
             # Reload, never overwrite concurrent changes or reinterpret reservations.
             current = load_project(project_id)
             current.setdefault("history", []).append({"at": now(), "event": "real_manager_stopped",
-                "details": "관리자 요청/응답/지문 검증 중단 — 추가 전송 없음", "task_id": task_id})
-            save_project(current)
+                "details": "관리자 요청/응답/지문 검증 중단 — 추가 전송 없음", "task_id": task_id,
+                "stage": stage, "error_code": code})
+            try:
+                save_project(current)
+            except Exception:
+                raise RuntimeError("관리자 판단 및 중단 이력 저장에 실패했습니다. 재시도하지 않습니다.") from None
             raise RuntimeError("실제 관리자 판단이 완료되지 않았습니다. 저장된 예산·예약을 보존하고 재시도하지 않습니다.") from None
 
 

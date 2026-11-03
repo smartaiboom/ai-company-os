@@ -178,6 +178,41 @@ class MockDecisionProvider:
         return self.respond(deepcopy(context))
 
 
+class DecisionDiagnosticError(ValueError):
+    """Only fixed codes cross the provider boundary; never retain model text."""
+    def __init__(self, stage, code):
+        self.stage = stage
+        self.code = code
+        super().__init__('관리자 응답 검증이 중단되었습니다. 추가 요청하지 않습니다.')
+
+
+def validate_provider_response(response, context):
+    try:
+        choice = response['choices'][0]
+        finish = choice['finish_reason']
+        content = choice['message']['content']
+    except (TypeError, KeyError, IndexError):
+        raise DecisionDiagnosticError('provider_response', 'structure') from None
+    if finish != 'stop':
+        raise DecisionDiagnosticError('provider_response', 'finish_reason')
+    if not isinstance(content, str):
+        raise DecisionDiagnosticError('provider_response', 'content_type')
+    try:
+        if len(content.encode()) > MAX_JSON_BYTES:
+            raise DecisionDiagnosticError('decision_json', 'size_limit')
+        value = json.loads(content, object_pairs_hook=unique_object, parse_constant=invalid_constant)
+    except (ValueError, TypeError, RecursionError, UnicodeError) as exc:
+        if isinstance(exc, DecisionDiagnosticError):
+            raise
+        raise DecisionDiagnosticError('decision_json', 'invalid_json') from None
+    if isinstance(value, dict) and value.get('binding') != context['binding']:
+        raise DecisionDiagnosticError('decision_contract', 'binding')
+    try:
+        return parse_and_validate(content, context)
+    except (ValueError, TypeError, KeyError, RecursionError):
+        raise DecisionDiagnosticError('decision_contract', 'strict_contract') from None
+
+
 class RealManagerDecisionProvider:
     """One free OpenRouter request; only called by the explicit local owner handler."""
     def generate(self, project, context):
@@ -208,13 +243,7 @@ class RealManagerDecisionProvider:
             body=json.dumps(payload, ensure_ascii=False).encode(), api_key=os.getenv('AI_API_KEY'),
             timeout=int(os.getenv('AI_API_TIMEOUT', '45')), transport=urlopen,
             kind='manager_decision', task_id=context['binding']['task_id'])
-        try:
-            choice = response['choices'][0]
-            if choice['finish_reason'] != 'stop':
-                raise ValueError()
-            return parse_and_validate(choice['message']['content'], context)
-        except (ValueError, TypeError, KeyError, IndexError, UnicodeError):
-            raise ValueError('관리자 응답 계약·완료 사유·지문이 올바르지 않습니다. 추가 요청하지 않습니다.') from None
+        return validate_provider_response(response, context)
 
 
 def require_enabled(project):

@@ -61,6 +61,9 @@ class RealManagerDecisionTests(unittest.TestCase):
                 self.assertEqual(proposal['provider'],'real_openrouter_free')
                 self.assertEqual(proposal['status'],'pending_user_decision')
                 self.assertFalse(app.manager_decision_view(p['id'])[0]['stale'])
+                code = 'import app,json,sys;from pathlib import Path;app.PROJECTS_DIR=Path(sys.argv[1]);print(json.dumps(app.manager_decision_view(sys.argv[2])))'
+                reread = subprocess.run([sys.executable, '-B', '-c', code, str(app.PROJECTS_DIR), p['id']], check=True, capture_output=True, text=True)
+                self.assertEqual(json.loads(reread.stdout)[0]['status'], 'pending_user_decision')
                 for key in ['tasks','plan','user_preferences','plan_revisions']:
                     self.assertEqual(p[key],original[key])
                 executor=Mock()
@@ -119,6 +122,7 @@ class RealManagerDecisionTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):self.run_real()
                 transport.assert_called_once()
             self.assertEqual(self.saved()['manager_decisions']['proposals'],[])
+            self.assertIn(self.saved()['history'][-1]['stage'], ('ledger_persist', 'project_binding'))
             if mode == 'result':self.assertEqual(self.saved()['tasks'][0]['result'], '바뀐 결과')
             if mode == 'plan':self.assertEqual(self.saved()['plan']['version'], 2)
             if mode == 'approval':self.assertEqual(self.saved()['tasks'][0]['reviewed_at'], '바뀐 승인')
@@ -157,6 +161,103 @@ class RealManagerDecisionTests(unittest.TestCase):
             transport.assert_called_once()
         p=self.saved()
         self.assertEqual(p['real_ai']['attempts'][:-1], before)
+        self.assertEqual(p['history'][-1]['stage'], 'transport')
         self.assertEqual(p['real_ai']['attempts'][-1]['status'], 'failed')
         self.assertEqual(p['manager_decisions']['proposals'], [])
         self.assertNotIn('PRIVATE', json.dumps(p))
+
+    def test_diagnostic_response_boundaries_and_no_retry(self):
+        self.prepare(); original = self.saved()
+        cases = {
+            'finish': ('provider_response', 'finish_reason'),
+            'structure': ('provider_response', 'structure'),
+            'content': ('provider_response', 'content_type'),
+            'json': ('decision_json', 'invalid_json'),
+            'duplicate': ('decision_json', 'invalid_json'),
+            'size': ('decision_json', 'size_limit'),
+            'binding': ('decision_contract', 'binding'),
+            'action': ('decision_contract', 'strict_contract'),
+            'payload': ('decision_contract', 'strict_contract'),
+        }
+        for mode, expected in cases.items():
+            with self.subTest(mode=mode):
+                app.save_project(deepcopy(original))
+                def fake(request, **kwargs):
+                    context = json.loads(json.loads(request.data)['messages'][1]['content'])
+                    d = self.decision(context)
+                    if mode == 'binding': d['binding']['project_id'] = 'PRIVATE'
+                    if mode == 'action': d['action'] = 'PRIVATE'
+                    if mode == 'payload': d['payload'] = {'PRIVATE': 'PRIVATE'}
+                    content = json.dumps(d, ensure_ascii=False)
+                    if mode == 'json': content = 'PRIVATE'
+                    if mode == 'duplicate': content = content[:-1] + ',"action":"PRIVATE"}'
+                    if mode == 'size': content = 'PRIVATE' * md.MAX_JSON_BYTES
+                    if mode == 'content': content = None
+                    response = {'choices': [{'finish_reason': 'length' if mode == 'finish' else 'stop',
+                                             'message': {'content': content}}]}
+                    return Response({} if mode == 'structure' else response)
+                with patch('manager_decision.urlopen', side_effect=fake) as transport:
+                    with self.assertRaises(RuntimeError) as error: self.run_real()
+                    with self.assertRaises(ValueError): self.run_real()
+                    transport.assert_called_once()
+                p = self.saved(); event = p['history'][-1]
+                self.assertEqual((event['stage'], event['error_code']), expected)
+                self.assertNotIn('PRIVATE', str(error.exception) + json.dumps(p))
+                self.assertEqual(p['real_ai']['attempts'][-1]['status'], 'completed')
+                self.assertEqual(p['manager_decisions']['proposals'], [])
+
+    def test_persist_failures_preserve_disk_and_diagnose(self):
+        self.prepare(); original = self.saved(); save = app.save_project
+        for mode in ('reservation_persist', 'ledger_persist', 'proposal_persist'):
+            with self.subTest(mode=mode):
+                save(deepcopy(original))
+                def failing_save(p):
+                    attempts = p['real_ai']['attempts']
+                    if ((mode == 'reservation_persist' and attempts and attempts[-1]['status'] == 'reserved')
+                        or (mode == 'ledger_persist' and len(attempts) > len(original['real_ai']['attempts']) and attempts[-1]['status'] == 'completed')
+                        or (mode == 'proposal_persist' and p.get('manager_decisions', {}).get('proposals'))):
+                        # Fail once: permit the separately reloaded audit to be persisted.
+                        if not any(h.get('event') == 'real_manager_stopped' for h in p['history']):
+                            raise OSError('PRIVATE')
+                    return save(p)
+                with patch('app.save_project', side_effect=failing_save), patch('manager_decision.urlopen', side_effect=self.transport()) as transport:
+                    with self.assertRaises(RuntimeError): self.run_real()
+                    self.assertEqual(transport.call_count, 0 if mode == 'reservation_persist' else 1)
+                p = self.saved()
+                self.assertEqual(p['history'][-1]['stage'], mode)
+                self.assertEqual(p['tasks'], original['tasks'])
+                self.assertEqual(p['manager_decisions']['proposals'], [])
+                self.assertNotIn('PRIVATE', json.dumps(p))
+                if mode == 'ledger_persist': self.assertEqual(p['real_ai']['attempts'][-1]['status'], 'reserved')
+
+    def test_existing_stop_reason_does_not_make_success_stale(self):
+        self.prepare(); p = self.saved()
+        p['real_ai']['stop_reason'] = '이전 정지 기록'
+        app.save_project(p)
+        with patch('manager_decision.urlopen', side_effect=self.transport()): self.run_real()
+        self.assertEqual(self.saved()['real_ai']['stop_reason'], '이전 정지 기록')
+        self.assertEqual(app.manager_decision_view(p['id'])[0]['status'], 'pending_user_decision')
+
+    def test_existing_attempt_without_manager_setting_never_transmits(self):
+        self.prepare(); p = self.saved()
+        p['real_ai']['attempts'].append({'id': 'historical-manager', 'kind': 'manager_decision',
+            'task_id': 'TASK-001', 'model': safety.MODEL, 'status': 'completed', 'input_bytes': 1})
+        app.save_project(p); before = self.saved()
+        with patch('manager_decision.urlopen') as transport:
+            with self.assertRaises(ValueError): self.run_real()
+            transport.assert_not_called()
+        self.assertEqual(self.saved(), before)
+
+    def test_persistent_audit_save_failure_is_sanitized(self):
+        self.prepare(); save = app.save_project
+        def failing_save(p):
+            if p.get('manager_decisions', {}).get('proposals') or any(
+                    h.get('event') == 'real_manager_stopped' for h in p['history']):
+                raise OSError('PRIVATE')
+            save(p)
+        with patch('app.save_project', side_effect=failing_save), patch('manager_decision.urlopen', side_effect=self.transport()) as transport:
+            with self.assertRaises(RuntimeError) as error: self.run_real()
+            transport.assert_called_once()
+        self.assertNotIn('PRIVATE', str(error.exception))
+        self.assertEqual(self.saved()['manager_decisions']['proposals'], [])
+        self.assertEqual(self.saved()['real_ai']['attempts'][-1]['status'], 'completed')

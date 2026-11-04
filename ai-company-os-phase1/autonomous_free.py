@@ -141,6 +141,19 @@ class FreeCompany(LiveCompany):
 
     def _can_review_tool_failure(self,p):return False
 
+    def _tool_spec(self,p,content):
+        return parse(content) if content.startswith('{') else None
+
+    def _nested_tool_error(self,p,code):return None
+
+    def _save_tool_failure(self,p,task_id,diagnostics):
+        p['events'].append({'at':now(),'event':'local_tool_failed','task_id':task_id,
+                            'diagnostics':diagnostics,'automatic_retry':False})
+        review=self._can_review_tool_failure(p)
+        if review:self._attempts(p)[-1]['local_tool_failure']=diagnostics
+        self.store.save(p)
+        return review
+
     def _employee_version_metadata(self,p,task):
         failure=self._attempts(p)[-1].get('local_tool_failure')
         return {'tool_status':'failed','tool_failure':deepcopy(failure)} if failure else {}
@@ -369,8 +382,14 @@ class FreeCompany(LiveCompany):
         if phase=='execute' and p.get('local_tools'):
             # Plain prose is valid for research/script tasks; a tool request must be JSON.
             content=result['content'].strip()
-            if content.startswith('{'):
-                spec=parse(content)
+            try:
+                spec=self._tool_spec(p,content)
+            except CompanyError as exc:
+                diagnostics=self._nested_tool_error(p,exc.code)
+                if diagnostics is None:raise
+                if self._save_tool_failure(p,task_id,diagnostics):return result
+                raise
+            if spec is not None:
                 if isinstance(spec,dict) and 'tool' in spec:
                     from local_artifacts import execute,LocalToolError
                     require(spec['tool'] in p['local_tools'],'tool_not_allowed')
@@ -388,13 +407,8 @@ class FreeCompany(LiveCompany):
                         diagnostics=(deepcopy(exc.diagnostics) if isinstance(exc,LocalToolError) else
                                      {'stage':'caption_validation' if exc.code=='caption_overflow' else 'audio_duration_validation',
                                       'category':exc.code,'exit_code':None})
-                        p['events'].append({'at':now(),'event':'local_tool_failed','task_id':task_id,
-                                            'diagnostics':diagnostics,'automatic_retry':False})
-                        if self._can_review_tool_failure(p):
-                            self._attempts(p)[-1]['local_tool_failure']=diagnostics
-                            self.store.save(p)
-                            return result
-                        self.store.save(p);raise
+                        if self._save_tool_failure(p,task_id,diagnostics):return result
+                        raise
                     receipt['input_hash']=digest(spec)
                     name='video-'+self.current['context_hash']+'.mp4'
                     p['artifacts'][name]={'path':str((folder/'video.mp4').relative_to(self.store.root)), 'sha256':receipt['sha256']}

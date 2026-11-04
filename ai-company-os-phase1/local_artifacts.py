@@ -4,12 +4,20 @@ import json
 from pathlib import Path
 import subprocess
 import tempfile
+from copy import deepcopy
+from autonomous_company import digest
 from autonomous_company import require, exact, text, now, CompanyError
 
 VIDEO_TOOL = 'caption_video_v1'
 TOOLS = {VIDEO_TOOL: {'network': False, 'uploads': False, 'audio': 'optional local espeak-ng Korean',
                      'input': 'JSON content: {tool,width,height,audio,scenes:[{text,seconds}]}',
-                     'limits': 'even width/height 240..1920; 1..16 scenes; text <=120 chars/scene; duration <=120s'}}
+                     'limits': 'even integer width/height 240..1920; 1..16 scenes; audio boolean; '
+                     'nonempty text <=120 chars/scene including newlines; each line <=28 chars; <=4 lines/scene; '
+                     'only newline control character allowed; each seconds number 0.5..30; total duration <=120s',
+                     'caption_layout': 'Write semantic lines using newline at word boundaries. Renderer may replace ASCII spaces '
+                     'with newlines to fit 28 chars/line and 4 lines, without truncating or rewriting words. '
+                     'Unbreakable words or too many lines stop the tool; shorten the draft yourself. '
+                     'Local TTS must fit each scene duration or narration_exceeds_scene stops rendering.'}}
 FONT = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
 
 
@@ -21,7 +29,7 @@ def run_command(args, timeout=180):
         raise CompanyError('local_tool_failed') from None
 
 
-def validate_video(spec):
+def _validate_video(spec,check_layout):
     exact(spec, ('tool','width','height','audio','scenes'))
     require(spec['tool']==VIDEO_TOOL, 'tool_not_allowed')
     for k in ('width','height'):
@@ -33,13 +41,46 @@ def validate_video(spec):
         exact(scene,('text','seconds'));text(scene['text'],120)
         require(not any(ord(c)<32 and c!='\n' for c in scene['text']),'invalid_caption')
         require(type(scene['seconds']) in (int,float) and 0.5<=scene['seconds']<=30,'invalid_duration')
-        require(all(len(line)<=28 for line in scene['text'].split('\n')) and len(scene['text'].split('\n'))<=4,'caption_overflow')
+        if check_layout:
+            require(all(len(line)<=28 for line in scene['text'].split('\n')) and len(scene['text'].split('\n'))<=4,'caption_overflow')
         total+=scene['seconds']
     require(total<=120,'video_too_long')
     return total
 
 
+def validate_video(spec):
+    return _validate_video(spec,True)
+
+
+def prepare_video(spec):
+    """Layout only: replace ASCII spaces by newlines; never split/drop/rewrite words.
+
+    Original spec remains the employee result. Offsets and hashes in the receipt
+    reconstruct exactly which spaces were replaced in the rendered copy.
+    """
+    _validate_video(spec,False)
+    rendered=deepcopy(spec);rendered['scenes']=[deepcopy(scene) for scene in spec['scenes']];changes=[]
+    for index,scene in enumerate(rendered['scenes']):
+        source=scene['text'];chars=list(source);offset=0;replaced=[]
+        for line in source.split('\n'):
+            start=0
+            while len(line)-start>28:
+                boundary=line.rfind(' ',start+1,start+29)
+                require(boundary>start,'caption_overflow')
+                chars[offset+boundary]='\n';replaced.append(offset+boundary)
+                start=boundary+1
+            offset+=len(line)+1
+        scene['text']=''.join(chars)
+        if replaced:
+            changes.append({'scene_index':index,'space_to_newline_offsets':replaced,
+                            'source_line_lengths':[len(v) for v in source.split('\n')],
+                            'rendered_line_lengths':[len(v) for v in scene['text'].split('\n')]})
+    validate_video(rendered)
+    return rendered,{'source_input_hash':digest(spec),'rendered_input_hash':digest(rendered),'changes':changes}
+
+
 def render_video(spec, folder):
+    spec,reflow=prepare_video(spec)
     total=validate_video(spec)
     folder=Path(folder)
     require(folder.is_dir() and not folder.is_symlink(),'invalid_tool_directory')
@@ -75,7 +116,8 @@ def render_video(spec, folder):
         staged.rename(output)
     return {'tool':VIDEO_TOOL,'at':now(),'sha256':hashlib.sha256(output.read_bytes()).hexdigest(),
             'duration_seconds':duration,'width':video['width'],'height':video['height'],
-            'codec':'h264','audio':spec['audio'],'decoded':True,'frames':int(video['nb_frames'])}
+            'codec':'h264','audio':spec['audio'],'decoded':True,'frames':int(video['nb_frames']),
+            'caption_reflow':reflow}
 
 
 def execute(tool, spec, folder):

@@ -182,6 +182,27 @@ class GeminiTests(unittest.TestCase):
                 self.assertEqual({'category':category,'stage':stage},a['provider_error_diagnostics'])
                 self.assertEqual(200,a['http_status']);self.assertNotIn(KEY,json.dumps(a))
 
+    def test_long_caption_reflow_in_existing_gemini_workflow(self):
+        self.create(video=True);self.models=VideoModels()
+        original=self.models.employee_response
+        def employee(phase,ctx):
+            value=json.loads(original(phase,ctx))
+            if ctx['previous_results']:
+                spec=json.loads(value['content']);spec['audio']=False
+                spec['scenes'][0]['text']='좋은 질문을 작성하려면 원하는 목표와 구체적인 상황을 함께 설명해 주세요.'
+                value['content']=json.dumps(spec,ensure_ascii=False)
+            return json.dumps(value,ensure_ascii=False)
+        self.models.employee_response=employee
+        self.approve();self.run_company()
+        self.assertEqual('delivered',self.p['status'],self.p.get('reason_code'))
+        receipt=next(e['receipt'] for e in self.p['events'] if e['event']=='local_tool_completed')
+        self.assertTrue(receipt['decoded']);self.assertTrue(receipt['caption_reflow']['changes'])
+        version=self.p['assignments'][-1]['versions'][-1]
+        source=json.loads(version['content'])
+        self.assertGreater(len(source['scenes'][0]['text']),28)
+        self.assertEqual(digest(source),receipt['caption_reflow']['source_input_hash'])
+        self.assertEqual(0,self.p['user_business_approval_requests'])
+
     def test_cli_prepare_provider_isolation_and_no_key_derivatives(self):
         with redirect_stdout(StringIO()) as output:
             code=main(['--provider','gemini','--store',str(self.store.root),'prepare',self.p['id'],'--confirm-gemini-free-account'])

@@ -21,22 +21,24 @@ def write_new(path,value):
         json.dump(value,f,ensure_ascii=False,indent=2);f.flush();os.fsync(f.fileno())
 
 
-def prepare():
+def prepare(root=None):
     # Never issues a grant, creates a signing key or starts a company.
-    require(not ROOT.exists(),'first_project_already_prepared')
-    store=GeminiStore(ROOT)
+    root=Path(root) if root is not None else ROOT
+    require(not root.exists(),'first_project_already_prepared')
+    store=GeminiStore(root)
     p=store.create(GOAL,local_tools=['caption_video_v1'])
     b=store.prepare(p['id'],confirm_free_account=True)
-    write_new(ROOT/'operating-proposal.json',b)
+    write_new(root/'operating-proposal.json',b)
     manifest={'project_id':p['id'],'review_hash':digest(b)}
-    write_new(ROOT/'launch-manifest.json',manifest)
+    write_new(root/'launch-manifest.json',manifest)
     return manifest
 
 
-def execute(review_hash,*,owner_confirmed=False,confirm_free_tier=False):
+def execute(review_hash,*,owner_confirmed=False,confirm_free_tier=False,root=None):
     require(owner_confirmed is True and confirm_free_tier is True,'explicit_owner_confirmation_required')
-    store=GeminiStore(ROOT)
-    m=parse((ROOT/'launch-manifest.json').read_text());b=parse((ROOT/'operating-proposal.json').read_text())
+    root=Path(root) if root is not None else ROOT
+    store=GeminiStore(root)
+    m=parse((root/'launch-manifest.json').read_text());b=parse((root/'operating-proposal.json').read_text())
     require(review_hash==m['review_hash']==digest(b),'consent_review_changed')
     p=store.load(m['project_id']);store._check_contract(p,b)
     require(p['storage_hash']==b['initial_state_hash'] and p['status']=='ready'
@@ -48,7 +50,7 @@ def execute(review_hash,*,owner_confirmed=False,confirm_free_tier=False):
         os.environ[name]=value  # Only this explicit launch process; never .env/global settings.
     company=GeminiCompany(store,LiveManagerProvider('gemini-free-manager'),
                           LiveEmployeeProvider('gemini-free-employee'),config)
-    write_new(ROOT/'owner-launch-consumed.json',{'project_id':p['id'],'review_hash':review_hash,'consumed':True})
+    write_new(root/'owner-launch-consumed.json',{'project_id':p['id'],'review_hash':review_hash,'consumed':True})
     p=store.approve(p['id'],b,review_hash=review_hash,owner_confirmed=True)
     result=company.run(p['id'],expected_state_hash=p['storage_hash'])
     return {k:result.get(k) for k in ('id','status','reason_code','phase','artifacts')}
@@ -56,13 +58,14 @@ def execute(review_hash,*,owner_confirmed=False,confirm_free_tier=False):
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description='Gemini 최초 프로젝트: 준비는 송신 0회, execute는 최초 운영 승인 후 자율 실행')
+    parser.add_argument('--store',help='새 독립 저장소. 기존 stopped 저장소를 초기화하거나 재사용하지 않음')
     sub=parser.add_subparsers(dest='command',required=True);sub.add_parser('prepare')
     p=sub.add_parser('execute');p.add_argument('--review-hash',required=True)
     p.add_argument('--owner-confirmed',action='store_true');p.add_argument('--confirm-free-tier',action='store_true')
     args=parser.parse_args(argv)
     try:
-        result=prepare() if args.command=='prepare' else execute(args.review_hash,
-                owner_confirmed=args.owner_confirmed,confirm_free_tier=args.confirm_free_tier)
+        result=prepare(args.store) if args.command=='prepare' else execute(args.review_hash,
+                owner_confirmed=args.owner_confirmed,confirm_free_tier=args.confirm_free_tier,root=args.store)
         print(json.dumps(result,ensure_ascii=False,indent=2));return 0
     except (CompanyError,OSError,ValueError):
         print('준비 또는 실행이 차단됐습니다. 동의안·무료 등급·유효기간·소진 기록을 확인하세요. 자동 재시도하지 않습니다.')

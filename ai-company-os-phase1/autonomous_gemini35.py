@@ -95,10 +95,13 @@ class Gemini35Company(GeminiCompany):
                     'tool_input_ambiguous')
             return None
         require(isinstance(spec['tool'],str) and spec['tool'] in p['local_tools'],'tool_not_allowed')
-        from local_artifacts import _validate_video
-        try:_validate_video(spec,False)  # Shape/bounds only; existing renderer owns reflow.
+        try:self._validate_tool_input(spec)
         except CompanyError:raise CompanyError('tool_input_invalid_schema') from None
         return spec
+
+    def _validate_tool_input(self,spec):
+        from local_artifacts import _validate_video
+        _validate_video(spec,False)  # Existing renderer owns reflow.
 
     def _nested_tool_error(self,p,code):
         if p.get('nested_tool_review')==1 and code in ('tool_input_invalid_json','tool_input_invalid_schema','tool_input_ambiguous'):

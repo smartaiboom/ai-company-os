@@ -43,6 +43,10 @@ class FreeStore(LiveStore):
     endpoint=ai_safety.BASE_URL
     rules=RULES
 
+    def _tool_catalog(self):
+        from local_artifacts import TOOLS
+        return TOOLS
+
     def valid_mode(self,p):
         return (p.get('mode')==self.mode and p.get('simulation') is False
                 and p.get('policy_version')==2 and isinstance(p.get('real_ai'),dict)
@@ -83,7 +87,7 @@ class FreeStore(LiveStore):
            'events':[],'providers':None,'active_operation':None,'final':None,'artifacts':{},
            'user_business_approval_requests':0,'sessions':[],'run_started_at':None,'next_request_at':None}
         if local_tools is not None:
-            from local_artifacts import TOOLS
+            TOOLS=self._tool_catalog()
             require(local_tools==list(TOOLS),'tool_not_allowed')
             p['local_tools']=deepcopy(local_tools)
         self.save(p);return deepcopy(p)
@@ -101,14 +105,14 @@ class FreeStore(LiveStore):
                 'issued_at':now(),'expires_at':(datetime.fromisoformat(now())+timedelta(hours=valid_hours)).isoformat(),
                 'rules':deepcopy(self.rules)}
         if p.get('local_tools'):
-            from local_artifacts import TOOLS
+            TOOLS=self._tool_catalog()
             body['local_tools']={k:deepcopy(TOOLS[k]) for k in p['local_tools']}
         return body
 
     def _check_contract(self,p,b):
         require(isinstance(b,dict),'invalid_fields')
         if p.get('local_tools'):
-            from local_artifacts import TOOLS
+            TOOLS=self._tool_catalog()
             require(b.get('local_tools')=={k:TOOLS[k] for k in p['local_tools']},'consent_tools')
         else:require('local_tools' not in b,'consent_tools')
         checked={k:v for k,v in b.items() if k!='local_tools'}
@@ -141,6 +145,10 @@ class FreeCompany(LiveCompany):
 
     def _can_review_tool_failure(self,p):return False
 
+    def _execute_local_tool(self,spec,folder):
+        from local_artifacts import execute
+        return execute(spec['tool'],spec,folder)
+
     def _tool_spec(self,p,content):
         return parse(content) if content.startswith('{') else None
 
@@ -171,7 +179,7 @@ class FreeCompany(LiveCompany):
 
     def _tool_notice(self,p):
         if not p.get('local_tools'):return ''
-        from local_artifacts import TOOLS
+        TOOLS=self.store._tool_catalog()
         return (' Local artifact capability (no shell, network, file access or uploads): '+
                 json.dumps({k:TOOLS[k] for k in p['local_tools']})+
                 ' To render, employee execute.content must be a JSON STRING matching the tool input schema. '
@@ -391,7 +399,7 @@ class FreeCompany(LiveCompany):
                 raise
             if spec is not None:
                 if isinstance(spec,dict) and 'tool' in spec:
-                    from local_artifacts import execute,LocalToolError
+                    from local_artifacts import LocalToolError
                     require(spec['tool'] in p['local_tools'],'tool_not_allowed')
                     self.store.grant(p)
                     folder=self.store.root/'artifacts'/p['id']/('tool-'+self.current['context_hash'])
@@ -400,7 +408,7 @@ class FreeCompany(LiveCompany):
                     p['events'].append({'at':now(),'event':'local_tool_reserved','input_hash':digest(spec),'task_id':task_id})
                     self.store.save(p)
                     try:
-                        receipt=execute(spec['tool'],spec,folder)
+                        receipt=self._execute_local_tool(spec,folder)
                     except CompanyError as exc:
                         recoverable=isinstance(exc,LocalToolError) or exc.code in ('caption_overflow','narration_exceeds_scene')
                         if not recoverable:raise

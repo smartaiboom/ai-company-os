@@ -22,7 +22,7 @@ class GeminiFreeAdapter:
     def build_request(self,body,api_key):
         require(isinstance(api_key,str) and bool(api_key.strip()) and len(api_key)<=4096
                 and '\r' not in api_key and '\n' not in api_key,'missing_gemini_key')
-        return Request(ENDPOINT,data=body,method='POST',
+        return Request(self.spec.base_url,data=body,method='POST',
                        headers={'Content-Type':'application/json','x-goog-api-key':api_key})
 
     def response_metadata(self,response):return response_metadata(self.normalize(response))

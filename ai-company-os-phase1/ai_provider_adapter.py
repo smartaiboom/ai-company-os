@@ -94,3 +94,39 @@ def require_live_adapter(*, model, base_url, api_key, provider_id=FREE_PROVIDER_
     if not isinstance(api_key,str) or not api_key.strip():
         raise ValueError('실제 AI 요청에는 인증키가 필요합니다.')
     return OpenRouterFreeAdapter()
+
+
+def bounded_response_diagnostics(envelope):
+    """Untrusted provider text, IDs, headers and content never enter diagnostics."""
+    result={'envelope_object':isinstance(envelope,dict),'finish':'missing',
+            'choice_count':None,'content_present':False,'content_chars':None,
+            'refusal_present':False,'tool_request_present':False,
+            'json_parse':'not_attempted','cost':'unverified',
+            'tokens':{k:None for k in ('prompt_tokens','completion_tokens','total_tokens')}}
+    if not isinstance(envelope,dict):return result
+    usage=envelope.get('usage')
+    if isinstance(usage,dict):
+        for key in result['tokens']:
+            value=usage.get(key)
+            if type(value) is int and 0<=value<=1000000000:result['tokens'][key]=value
+        cost=usage.get('cost')
+        if type(cost) in (int,float):
+            if cost==0:result['cost']='zero'
+            elif cost>0:result['cost']='nonzero'
+    choices=envelope.get('choices')
+    if not isinstance(choices,list):return result
+    result['choice_count']=min(len(choices),2)
+    if len(choices)!=1 or not isinstance(choices[0],dict):return result
+    choice=choices[0]
+    if 'finish_reason' in choice:
+        finish=choice['finish_reason']
+        result['finish']=finish if isinstance(finish,str) and finish in (
+            'stop','length','tool_calls','function_call','content_filter','error') else 'unknown'
+    message=choice.get('message')
+    if isinstance(message,dict):
+        content=message.get('content')
+        result['content_present']=isinstance(content,str) and bool(content)
+        result['content_chars']=min(len(content),262144) if isinstance(content,str) else None
+        result['refusal_present']=bool(message.get('refusal'))
+        result['tool_request_present']=bool(message.get('tool_calls') or message.get('function_call'))
+    return result

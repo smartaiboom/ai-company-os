@@ -207,6 +207,10 @@ class FreeCompany(LiveCompany):
             return self.store.result(project_id)
 
     def _prepare_payload(self,payload):
+        payload=deepcopy(payload)
+        payload['messages'][0]['content']+=(' Keep JSON concise and within the 4096 output-token limit. '
+            'No markdown fences or separate reasoning text. Use only necessary tasks and concise field values; '
+            'do not omit required fields or checks. JSON support is not assumed; malformed output will stop execution.')
         return {**payload,'provider':deepcopy(ZERO_PRICE)}
 
     def _before_transport(self,p):
@@ -251,9 +255,14 @@ class FreeCompany(LiveCompany):
         try:
             with transport(request,timeout=min(90,max(1,int(timeout)))) as response:
                 raw=response.read(ai_safety.MAX_RESPONSE_BYTES+1)
+            entry['response_received_at']=now()
+            entry['response_diagnostics']={'envelope_json':'not_parsed','response_bytes':min(len(raw),ai_safety.MAX_RESPONSE_BYTES+1)}
+            self.store.save(p)
             require(len(raw)<=ai_safety.MAX_RESPONSE_BYTES,'response_too_large')
             envelope=json.loads(raw.decode(),object_pairs_hook=ai_safety.unique_response_object,
                                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            entry['response_diagnostics'].update(ai_provider_adapter.bounded_response_diagnostics(envelope),envelope_json='parsed')
+            self.store.save(p)
             require(isinstance(envelope,dict),'invalid_response_envelope')
             if 'error' in envelope:
                 code=envelope['error'].get('code') if isinstance(envelope['error'],dict) else None
@@ -261,6 +270,8 @@ class FreeCompany(LiveCompany):
             cost=envelope.get('usage',{}).get('cost') if isinstance(envelope.get('usage'),dict) else None
             require(type(cost) in (int,float) and cost==0,'provider_cost_unverified_or_nonzero')
         except Exception as exc:
+            if isinstance(exc,(ValueError,UnicodeError,RecursionError)) and not isinstance(exc,CompanyError) and entry.get('response_diagnostics',{}).get('envelope_json')=='not_parsed':
+                entry['response_diagnostics']['envelope_json']='invalid'
             code=exc.code if isinstance(exc,CompanyError) else 'free_request_failed'
             if isinstance(exc,HTTPError):
                 code=self._provider_code(exc.code)
@@ -273,6 +284,17 @@ class FreeCompany(LiveCompany):
         entry.update(status='completed',finished_at=now(),cost_verified_zero=True)
         self._persist(p)
         return envelope
+
+    def _record_response_validation(self,p,outcome):
+        entry=self._attempts(p)[-1]
+        diagnostics=entry.get('response_diagnostics')
+        if diagnostics is None:return
+        allowed=('json_parsed','invalid_model_json','invalid_choices','incomplete_response',
+                 'unexpected_tools','secret_in_response','invalid_response_envelope','provider_refusal')
+        diagnostics['validation']=outcome if outcome in allowed else 'rejected'
+        if outcome=='json_parsed':diagnostics['json_parse']='parsed'
+        elif outcome=='invalid_model_json':diagnostics['json_parse']='invalid'
+        self.store.save(p)
 
     @staticmethod
     def _provider_code(code):

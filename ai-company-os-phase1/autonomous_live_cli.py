@@ -15,7 +15,7 @@ def main(argv=None):
     create=sub.add_parser('create');create.add_argument('--goal',required=True)
     create.add_argument('--local-video',action='store_true',help='새 free-v2 프로젝트에 한정된 로컬 자막 MP4 도구')
     create.add_argument('--max-calls',type=int,default=None,help='선택적 기술 상한. 새 무료 프로젝트 기본값은 상한 없음')
-    for name in ('status','prepare','approve','revoke','start','resume','run','continue'):
+    for name in ('recovery-proposal','status','prepare','approve','revoke','start','resume','run','continue'):
         p=sub.add_parser(name);p.add_argument('project_id')
         if name=='prepare':
             p.add_argument('--hours',type=int,default=24);p.add_argument('--per-start',type=int,default=None,help='기존 bounded 계약에만 사용')
@@ -54,6 +54,9 @@ def main(argv=None):
                                 owner_confirmed=args.owner_confirmed)
         elif args.command=='revoke':value=store.revoke(args.project_id,owner_confirmed=args.owner_confirmed)
         elif args.command=='status':value=store.result(args.project_id)
+        elif args.command=='recovery-proposal':
+            from autonomous_recovery import recovery_proposal
+            value=recovery_proposal(store,args.project_id)
         else:
             if legacy and args.command in ('run','continue'):raise CompanyError('legacy_contract_requires_bounded_start_resume')
             cls=LiveCompany if legacy else FreeCompany

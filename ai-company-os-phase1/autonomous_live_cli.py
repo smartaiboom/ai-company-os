@@ -13,6 +13,7 @@ def main(argv=None):
     parser.add_argument('--store',required=True,help='기존 업무 데이터와 분리된 새 저장 경로')
     sub=parser.add_subparsers(dest='command',required=True)
     create=sub.add_parser('create');create.add_argument('--goal',required=True)
+    create.add_argument('--local-video',action='store_true',help='새 free-v2 프로젝트에 한정된 로컬 자막 MP4 도구')
     create.add_argument('--max-calls',type=int,default=None,help='선택적 기술 상한. 새 무료 프로젝트 기본값은 상한 없음')
     for name in ('status','prepare','approve','revoke','start','resume','run','continue'):
         p=sub.add_parser(name);p.add_argument('project_id')
@@ -31,6 +32,9 @@ def main(argv=None):
         store=LiveStore(args.store) if legacy else FreeStore(args.store)
         if args.command=='create':
             options={} if legacy and args.max_calls is None else {'max_calls':args.max_calls}
+            if args.local_video:
+                if legacy:raise CompanyError('legacy_tools_forbidden')
+                options['local_tools']=['caption_video_v1']
             value=store.create(args.goal,**options)
         elif args.command=='prepare':
             if legacy:

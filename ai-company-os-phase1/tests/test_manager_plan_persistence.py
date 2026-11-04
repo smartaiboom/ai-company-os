@@ -48,6 +48,7 @@ class ManagerPlanPersistenceTests(unittest.TestCase):
             "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
             "AI_REAL_REQUESTS_ENABLED": "1",
+            "AI_API_KEY": "synthetic-offline-only-key",
         }, clear=True)
         self.env.start()
         self.addCleanup(self.env.stop)

@@ -48,7 +48,7 @@ class RunnerShutdownTests(unittest.TestCase):
                             safety.request_json(project, model=safety.MODEL,
                                 base_url=safety.BASE_URL, body=json.dumps({
                                     'model':safety.MODEL, 'max_tokens':1}).encode(),
-                                api_key='', timeout=45, transport=fake_transport, kind='plan')
+                                api_key='synthetic-offline-only-key', timeout=45, transport=fake_transport, kind='plan')
                     except RuntimeError:
                         pass
                     self.send_response(200)

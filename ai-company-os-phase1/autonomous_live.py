@@ -250,6 +250,8 @@ class LiveCompany(Company):
 
     def _before_transport(self, p):pass
 
+    def _tool_notice(self, p):return ""
+
     def _call(self,p,provider,phase,task_id,context):
         grant=self._preflight(p)
         self._check_session(grant)
@@ -268,6 +270,7 @@ class LiveCompany(Company):
                 'Review/final checks must cover every relevant criterion exactly once. '
                 'Plan may instead return {"action":"stop","rationale":"...","uncertainty":"...","operation":null} '
                 'or needs_operational_permission with operation external_data|budget|external_permission.')
+        system+=self._tool_notice(p)
         payload={'model':self.config.model,'max_tokens':4096,'messages':[
             {'role':'system','content':system},
             {'role':'user','content':json.dumps({'role':role,'phase':phase,'output_contract':CONTRACTS[phase],

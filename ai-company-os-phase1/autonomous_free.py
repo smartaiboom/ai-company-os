@@ -65,7 +65,7 @@ class FreeStore(LiveStore):
         require(type(limits['max_revisions_per_task']) is int and 0<=limits['max_revisions_per_task']<=2
                 and type(limits['max_total_revisions']) is int and 0<=limits['max_total_revisions']<=4,'invalid_revision_limit')
 
-    def create(self, goal, *, max_calls=None, max_revisions_per_task=1, max_total_revisions=2):
+    def create(self, goal, *, max_calls=None, max_revisions_per_task=1, max_total_revisions=2, local_tools=None):
         text(goal,4000)
         limits={'max_calls':max_calls,'max_revisions_per_task':max_revisions_per_task,
                 'max_total_revisions':max_total_revisions}
@@ -76,12 +76,16 @@ class FreeStore(LiveStore):
            'real_ai':{'enabled':False,'policy':'free_autonomous_v2','attempts':[],'consent':{}},
            'events':[],'providers':None,'active_operation':None,'final':None,'artifacts':{},
            'user_business_approval_requests':0,'sessions':[],'run_started_at':None,'next_request_at':None}
+        if local_tools is not None:
+            from local_artifacts import TOOLS
+            require(local_tools==list(TOOLS),'tool_not_allowed')
+            p['local_tools']=deepcopy(local_tools)
         self.save(p);return deepcopy(p)
 
     def prepare(self, project_id, *, valid_hours=24):
         p=self.load(project_id)
         require(type(valid_hours) is int and 1<=valid_hours<=168,'invalid_validity')
-        return {'policy':'free_autonomous_v2','project_id':p['id'],
+        body={'policy':'free_autonomous_v2','project_id':p['id'],
                 'goal_hash':ai_safety.goal_hash(p['goal']),'initial_state_hash':p['storage_hash'],
                 'scopes':SCOPES[:],'provider':'openrouter','model':ai_safety.MODEL,
                 'endpoint':ai_safety.BASE_URL,'max_cost':0,'free_only':True,
@@ -90,9 +94,19 @@ class FreeStore(LiveStore):
                 'notice':NOTICE,
                 'issued_at':now(),'expires_at':(datetime.fromisoformat(now())+timedelta(hours=valid_hours)).isoformat(),
                 'rules':deepcopy(RULES)}
+        if p.get('local_tools'):
+            from local_artifacts import TOOLS
+            body['local_tools']={k:deepcopy(TOOLS[k]) for k in p['local_tools']}
+        return body
 
     def _check_contract(self,p,b):
-        exact(b,('policy','project_id','goal_hash','initial_state_hash','scopes','provider','model',
+        require(isinstance(b,dict),'invalid_fields')
+        if p.get('local_tools'):
+            from local_artifacts import TOOLS
+            require(b.get('local_tools')=={k:TOOLS[k] for k in p['local_tools']},'consent_tools')
+        else:require('local_tools' not in b,'consent_tools')
+        checked={k:v for k,v in b.items() if k!='local_tools'}
+        exact(checked,('policy','project_id','goal_hash','initial_state_hash','scopes','provider','model',
                  'endpoint','max_cost','free_only','limits','call_policy','notice','issued_at','expires_at','rules'))
         require(self.valid_mode(p) and b['policy']=='free_autonomous_v2','consent_policy')
         require(b['project_id']==p['id'] and b['goal_hash']==ai_safety.goal_hash(p['goal']),'consent_binding')
@@ -122,6 +136,17 @@ class FreeCompany(LiveCompany):
         self.store,self.manager,self.employee,self.config=store,manager,employee,config
         self.session=None;self.used=0;self.current=None;self._execution_lock=threading.Lock()
         self._run_monotonic=None
+
+    def _tool_notice(self,p):
+        if not p.get('local_tools'):return ''
+        from local_artifacts import TOOLS
+        return (' Local artifact capability (no shell, network, file access or uploads): '+
+                json.dumps({k:TOOLS[k] for k in p['local_tools']})+
+                ' To render, employee execute.content must be a JSON STRING matching the tool input schema. '
+                'Other tasks use prose. Put line breaks in captions to fit. System renders before manager review; '
+                'LOCAL_TOOL_RECEIPT in evidence is measured metadata, not visual/semantic verification. '
+                'Manager must arrange video production and review against goal. Set audio=true for local Korean TTS of captions; false for silent video. '
+                'No MP4 means delivery is blocked. Tool permission is separate from model transmission consent.')
 
     def _preflight(self,p):
         grant=self.store.grant(p)
@@ -267,6 +292,39 @@ class FreeCompany(LiveCompany):
             for value in result.values():text(value)
             require(not any(normalize(result['content'])==normalize(v['content']) for v in task['versions']),
                     'repeated_employee_result')
+        if phase=='execute' and p.get('local_tools'):
+            # Plain prose is valid for research/script tasks; a tool request must be JSON.
+            content=result['content'].strip()
+            if content.startswith('{'):
+                spec=parse(content)
+                if isinstance(spec,dict) and 'tool' in spec:
+                    from local_artifacts import execute
+                    require(spec['tool'] in p['local_tools'],'tool_not_allowed')
+                    self.store.grant(p)
+                    folder=self.store.root/'artifacts'/p['id']/('tool-'+self.current['context_hash'])
+                    folder.mkdir(parents=True,exist_ok=True)
+                    require(folder.resolve().is_relative_to(self.store.root/'artifacts') and not folder.is_symlink(),'invalid_tool_directory')
+                    p['events'].append({'at':now(),'event':'local_tool_reserved','input_hash':digest(spec),'task_id':task_id})
+                    self.store.save(p)
+                    receipt=execute(spec['tool'],spec,folder)
+                    receipt['input_hash']=digest(spec)
+                    name='video-'+self.current['context_hash']+'.mp4'
+                    p['artifacts'][name]={'path':str((folder/'video.mp4').relative_to(self.store.root)), 'sha256':receipt['sha256']}
+                    result['evidence']+='\nLOCAL_TOOL_RECEIPT '+json.dumps(receipt,ensure_ascii=False)
+                    p['events'].append({'at':now(),'event':'local_tool_completed','task_id':task_id,'receipt':receipt})
+                    self.store.save(p)
+        if phase=='finalize' and result.get('action')=='deliver' and p.get('local_tools'):
+            require(any(name.endswith('.mp4') for name in p['artifacts']),'required_artifact_missing')
+            accepted=[]
+            for t in p['assignments']:
+                if t['state']=='accepted_by_ai_manager' and t['versions'][-1]['content'].strip().startswith('{'):
+                    spec=parse(t['versions'][-1]['content'])
+                    if isinstance(spec,dict) and spec.get('tool') in p['local_tools']:
+                        accepted.append((t['id'],digest(spec)))
+            require(any(e['event']=='local_tool_completed' and
+                        (e['task_id'],e['receipt']['input_hash']) in accepted
+                        for e in p['events']),'accepted_artifact_missing')
+            self.store.result(p['id'])
         if phase=='review' and isinstance(result,dict) and result.get('action')=='revise' and task and task['reviews']:
             validate_review(result,task['criteria_ids'])
             previous=task['reviews'][-1]

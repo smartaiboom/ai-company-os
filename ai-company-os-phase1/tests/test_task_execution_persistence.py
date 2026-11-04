@@ -160,6 +160,7 @@ class TaskExecutionPersistenceTests(unittest.TestCase):
             "AI_API_BASE_URL": "https://openrouter.ai/api/v1",
             "AI_MODEL": "openrouter/free",
             "AI_REAL_REQUESTS_ENABLED": "1",
+            "AI_API_KEY": "synthetic-offline-only-key",
         }
         with patch.object(app, "PROJECTS_DIR", self.projects_dir):
             app.save_project(approved_project(self.project))

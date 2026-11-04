@@ -66,7 +66,7 @@ class UncertainReservationTests(unittest.TestCase):
     def send(self, project, **changes):
         args = dict(model=safety.MODEL, base_url=safety.BASE_URL,
                     body=json.dumps({'model':safety.MODEL, 'max_tokens':1}).encode(),
-                    api_key='', timeout=1, transport=self.transport, kind='plan')
+                    api_key='synthetic-offline-only-key', timeout=1, transport=self.transport, kind='plan')
         return safety.request_json(project, **{**args, **changes})
 
     def run_new(self, **changes):

@@ -2,6 +2,16 @@
 
 작성: 2026-11-04 KST. 사용자의 결정: “OpenRouter에만 의존하지 말고 Groq를 먼저 연결하고, Gemini는 후속 대안으로 유지하자. 무료로 AI 회사 한 사이클을 완성하는 것이 우선.” **이번 요청은 연결 코드 개발과 오프라인 시험을 수행하라는 동의다. Groq 계정에 새로운 API 키 등록이나 외부로 목표/직원 작업을 실제 전송하는 데 대한 프로젝트 단위 운영 동의로 해석하지 말 것.** 따라서 이 지시서의 실제 Groq API 요청은 0회, 운영 approve/run 0회.
 
+## 2026-11-04 사용자 추가 결정 — 이 작업에 함께 적용
+
+사용자는 **“테스트 단계에서는 여러 ai api 를 연결해서 무료 토큰을 최대한 이용하자. 이후 검증된 api를 유료로 전환해서 쓰면 좋을 것 같아”**라고 결정했다. 최상위 원칙 4-2항이 이 결정을 구체화한다.
+
+- 이 작업은 Groq 하나만 쓰는 최종 제품을 만드는 일이 아니라 **공급자별 공식 무료 API를 복수 연결할 수 있는 구조**가 목적이다. Groq를 첫 구현/검증 대상으로 하며, 기존 OpenRouter를 보존하고 Gemini는 후속 확장 연결점을 명확히 남긴다. 여러 실제 API의 계정/키/외부 전송을 이번 개발 작업에서 승인한 뜻은 아니다.
+- **Groq에서 먼저 하나의 자율 영상 사이클을 실제로 완주**할 수 있도록 가볍게 구현하고, 그다음 Gemini 등 다른 공급자를 같은 공통 계약으로 연결하도록 adapter·모델 capability·비용/무료 정책·공급자별 consent와 ledger·호출 결과 지표(정상 응답률/finish_reason/지연/쿼터/완료 품질/KST)를 준비한다. 지나친 범용 추상화 때문에 첫 사이클 완주가 지연되면 안 된다.
+- 정당한 각 공급자 무료 할당량을 활용하되, 429·쿼터를 다른 계정으로 무단 우회하거나 실패 operation을 새 공급자로 중복 전송하지 않는다. 공급자별 약관·한도 준수, 선택/변경 시 정확한 외부 전송 scope와 운영 동의 필수. 실패 시 자동 fallback은 기본 비활성.
+- 향후 평가 지표를 근거로 선택한 공급자 **유료 전환은 별도의 명시적 유료 승인과 금전 예산 정책이 완성된 후에만** 허용한다. 이번 작업에서는 유료 기능 자체를 활성화하지 않는다.
+- 이번 Codex 작업의 실제 Groq/Gemini/OpenRouter API 요청은 여전히 **0회**; Groq free-v2 가짜 HTTPS/로컬 MP4 검증 + 최초 운영 동의안 준비까지 수행한다. 이후 다른 무료 공급자 추가를 반복하기 쉽도록 보고서에 공통 adapter 규칙과 검증 체크리스트를 남긴다.
+
 ## 우선 읽을 문서
 `AI_COMPANY_OS_CORE_PRINCIPLES.md`, `AGENTS.md`, `codex_tasks/README_KOREAN_LANGUAGE_RULE.md`, `PROJECT_HANDOFF_20261103.md`, `reports/v01_real_free_ai_video_one_cycle_20261104.md`, `reports/v01_real_free_provider_response_recovery_20261104.md`, `reports/v01_real_free_autonomous_video_smoke_prepare_20261103.md`, `codex_tasks/v01_practical_second_video_trial_prepare_20261104.md` 및 관련 provider/role/consent/ledger/local_artifacts 코드를 충분히 검토한다. 마지막 지시서가 이미 사용자 Codex에서 실행되어 새 프로젝트를 만들었을 수도 있으니 먼저 상태 확인, 중복 작업 금지.
 

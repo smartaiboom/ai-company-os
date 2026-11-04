@@ -280,6 +280,10 @@ class Company:
         with self.store.lock(project_id):
             return self._run_workflow(project_id)
 
+    def _employee_version_metadata(self,p,task):return {}
+
+    def _validate_review_decision(self,p,task,review):pass
+
     def _run_workflow(self, project_id):
         p=self.store.load(project_id)
         if p['status'] in ('delivered','stopped','needs_operational_permission'):return self.store.result(project_id)
@@ -325,6 +329,7 @@ class Company:
                         for field in result:text(result[field])
                         version={**result,'task_id':task['id'],'role':task['role'],'revision':len(task['versions'])+1,
                                  'provider':self.employee.name,'source':self.source}
+                        version.update(self._employee_version_metadata(p,task))
                         task['versions'].append(version);task['state']='awaiting_ai_review'
                         self._commit(p,'ai_employee_result',task_id=task['id'],actor=self.employee.name,role=task['role'],result=version)
                     else:
@@ -333,6 +338,7 @@ class Company:
                         task['reviews'].append(review)
                         p['events'].append({'at':now(),'event':'ai_manager_decision','phase':'review',
                                             'task_id':task['id'],'actor':self.manager.name,'decision':deepcopy(review)})
+                        self._validate_review_decision(p,task,review)
                         if review['action']=='accept':task['state']='accepted_by_ai_manager'
                         elif review['action']=='revise':
                             require(task['revisions']<p['limits']['max_revisions_per_task']

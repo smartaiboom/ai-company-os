@@ -42,9 +42,10 @@ class GeminiTests(unittest.TestCase):
         self.create()
         p=patch('autonomous_live.urlopen',self.fake);p.start();self.addCleanup(p.stop)
 
-    def create(self,video=False,max_calls=None):
+    def create(self,video=False,max_calls=None,internal_tool_review=True):
         self.p=self.store.create('FAKE ONLY 합성 안내 영상' if video else 'FAKE ONLY 범용 목표',
-                                 local_tools=['caption_video_v1'] if video else None,max_calls=max_calls)
+                                 local_tools=['caption_video_v1'] if video else None,max_calls=max_calls,
+                                 internal_tool_review=internal_tool_review)
         self.company=GeminiCompany(self.store,LiveManagerProvider('gemini-free-manager'),
                                   LiveEmployeeProvider('gemini-free-employee'),GeminiConfig(KEY))
         self.requests=[]
@@ -205,7 +206,7 @@ class GeminiTests(unittest.TestCase):
 
     def test_local_failure_event_safe_and_no_automatic_retry(self):
         from local_artifacts import LocalToolError
-        self.create(video=True);self.models=VideoModels();self.approve()
+        self.create(video=True,internal_tool_review=False);self.models=VideoModels();self.approve()
         with patch('local_artifacts.execute',side_effect=LocalToolError('ffmpeg_segment','exit_nonzero',1)) as tool:
             self.run_company()
             self.assertEqual('local_tool_failed',self.p['reason_code'])

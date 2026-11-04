@@ -139,6 +139,16 @@ class FreeCompany(LiveCompany):
     store_type=FreeStore
     config_type=LiveConfig
 
+    def _can_review_tool_failure(self,p):return False
+
+    def _employee_version_metadata(self,p,task):
+        failure=self._attempts(p)[-1].get('local_tool_failure')
+        return {'tool_status':'failed','tool_failure':deepcopy(failure)} if failure else {}
+
+    def _validate_review_decision(self,p,task,review):
+        require(not (review['action']=='accept' and task['versions'][-1].get('tool_status')=='failed'),
+                'failed_tool_cannot_be_accepted')
+
     def __init__(self,store,manager,employee,config):
         require(type(store) is self.store_type and type(manager) is LiveManagerProvider
                 and type(employee) is LiveEmployeeProvider and type(config) is self.config_type,'free_types_required')
@@ -372,11 +382,19 @@ class FreeCompany(LiveCompany):
                     self.store.save(p)
                     try:
                         receipt=execute(spec['tool'],spec,folder)
-                    except LocalToolError as exc:
+                    except CompanyError as exc:
+                        recoverable=isinstance(exc,LocalToolError) or exc.code in ('caption_overflow','narration_exceeds_scene')
+                        if not recoverable:raise
+                        diagnostics=(deepcopy(exc.diagnostics) if isinstance(exc,LocalToolError) else
+                                     {'stage':'caption_validation' if exc.code=='caption_overflow' else 'audio_duration_validation',
+                                      'category':exc.code,'exit_code':None})
                         p['events'].append({'at':now(),'event':'local_tool_failed','task_id':task_id,
-                                            'diagnostics':exc.diagnostics,'automatic_retry':False})
-                        self.store.save(p)
-                        raise
+                                            'diagnostics':diagnostics,'automatic_retry':False})
+                        if self._can_review_tool_failure(p):
+                            self._attempts(p)[-1]['local_tool_failure']=diagnostics
+                            self.store.save(p)
+                            return result
+                        self.store.save(p);raise
                     receipt['input_hash']=digest(spec)
                     name='video-'+self.current['context_hash']+'.mp4'
                     p['artifacts'][name]={'path':str((folder/'video.mp4').relative_to(self.store.root)), 'sha256':receipt['sha256']}

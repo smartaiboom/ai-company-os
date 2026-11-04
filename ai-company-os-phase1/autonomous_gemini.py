@@ -13,6 +13,10 @@ from groq_provider import numeric_rate_headers
 from role_json_schema import response_format,matches
 
 GEMINI_RULES={**RULES,'provider_cost_must_be_zero':False,'free_account_verification_required':True}
+TOOL_REVIEW_POLICY={'version':1,'scope':'generated_employee_results_and_manager_reviews',
+                   'recoverable':['caption_overflow','narration_exceeds_scene','classified_local_subprocess_failure'],
+                   'manager_decides':True,'failed_tool_accept_forbidden':True,'transport_retry':False,
+                   'revision_limits':'existing_task_and_total_limits'}
 
 
 class GeminiStore(FreeStore):
@@ -25,8 +29,21 @@ class GeminiStore(FreeStore):
     endpoint=ENDPOINT
     rules=GEMINI_RULES
 
+    def valid_mode(self,p):
+        return super().valid_mode(p) and ('tool_failure_review' not in p or
+                type(p['tool_failure_review']) is int and p['tool_failure_review']==1)
+
+    def create(self,goal,*,internal_tool_review=True,**kwargs):
+        require(type(internal_tool_review) is bool,'invalid_tool_review_policy')
+        p=super().create(goal,**kwargs)
+        if internal_tool_review:
+            p['tool_failure_review']=1;self.save(p)
+        return p
+
     def prepare(self,project_id,*,valid_hours=24,confirm_free_account=False):
         body=super().prepare(project_id,valid_hours=valid_hours)
+        if self.load(project_id).get('tool_failure_review')==1:
+            body['tool_failure_review']=deepcopy(TOOL_REVIEW_POLICY)
         body.update(cost_policy=deepcopy(COST_POLICY),account_verification={
             'free_tier':confirm_free_account is True,
             'verified_at':now() if confirm_free_account else None})
@@ -41,7 +58,10 @@ class GeminiStore(FreeStore):
             valid=checked.utcoffset()==timedelta(hours=9) and timedelta(0)<=elapsed<timedelta(hours=24)
         except (ValueError,TypeError):valid=False
         require(valid,'gemini_account_verification_expired')
-        super()._check_contract(p,{k:v for k,v in b.items() if k not in ('cost_policy','account_verification')})
+        if p.get('tool_failure_review')==1:
+            require(digest(b.get('tool_failure_review'))==digest(TOOL_REVIEW_POLICY),'tool_review_consent_required')
+        else:require('tool_failure_review' not in b,'tool_review_policy_mismatch')
+        super()._check_contract(p,{k:v for k,v in b.items() if k not in ('cost_policy','account_verification','tool_failure_review')})
 
 
 @dataclass(frozen=True)
@@ -57,6 +77,19 @@ class GeminiConfig:
 class GeminiCompany(FreeCompany):
     store_type=GeminiStore
     config_type=GeminiConfig
+
+    def _can_review_tool_failure(self,p):
+        return p.get('tool_failure_review')==1
+
+    def _tool_notice(self,p):
+        notice=super()._tool_notice(p)
+        if p.get('tool_failure_review')==1:
+            notice+=(' A result with tool_status=failed is a failed employee attempt retained for review, not an artifact. '
+                     'tool_failure contains application-measured fixed stage/category/exit_code only. '
+                     'Manager must decide revise with specific corrective feedback, stop, or needs_operational_permission. '
+                     'Accepting a failed tool attempt is physically invalid. Do not claim MP4 success from failed evidence. '
+                     'A revision uses the existing revision limits; no automatic network replay is available.')
+        return notice
 
     def _check_provider_config(self):
         require(os.getenv('GEMINI_AUTONOMOUS_FREE_ENABLED')=='1','gemini_execution_disabled')

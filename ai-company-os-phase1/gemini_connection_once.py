@@ -3,10 +3,54 @@ import json
 import os
 import re
 import signal
+import socket
+import ssl
+from http.client import RemoteDisconnected, HTTPException
 from datetime import datetime, timezone, timedelta
 from pathlib import Path
 from urllib.request import Request, build_opener, HTTPRedirectHandler
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
+
+STAGES = frozenset(('timer_setup', 'transport_open', 'response_read', 'json_parse',
+                    'response_validate', 'timer_cleanup', 'ledger_save'))
+
+
+def error_category(exc, stage):
+    """Only fixed enums from exception types; never stringify an exception/reason."""
+    if stage not in STAGES:
+        return 'local_unexpected_error'
+    if isinstance(exc, HTTPError) and stage in ('transport_open', 'response_read'):
+        code = exc.code
+        return {400: '400_payload', 401: '401_auth', 403: '403_permission',
+                404: '404_model', 429: '429_limit'}.get(code,
+                '5xx_server' if type(code) is int and 500 <= code <= 599 else 'http_error')
+    if stage == 'json_parse' and isinstance(exc, (ValueError, UnicodeError)):
+        return 'parse_error'
+    if stage == 'response_validate' and isinstance(exc, (ValueError, KeyError, IndexError, TypeError, AttributeError)):
+        return 'invalid_response'
+    if stage not in ('transport_open', 'response_read'):
+        return 'local_unexpected_error'
+    # URLError.reason may be an exception or arbitrary text. Never inspect text.
+    reason = exc.reason if isinstance(exc, URLError) else exc
+    if isinstance(reason, socket.gaierror):
+        return 'dns_error'
+    if isinstance(reason, ssl.SSLError):
+        return 'tls_error'
+    if isinstance(reason, TimeoutError):
+        return 'connect_timeout' if stage == 'transport_open' else 'read_timeout'
+    if isinstance(reason, RemoteDisconnected):
+        return 'remote_disconnected'
+    if isinstance(reason, ConnectionResetError):
+        return 'connection_reset'
+    if isinstance(reason, ConnectionError):
+        return 'connection_error'
+    if isinstance(exc, URLError) or isinstance(reason, (OSError, HTTPException)):
+        return 'transport_error'
+    return 'local_unexpected_error'
+
+
+class WallTimeout(TimeoutError):
+    pass
 
 MODEL = 'gemini-2.5-flash-lite'
 URL = 'https://generativelanguage.googleapis.com/v1beta/models/' + MODEL + ':generateContent'
@@ -51,16 +95,22 @@ def run_once():
     finally:
         os.close(directory)
     def expired(signum, frame):
-        raise TimeoutError()
+        raise WallTimeout()
     previous = signal.signal(signal.SIGALRM, expired)
+    stage = 'timer_setup'
     try:
         signal.setitimer(signal.ITIMER_REAL, 30)
+        stage = 'transport_open'
         with transport(request) as response:
+            stage = 'response_read'
             record['http_status'] = int(response.status)
             raw = response.read(8193)
+        stage = 'response_validate'
         if len(raw) > 8192 or key.encode() in raw or record['http_status'] != 200:
             raise ValueError('invalid_response')
+        stage = 'json_parse'
         value = json.loads(raw)
+        stage = 'response_validate'
         text = value['candidates'][0]['content']['parts'][0]['text'].strip()
         # Only a short Korean greeting, never arbitrary returned identifiers.
         if not re.fullmatch(r'[가-힣 .,!?~。！]{1,200}', text) or '안녕' not in text:
@@ -69,21 +119,19 @@ def run_once():
         record['tokens'] = {k: v for k, v in value.get('usageMetadata', {}).items()
                             if k in ('promptTokenCount', 'candidatesTokenCount', 'totalTokenCount')
                             and type(v) is int and v >= 0}
-    except HTTPError as exc:
-        record['http_status'] = int(exc.code)
-        record['error'] = {400: '400_payload', 401: '401_auth', 403: '403_permission',
-                           404: '404_model', 429: '429_limit'}.get(exc.code,
-                           '5xx_server' if 500 <= exc.code <= 599 else 'other')
-        exc.close()
-    except TimeoutError:
-        record['error'] = 'timeout'
-    except (ValueError, KeyError, IndexError, TypeError):
-        record['error'] = 'other'
-    except Exception:
-        record['error'] = 'network'
+    except Exception as exc:
+        record.update(success=False, error='timeout' if isinstance(exc, WallTimeout)
+                      else error_category(exc, stage), error_stage=stage)
+        record.pop('greeting', None)
+        record.pop('tokens', None)
+        if isinstance(exc, HTTPError):
+            record['http_status'] = exc.code if type(exc.code) is int and 100 <= exc.code <= 599 else None
+            exc.close()
     finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
+        try:
+            signal.setitimer(signal.ITIMER_REAL, 0)
+        finally:
+            signal.signal(signal.SIGALRM, previous)
     record['finished_kst'] = now()
     with LEDGER.open('w') as file:
         json.dump(record, file, ensure_ascii=False); file.flush(); os.fsync(file.fileno())

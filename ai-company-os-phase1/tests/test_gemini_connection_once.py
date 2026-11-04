@@ -1,11 +1,13 @@
 import io
 import json
 import socket
+import ssl
+from http.client import RemoteDisconnected
 import tempfile
 import unittest
 from pathlib import Path
 from unittest.mock import patch
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 import gemini_connection_once as g
 
 
@@ -16,6 +18,7 @@ class GeminiOnceTests(unittest.TestCase):
         for p in (patch.object(g, 'LEDGER', Path(self.tmp.name) / 'operation.json'),
                   patch.dict('os.environ', {'GEMINI_API_KEY': 'offline-secret'}),
                   patch.object(socket.socket, 'connect', side_effect=AssertionError('network forbidden')),
+                  patch.object(socket, 'getaddrinfo', side_effect=AssertionError('DNS forbidden')),
                   patch.object(socket, 'create_connection', side_effect=AssertionError('network forbidden'))):
             p.start(); self.addCleanup(p.stop)
 
@@ -46,7 +49,61 @@ class GeminiOnceTests(unittest.TestCase):
                     with self.assertRaises(FileExistsError): g.run_once()
                     self.assertEqual(send.call_count, 1)
         with patch.object(g, 'transport', side_effect=TimeoutError()):
-            self.assertEqual(g.run_once()['error'], 'timeout')
+            self.assertEqual(g.run_once()['error'], 'connect_timeout')
+
+    def test_exception_categories_no_secret_text(self):
+        secret = 'offline-secret https://private.invalid/?key=secret'
+        cases = [(URLError(socket.gaierror(-2, secret)), 'dns_error'),
+                 (socket.gaierror(-2, secret), 'dns_error'),
+                 (URLError(ssl.SSLError(secret)), 'tls_error'),
+                 (ssl.SSLCertVerificationError(secret), 'tls_error'),
+                 (URLError(TimeoutError(secret)), 'connect_timeout'),
+                 (ConnectionResetError(secret), 'connection_reset'),
+                 (RemoteDisconnected(secret), 'remote_disconnected'),
+                 (ConnectionRefusedError(secret), 'connection_error'),
+                 (OSError(secret), 'transport_error'),
+                 (URLError(secret), 'transport_error'),
+                 (RuntimeError(secret), 'local_unexpected_error'),
+                 (AttributeError(secret), 'local_unexpected_error'),
+                 (g.WallTimeout(secret), 'timeout')]
+        for i, (exc, category) in enumerate(cases):
+            with self.subTest(category=category), patch.object(g, 'LEDGER', Path(self.tmp.name) / str(i)):
+                with patch.object(g, 'transport', side_effect=exc) as send:
+                    result = g.run_once()
+                    self.assertEqual(result['error'], category)
+                    self.assertEqual(result['error_stage'], 'transport_open')
+                    self.assertIsNone(result['http_status'])
+                    self.assertNotIn(secret, json.dumps(result))
+                    self.assertNotIn(secret, g.LEDGER.read_text())
+                    with self.assertRaises(FileExistsError): g.run_once()
+                    self.assertEqual(send.call_count, 1)
+
+    def test_parse_validate_read_and_timer_stages(self):
+        for i, (raw, category, stage) in enumerate([
+            (b'{bad', 'parse_error', 'json_parse'),
+            (b'{}', 'invalid_response', 'response_validate'),
+            (b'{"candidates":null}', 'invalid_response', 'response_validate')]):
+            with patch.object(g, 'LEDGER', Path(self.tmp.name) / str(i)):
+                response = io.BytesIO(raw); response.status = 200
+                with patch.object(g, 'transport', return_value=response):
+                    result = g.run_once()
+                    self.assertEqual((result['error'], result['error_stage']), (category, stage))
+                    self.assertEqual(result['http_status'], 200)
+        class ReadTimeout(io.BytesIO):
+            status = 200
+            def read(self, size): raise TimeoutError('private')
+        with patch.object(g, 'transport', return_value=ReadTimeout()):
+            result = g.run_once()
+            self.assertEqual((result['error'], result['error_stage']), ('read_timeout', 'response_read'))
+        with patch.object(g, 'LEDGER', Path(self.tmp.name) / 'timer'):
+            original = g.signal.setitimer
+            def timer(which, seconds):
+                if seconds: raise OSError('private')
+                return original(which, seconds)
+            with patch.object(g.signal, 'setitimer', side_effect=timer), patch.object(g, 'transport') as send:
+                result = g.run_once()
+                self.assertEqual((result['error'], result['error_stage']), ('local_unexpected_error', 'timer_setup'))
+                send.assert_not_called()
 
     def test_redirect_and_transport_configuration(self):
         self.assertIsNone(g.NoRedirect().redirect_request(None, None, 302, '', {}, g.URL))

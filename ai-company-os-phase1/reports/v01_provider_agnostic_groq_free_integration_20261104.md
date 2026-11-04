@@ -93,3 +93,16 @@ GROQ_AUTONOMOUS_FREE_ENABLED=1 python -B -m autonomous_live_cli --store data/gro
 - `git diff --check` 통과. 코드/테스트/이 보고서만 선택적으로 커밋·푸시하며 모든 데이터·계약·영상·키는 제외한다.
 
 이번 변경은 같은 자율 엔진에서 공급자별 기술 계약을 분리하고 **목표→관리자/직원 협업→로컬 MP4**의 두 번째 공급자 경로를 오프라인으로 완성했다. 업무별 사용자 승인 단계를 추가하지 않았다. **실제 Groq 모델 협업 성공, 실제 무료 청구 검증, 고품질 영상 제작은 아직 미검증**이며, 사용자 계정/키/무료 조건 확인과 한 번의 최초 프로젝트 운영 동의 후 실제 실행이 남았다. 기존 실패 원장의 무단 복구는 하지 않았다. 대시보드/화면 고도화는 개발하지 않았다.
+
+## 작업 중 추가된 다중 공급자 정책 반영과 후속 확장 규칙
+
+첫 push 시 원격 main에 정책 문서 커밋 `96d1bfa`가 추가되어 거절됐다. 원격 변경은 AGENTS.md·핵심 원칙 4-2·이번 지시서의 추가 정책뿐임을 확인하고, 내용을 읽은 뒤 충돌 없이 rebase했다. Groq 우선 한 사이클 검증, 공급자별 정당한 무료 할당량 활용, 다른 계정으로 쿼터 우회 금지, 별도 송신 동의, 추후 검증된 공급자만 명시 예산 승인 후 유료 전환이라는 정책과 이번 구현은 일치한다. Gemini나 유료 경로는 추가하지 않았다.
+
+후속 무료 공급자의 공통 확장 규칙/검증 체크리스트는 다음과 같다.
+
+1. `ProviderSpec`의 고정 모델·endpoint·wire format·capability를 공식 문서로 확인하고 별도 adapter를 구현한다. 요청 필드 allowlist와 모델별 strict schema 지원을 검사하며 미지원 공급자에 옵션을 그대로 복사하지 않는다.
+2. FreeStore/FreeCompany의 보호 훅을 재사용하되 새 marker·policy·ID·전용 secret·계정 무료 정책을 둔다. schema/요청 정규화와 비용 증거를 공급자별로 정의하고, 기존 서명 계약이나 실패 operation을 재사용하지 않는다.
+3. 최초 전송 scope/로컬 도구/모델/무료 근거/만료·원장 결합을 검증한다. API 키 존재만으로 무료 계정이나 송신 동의를 인정하지 않는다. 비용·무료 조건 불명이면 차단한다.
+4. 동일한 가짜 HTTPS 협업·수정·선행 전달→실제 MP4→최종 보고를 CLI run 한 번으로 검증하고, 비정상 종료/거절/비용/429/402/schema/키/계약 변경·crash 중복 차단 및 다른 공급자 회귀를 실행한다.
+5. 비교 지표는 원장의 provider_id/model/request hash, reserved_at/transport_started_at/response_received_at/finished_at(KST), response_diagnostics의 finish/validation/json_parse/tokens, rate_limits와 관리자 review/checks·최종 artifact를 근거로 계산한다. HTTP 완료율과 업무 검증 완료율을 분리하고, 지연은 송신→수신 시각 차이로 산출한다(현행 KST 초 단위 정밀도). 사용자 체감 영상 품질은 토큰 수나 technical decode 성공으로 대체하지 않는다. 이번 fake 지표는 실제 공급자 지연/품질 비교 근거가 아니다.
+6. 여러 공급자의 실사용 비교와 유료 전환은 후속 작업이다. 사전 승인 없는 공급자 전환·실패 요청 자동 복제·유료 fallback을 만들지 않는다. 대시보드는 실제 한 사이클 완주 뒤에 저장된 지표로 개발한다.

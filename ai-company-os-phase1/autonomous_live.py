@@ -254,6 +254,8 @@ class LiveCompany(Company):
 
     def _record_response_validation(self, p, outcome):pass
 
+    def _parse_role_content(self,raw,phase):return parse(raw)
+
     def _call(self,p,provider,phase,task_id,context):
         grant=self._preflight(p)
         self._check_session(grant)
@@ -306,7 +308,7 @@ class LiveCompany(Company):
             require(not message.get('refusal'),'provider_refusal')
             raw=message['content']
             require(isinstance(raw,str) and self.config.api_key not in raw,'secret_in_response')
-            value=parse(raw)
+            value=self._parse_role_content(raw,phase)
             require(self.config.api_key not in json.dumps(value,ensure_ascii=False),'secret_in_response')
         except (KeyError,TypeError,IndexError):
             self._record_response_validation(p,'invalid_response_envelope')

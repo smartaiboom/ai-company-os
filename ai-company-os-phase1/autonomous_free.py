@@ -36,16 +36,22 @@ def pacing_now():
 class FreeStore(LiveStore):
     mode=MODE
     marker_name='.autonomous-free-v2-store'
+    policy='free_autonomous_v2'
+    project_prefix='freecompany-'
+    provider_id='openrouter'
+    model=ai_safety.MODEL
+    endpoint=ai_safety.BASE_URL
+    rules=RULES
 
     def valid_mode(self,p):
-        return (p.get('mode')==MODE and p.get('simulation') is False
+        return (p.get('mode')==self.mode and p.get('simulation') is False
                 and p.get('policy_version')==2 and isinstance(p.get('real_ai'),dict)
-                and p['real_ai'].get('policy')=='free_autonomous_v2'
+                and p['real_ai'].get('policy')==self.policy
                 and 'limit' not in p['real_ai'] and 'attempts' not in p)
 
     def load(self, project_id):
         marker=self.root/self.marker_name
-        require(marker.is_file() and marker.read_text()==MODE,'invalid_store')
+        require(marker.is_file() and marker.read_text()==self.mode,'invalid_store')
         path=self.path(project_id);require(path.stat().st_size<=4194304,'state_too_large')
         try:
             p=json.loads(path.read_text(),object_pairs_hook=ai_safety.unique_response_object,
@@ -70,10 +76,10 @@ class FreeStore(LiveStore):
         limits={'max_calls':max_calls,'max_revisions_per_task':max_revisions_per_task,
                 'max_total_revisions':max_total_revisions}
         self._limits(limits);self._initialize()
-        p={'id':'freecompany-'+uuid.uuid4().hex,'schema_version':1,'policy_version':2,
-           'mode':MODE,'simulation':False,'goal':goal,'created_at':now(),'status':'ready',
+        p={'id':self.project_prefix+uuid.uuid4().hex,'schema_version':1,'policy_version':2,
+           'mode':self.mode,'simulation':False,'goal':goal,'created_at':now(),'status':'ready',
            'phase':'plan','plan':None,'assignments':[],'limits':limits,
-           'real_ai':{'enabled':False,'policy':'free_autonomous_v2','attempts':[],'consent':{}},
+           'real_ai':{'enabled':False,'policy':self.policy,'attempts':[],'consent':{}},
            'events':[],'providers':None,'active_operation':None,'final':None,'artifacts':{},
            'user_business_approval_requests':0,'sessions':[],'run_started_at':None,'next_request_at':None}
         if local_tools is not None:
@@ -85,15 +91,15 @@ class FreeStore(LiveStore):
     def prepare(self, project_id, *, valid_hours=24):
         p=self.load(project_id)
         require(type(valid_hours) is int and 1<=valid_hours<=168,'invalid_validity')
-        body={'policy':'free_autonomous_v2','project_id':p['id'],
+        body={'policy':self.policy,'project_id':p['id'],
                 'goal_hash':ai_safety.goal_hash(p['goal']),'initial_state_hash':p['storage_hash'],
-                'scopes':SCOPES[:],'provider':'openrouter','model':ai_safety.MODEL,
-                'endpoint':ai_safety.BASE_URL,'max_cost':0,'free_only':True,
+                'scopes':SCOPES[:],'provider':self.provider_id,'model':self.model,
+                'endpoint':self.endpoint,'max_cost':0,'free_only':True,
                 'limits':deepcopy(p['limits']),'call_policy':{'total':None,'per_run':None,
                     'optional_technical_cap':p['limits']['max_calls']},
                 'notice':NOTICE,
                 'issued_at':now(),'expires_at':(datetime.fromisoformat(now())+timedelta(hours=valid_hours)).isoformat(),
-                'rules':deepcopy(RULES)}
+                'rules':deepcopy(self.rules)}
         if p.get('local_tools'):
             from local_artifacts import TOOLS
             body['local_tools']={k:deepcopy(TOOLS[k]) for k in p['local_tools']}
@@ -108,17 +114,17 @@ class FreeStore(LiveStore):
         checked={k:v for k,v in b.items() if k!='local_tools'}
         exact(checked,('policy','project_id','goal_hash','initial_state_hash','scopes','provider','model',
                  'endpoint','max_cost','free_only','limits','call_policy','notice','issued_at','expires_at','rules'))
-        require(self.valid_mode(p) and b['policy']=='free_autonomous_v2','consent_policy')
+        require(self.valid_mode(p) and b['policy']==self.policy,'consent_policy')
         require(b['project_id']==p['id'] and b['goal_hash']==ai_safety.goal_hash(p['goal']),'consent_binding')
-        require(b['scopes']==SCOPES and b['provider']=='openrouter' and b['model']==ai_safety.MODEL
-                and b['endpoint']==ai_safety.BASE_URL,'consent_scope')
+        require(b['scopes']==SCOPES and b['provider']==self.provider_id and b['model']==self.model
+                and b['endpoint']==self.endpoint,'consent_scope')
         self._limits(p['limits']);self._limits(b['limits'])
         require(b['limits']==p['limits'] and b['call_policy']=={'total':None,'per_run':None,
                 'optional_technical_cap':p['limits']['max_calls']},'consent_limits')
         require(type(b['max_cost']) is int and b['max_cost']==0 and b['free_only'] is True,'free_cost_only')
-        require(b['rules']==RULES,'consent_rules');require(b['notice']==NOTICE,'consent_notice')
+        require(b['rules']==self.rules,'consent_rules');require(b['notice']==NOTICE,'consent_notice')
         # JSON equality alone considers True == 1; compare canonical hashes as well.
-        require(digest(b['rules'])==digest(RULES),'consent_rules')
+        require(digest(b['rules'])==digest(self.rules),'consent_rules')
         try:
             issued=datetime.fromisoformat(b['issued_at']);expires=datetime.fromisoformat(b['expires_at'])
             valid=(issued.utcoffset()==timedelta(hours=9) and expires.utcoffset()==timedelta(hours=9)
@@ -130,9 +136,12 @@ class FreeStore(LiveStore):
 
 class FreeCompany(LiveCompany):
     """A single execution owns the finite workflow, with no per-run call budget."""
+    store_type=FreeStore
+    config_type=LiveConfig
+
     def __init__(self,store,manager,employee,config):
-        require(type(store) is FreeStore and type(manager) is LiveManagerProvider
-                and type(employee) is LiveEmployeeProvider and type(config) is LiveConfig,'free_types_required')
+        require(type(store) is self.store_type and type(manager) is LiveManagerProvider
+                and type(employee) is LiveEmployeeProvider and type(config) is self.config_type,'free_types_required')
         self.store,self.manager,self.employee,self.config=store,manager,employee,config
         self.session=None;self.used=0;self.current=None;self._execution_lock=threading.Lock()
         self._run_monotonic=None
@@ -148,12 +157,18 @@ class FreeCompany(LiveCompany):
                 'Manager must arrange video production and review against goal. Set audio=true for local Korean TTS of captions; false for silent video. '
                 'No MP4 means delivery is blocked. Tool permission is separate from model transmission consent.')
 
-    def _preflight(self,p):
-        grant=self.store.grant(p)
+    def _check_provider_config(self):
         require(os.getenv('AI_AUTONOMOUS_FREE_ENABLED')=='1'
                 and os.getenv('AI_ENGINE')=='openai_compatible','free_execution_disabled')
         require(self.config.model==ai_safety.MODEL and os.getenv('AI_MODEL')==ai_safety.MODEL,'free_model_only')
         require(self.config.endpoint==ai_safety.BASE_URL and os.getenv('AI_BASE_URL')==ai_safety.BASE_URL,'fixed_endpoint_only')
+
+    def _attempt_policy_valid(self,a):
+        return a.get('cost_verified_zero') is True and a.get('model')==ai_safety.MODEL
+
+    def _preflight(self,p):
+        grant=self.store.grant(p)
+        self._check_provider_config()
         key=self.config.api_key
         require(isinstance(key,str) and bool(key.strip()) and len(key)<=4096
                 and '\r' not in key and '\n' not in key,'missing_api_key')
@@ -167,8 +182,7 @@ class FreeCompany(LiveCompany):
         require(isinstance(attempts,list) and all(isinstance(a,dict) and a.get('status')=='completed'
                 and isinstance(a.get('id'),str) and type(a.get('input_bytes')) is int
                 and 0<=a['input_bytes']<=ai_safety.MAX_INPUT_BYTES
-                and a.get('role_result_status')=='validated' and a.get('cost_verified_zero') is True
-                and a.get('model')==ai_safety.MODEL for a in attempts),'uncertain_operation')
+                and a.get('role_result_status')=='validated' and self._attempt_policy_valid(a) for a in attempts),'uncertain_operation')
         require(len({a['id'] for a in attempts})==len(attempts),'duplicate_attempt')
         cap=p['limits']['max_calls']
         require(cap is None or len(attempts)<cap,'optional_technical_cap_reached')
@@ -238,22 +252,22 @@ class FreeCompany(LiveCompany):
         Never opens legacy request scopes or mutates project_budget policy.
         """
         self._preflight(p)
-        adapter=ai_provider_adapter.require_live_adapter(model=model,base_url=base_url,api_key=api_key)
+        adapter=self._adapter(model,base_url,api_key)
         require(isinstance(body,bytes) and len(body)<=ai_safety.MAX_INPUT_BYTES,'input_too_large')
         payload=parse(body.decode())
-        require(payload.get('model')==ai_safety.MODEL and payload.get('provider')==ZERO_PRICE
-                and type(payload.get('max_tokens')) is int and 1<=payload['max_tokens']<=4096,'free_payload_required')
+        self._validate_payload(payload)
         attempts=self._attempts(p)
-        operation_hash=digest({'phase':self.current['phase'],'task_id':task_id,'context_hash':self.current['context_hash']})
+        operation_hash=digest(self._operation_identity(task_id))
         require(not p['active_operation'] and not any(a.get('operation_hash')==operation_hash for a in attempts),
                 'duplicate_operation')
         entry={'id':uuid.uuid4().hex,'kind':kind,'task_id':task_id,'model':model,'status':'reserved',
-               'reserved_at':now(),'input_bytes':len(body),'max_tokens':payload['max_tokens'],
-               'operation_hash':operation_hash,'request_hash':digest(payload),'price_policy_hash':digest(ZERO_PRICE)}
+               'reserved_at':now(),'input_bytes':len(body),'max_tokens':self._output_token_limit(payload),
+               'operation_hash':operation_hash,'request_hash':digest(payload),'price_policy_hash':digest(self._request_policy()),**self._attempt_identity()}
         attempts.append(entry);self._persist(p)  # Durable reservation, sole ledger, before any send.
         request=adapter.build_request(body,api_key)
         try:
             with transport(request,timeout=min(90,max(1,int(timeout)))) as response:
+                self._record_rate_headers(entry,getattr(response,'headers',{}))
                 raw=response.read(ai_safety.MAX_RESPONSE_BYTES+1)
             entry['response_received_at']=now()
             entry['response_diagnostics']={'envelope_json':'not_parsed','response_bytes':min(len(raw),ai_safety.MAX_RESPONSE_BYTES+1)}
@@ -267,32 +281,52 @@ class FreeCompany(LiveCompany):
             if 'error' in envelope:
                 code=envelope['error'].get('code') if isinstance(envelope['error'],dict) else None
                 raise CompanyError(self._provider_code(code))
-            cost=envelope.get('usage',{}).get('cost') if isinstance(envelope.get('usage'),dict) else None
-            require(type(cost) in (int,float) and cost==0,'provider_cost_unverified_or_nonzero')
+            self._verify_response_policy(p,envelope)
         except Exception as exc:
             if isinstance(exc,(ValueError,UnicodeError,RecursionError)) and not isinstance(exc,CompanyError) and entry.get('response_diagnostics',{}).get('envelope_json')=='not_parsed':
                 entry['response_diagnostics']['envelope_json']='invalid'
             code=exc.code if isinstance(exc,CompanyError) else 'free_request_failed'
             if isinstance(exc,HTTPError):
                 code=self._provider_code(exc.code)
+                self._record_rate_headers(entry,exc.headers or {})
                 retry=exc.headers.get('Retry-After') if exc.headers else None
                 if isinstance(retry,str) and retry.isdigit():entry['retry_after_seconds']=min(86400,int(retry[:6]))
                 exc.close()
             entry.update(status='failed',finished_at=now(),error_code=code)
             self._persist(p)
             raise CompanyError(code) from None
-        entry.update(status='completed',finished_at=now(),cost_verified_zero=True)
+        entry.update(status='completed',finished_at=now(),**self._response_policy_fields())
         self._persist(p)
         return envelope
+
+    def _adapter(self,model,base_url,api_key):
+        return ai_provider_adapter.require_live_adapter(model=model,base_url=base_url,api_key=api_key)
+
+    def _validate_payload(self,payload):
+        require(payload.get('model')==ai_safety.MODEL and payload.get('provider')==ZERO_PRICE
+                and type(payload.get('max_tokens')) is int and 1<=payload['max_tokens']<=4096,'free_payload_required')
+
+    def _output_token_limit(self,payload):return payload['max_tokens']
+    def _request_policy(self):return ZERO_PRICE
+    def _attempt_identity(self):return {}
+    def _response_policy_fields(self):return {'cost_verified_zero':True}
+    def _record_rate_headers(self,entry,headers):pass
+
+    def _operation_identity(self,task_id):
+        return {'phase':self.current['phase'],'task_id':task_id,'context_hash':self.current['context_hash']}
+
+    def _verify_response_policy(self,p,envelope):
+        cost=envelope.get('usage',{}).get('cost') if isinstance(envelope.get('usage'),dict) else None
+        require(type(cost) in (int,float) and cost==0,'provider_cost_unverified_or_nonzero')
 
     def _record_response_validation(self,p,outcome):
         entry=self._attempts(p)[-1]
         diagnostics=entry.get('response_diagnostics')
         if diagnostics is None:return
         allowed=('json_parsed','invalid_model_json','invalid_choices','incomplete_response',
-                 'unexpected_tools','secret_in_response','invalid_response_envelope','provider_refusal')
+                 'unexpected_tools','secret_in_response','invalid_response_envelope','provider_refusal','invalid_role_schema')
         diagnostics['validation']=outcome if outcome in allowed else 'rejected'
-        if outcome=='json_parsed':diagnostics['json_parse']='parsed'
+        if outcome in ('json_parsed','invalid_role_schema'):diagnostics['json_parse']='parsed'
         elif outcome=='invalid_model_json':diagnostics['json_parse']='invalid'
         self.store.save(p)
 

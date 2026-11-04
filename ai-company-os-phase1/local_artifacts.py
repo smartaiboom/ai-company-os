@@ -33,10 +33,11 @@ class LocalToolError(CompanyError):
         self.diagnostics={'stage':stage,'category':category,'exit_code':exit_code}
 
 
-def run_command(args, timeout=180, *, stage):
+def run_command(args, timeout=180, *, stage, cwd=None):
     require(stage in COMMAND_STAGES,'invalid_local_tool_stage')
     try:
-        return subprocess.run(args, check=True, capture_output=True, timeout=timeout).stdout
+        options={'cwd':cwd} if cwd is not None else {}
+        return subprocess.run(args, check=True, capture_output=True, timeout=timeout,**options).stdout
     except FileNotFoundError:
         raise LocalToolError(stage,'executable_missing') from None
     except subprocess.TimeoutExpired:
@@ -116,7 +117,10 @@ def render_video(spec, folder):
             audio_args=['-an']
             if spec['audio']:
                 wav=work/(str(i)+'.wav')
-                run_command(['espeak-ng','-v','ko','-s','155','-f',str(caption),'-w',str(wav)],stage='espeak_audio')
+                # espeak-ng truncates long filename arguments in this build. Keep
+                # both names short inside our own work directory; text is unchanged.
+                run_command(['espeak-ng','-v','ko','-s','155','-f',caption.name,'-w',wav.name],
+                            stage='espeak_audio',cwd=work)
                 voice=json.loads(run_command(['ffprobe','-v','error','-show_format','-of','json',str(wav)],stage='ffprobe_audio'))
                 require(float(voice['format']['duration'])<=scene['seconds'],'narration_exceeds_scene')
                 audio_args=['-i',str(wav),'-af','apad','-c:a','aac','-ar','44100','-ac','1']

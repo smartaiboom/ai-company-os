@@ -7,11 +7,12 @@ from autonomous_company import CompanyError, digest, parse
 from autonomous_live import LiveStore, LiveCompany, LiveManagerProvider, LiveEmployeeProvider, LiveConfig
 from autonomous_free import FreeStore, FreeCompany
 from autonomous_groq import GroqStore, GroqCompany, GroqConfig
+from autonomous_gemini import GeminiStore, GeminiCompany, GeminiConfig
 
 
 def main(argv=None):
     parser=argparse.ArgumentParser(description='자율 회사 live 운영 동의 및 실행. 기본 상태는 송신 차단입니다.')
-    parser.add_argument('--provider',choices=('openrouter','groq'),help='새 저장소 생성 시 공급자 선택. 기존 저장소의 공급자는 변경 불가')
+    parser.add_argument('--provider',choices=('openrouter','groq','gemini'),help='새 저장소 생성 시 공급자 선택. 기존 저장소의 공급자는 변경 불가')
     parser.add_argument('--store',required=True,help='기존 업무 데이터와 분리된 새 저장 경로')
     sub=parser.add_subparsers(dest='command',required=True)
     create=sub.add_parser('create');create.add_argument('--goal',required=True)
@@ -21,6 +22,7 @@ def main(argv=None):
         p=sub.add_parser(name);p.add_argument('project_id')
         if name=='prepare':
             p.add_argument('--confirm-groq-free-account',action='store_true',help='Groq Console의 Free plan·무결제·모델 허용을 직접 확인한 뒤 키에 결합한 동의안을 준비')
+            p.add_argument('--confirm-gemini-free-account',action='store_true',help='해당 Gemini API 키 프로젝트의 Free tier를 직접 확인한 뒤 동의안에 기록')
             p.add_argument('--hours',type=int,default=24);p.add_argument('--per-start',type=int,default=None,help='기존 bounded 계약에만 사용')
             p.add_argument('--proposal-out',help='검토할 contract를 새 파일로 저장; 기존 파일 덮어쓰기 금지')
         if name=='approve':
@@ -30,12 +32,12 @@ def main(argv=None):
         if name in ('start','resume','run','continue'):p.add_argument('--state-hash',required=True)
     args=parser.parse_args(argv)
     try:
-        markers=[cls for cls in (LiveStore,FreeStore,GroqStore) if (Path(args.store)/cls.marker_name).is_file()]
+        markers=[cls for cls in (LiveStore,FreeStore,GroqStore,GeminiStore) if (Path(args.store)/cls.marker_name).is_file()]
         if len(markers)>1:raise CompanyError('ambiguous_store')
-        cls=markers[0] if markers else GroqStore if args.provider=='groq' else FreeStore
-        provider='groq' if cls is GroqStore else 'openrouter'
+        cls=markers[0] if markers else GeminiStore if args.provider=='gemini' else GroqStore if args.provider=='groq' else FreeStore
+        provider='gemini' if cls is GeminiStore else 'groq' if cls is GroqStore else 'openrouter'
         if args.provider and args.provider!=provider:raise CompanyError('provider_store_mismatch')
-        store=cls(args.store);legacy=cls is LiveStore;groq=cls is GroqStore
+        store=cls(args.store);legacy=cls is LiveStore;groq=cls is GroqStore;gemini=cls is GeminiStore
         if args.command=='create':
             options={} if legacy and args.max_calls is None else {'max_calls':args.max_calls}
             if args.local_video:
@@ -44,11 +46,13 @@ def main(argv=None):
             value=store.create(args.goal,**options)
         elif args.command=='prepare':
             if args.confirm_groq_free_account and not groq:raise CompanyError('groq_store_required')
+            if args.confirm_gemini_free_account and not gemini:raise CompanyError('gemini_store_required')
             if legacy:
                 body=store.prepare(args.project_id,valid_hours=args.hours,per_start=2 if args.per_start is None else args.per_start)
             else:
                 if args.per_start is not None:raise CompanyError('free_policy_has_no_per_start_cap')
-                options={'confirm_free_account':args.confirm_groq_free_account} if groq else {}
+                options=({'confirm_free_account':args.confirm_groq_free_account} if groq else
+                         {'confirm_free_account':args.confirm_gemini_free_account} if gemini else {})
                 body=store.prepare(args.project_id,valid_hours=args.hours,**options)
             if args.proposal_out:
                 with os.fdopen(os.open(args.proposal_out,os.O_WRONLY|os.O_CREAT|os.O_EXCL,0o600),'w') as f:
@@ -67,10 +71,10 @@ def main(argv=None):
             value=recovery_proposal(store,args.project_id)
         else:
             if legacy and args.command in ('run','continue'):raise CompanyError('legacy_contract_requires_bounded_start_resume')
-            cls=GroqCompany if groq else LiveCompany if legacy else FreeCompany
-            manager=LiveManagerProvider('groq-free-manager') if groq else LiveManagerProvider()
-            employee=LiveEmployeeProvider('groq-free-employee') if groq else LiveEmployeeProvider()
-            config=GroqConfig.from_env() if groq else LiveConfig.from_env()
+            cls=GeminiCompany if gemini else GroqCompany if groq else LiveCompany if legacy else FreeCompany
+            manager=LiveManagerProvider('gemini-free-manager') if gemini else LiveManagerProvider('groq-free-manager') if groq else LiveManagerProvider()
+            employee=LiveEmployeeProvider('gemini-free-employee') if gemini else LiveEmployeeProvider('groq-free-employee') if groq else LiveEmployeeProvider()
+            config=GeminiConfig.from_env() if gemini else GroqConfig.from_env() if groq else LiveConfig.from_env()
             company=cls(store,manager,employee,config)
             value=company.run(args.project_id,expected_state_hash=args.state_hash,resume=args.command in ('resume','continue'))
         # Deliberately show only operational summaries, never raw role replies or credentials.

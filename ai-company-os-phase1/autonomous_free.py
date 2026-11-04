@@ -276,6 +276,7 @@ class FreeCompany(LiveCompany):
             require(len(raw)<=ai_safety.MAX_RESPONSE_BYTES,'response_too_large')
             envelope=json.loads(raw.decode(),object_pairs_hook=ai_safety.unique_response_object,
                                 parse_constant=lambda _: (_ for _ in ()).throw(ValueError()))
+            envelope=self._normalize_envelope(envelope)
             entry['response_diagnostics'].update(ai_provider_adapter.bounded_response_diagnostics(envelope),envelope_json='parsed')
             self.store.save(p)
             require(isinstance(envelope,dict),'invalid_response_envelope')
@@ -305,6 +306,8 @@ class FreeCompany(LiveCompany):
 
     def _adapter(self,model,base_url,api_key):
         return ai_provider_adapter.require_live_adapter(model=model,base_url=base_url,api_key=api_key)
+
+    def _normalize_envelope(self,envelope):return envelope
 
     def _validate_payload(self,payload):
         require(payload.get('model')==ai_safety.MODEL and payload.get('provider')==ZERO_PRICE

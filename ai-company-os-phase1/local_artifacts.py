@@ -21,12 +21,32 @@ TOOLS = {VIDEO_TOOL: {'network': False, 'uploads': False, 'audio': 'optional loc
 FONT = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
 
 
-def run_command(args, timeout=180):
+COMMAND_STAGES=frozenset(('espeak_audio','ffprobe_audio','ffmpeg_segment','ffmpeg_concat','ffprobe_final','ffmpeg_decode'))
+
+
+class LocalToolError(CompanyError):
+    def __init__(self,stage,category,exit_code=None):
+        require(stage in COMMAND_STAGES and category in (
+            'executable_missing','timeout','exit_nonzero','os_error'),'invalid_local_tool_diagnostics')
+        require(exit_code is None or type(exit_code) is int and -255<=exit_code<=255,'invalid_local_tool_exit_code')
+        super().__init__('local_tool_failed')
+        self.diagnostics={'stage':stage,'category':category,'exit_code':exit_code}
+
+
+def run_command(args, timeout=180, *, stage):
+    require(stage in COMMAND_STAGES,'invalid_local_tool_stage')
     try:
         return subprocess.run(args, check=True, capture_output=True, timeout=timeout).stdout
-    except (OSError, subprocess.SubprocessError):
-        # Never persist process stderr or environment in project/model records.
-        raise CompanyError('local_tool_failed') from None
+    except FileNotFoundError:
+        raise LocalToolError(stage,'executable_missing') from None
+    except subprocess.TimeoutExpired:
+        raise LocalToolError(stage,'timeout') from None
+    except subprocess.CalledProcessError as exc:
+        code=exc.returncode if type(exc.returncode) is int and -255<=exc.returncode<=255 else None
+        raise LocalToolError(stage,'exit_nonzero',code) from None
+    except (OSError,subprocess.SubprocessError):
+        # No stderr, command arguments, environment or paths enter diagnostics.
+        raise LocalToolError(stage,'os_error') from None
 
 
 def _validate_video(spec,check_layout):
@@ -96,23 +116,23 @@ def render_video(spec, folder):
             audio_args=['-an']
             if spec['audio']:
                 wav=work/(str(i)+'.wav')
-                run_command(['espeak-ng','-v','ko','-s','155','-f',str(caption),'-w',str(wav)])
-                voice=json.loads(run_command(['ffprobe','-v','error','-show_format','-of','json',str(wav)]))
+                run_command(['espeak-ng','-v','ko','-s','155','-f',str(caption),'-w',str(wav)],stage='espeak_audio')
+                voice=json.loads(run_command(['ffprobe','-v','error','-show_format','-of','json',str(wav)],stage='ffprobe_audio'))
                 require(float(voice['format']['duration'])<=scene['seconds'],'narration_exceeds_scene')
                 audio_args=['-i',str(wav),'-af','apad','-c:a','aac','-ar','44100','-ac','1']
             run_command(['ffmpeg','-nostdin','-v','error','-f','lavfi','-i',
                 f"color=c=0x142139:s={spec['width']}x{spec['height']}:r=24",
                 *audio_args,'-vf',f"drawtext=fontfile={FONT}:textfile={caption}:expansion=none:fontcolor=white:fontsize={max(16,spec['width']//30)}:x=(w-text_w)/2:y=(h-text_h)/2",
-                '-t',str(scene['seconds']),'-c:v','libx264','-threads','2','-pix_fmt','yuv420p',str(segment)])
+                '-t',str(scene['seconds']),'-c:v','libx264','-threads','2','-pix_fmt','yuv420p',str(segment)],stage='ffmpeg_segment')
         listing=work/'segments.txt';listing.write_text(''.join(f"file '{s.name}'\n" for s in segments))
         staged=work/'result.mp4'
         run_command(['ffmpeg','-nostdin','-v','error','-f','concat','-safe','1','-i',str(listing),
-                     '-c','copy','-movflags','+faststart',str(staged)])
-        probe=json.loads(run_command(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(staged)]))
+                     '-c','copy','-movflags','+faststart',str(staged)],stage='ffmpeg_concat')
+        probe=json.loads(run_command(['ffprobe','-v','error','-show_streams','-show_format','-of','json',str(staged)],stage='ffprobe_final'))
         streams=probe['streams'];video=streams[0];duration=float(probe['format']['duration'])
         require(len(streams)==(2 if spec['audio'] else 1) and video['codec_name']=='h264' and video['width']==spec['width']
                 and video['height']==spec['height'] and abs(duration-total)<0.2,'video_probe_failed')
-        run_command(['ffmpeg','-nostdin','-v','error','-i',str(staged),'-f','null','-'])
+        run_command(['ffmpeg','-nostdin','-v','error','-i',str(staged),'-f','null','-'],stage='ffmpeg_decode')
         staged.rename(output)
     return {'tool':VIDEO_TOOL,'at':now(),'sha256':hashlib.sha256(output.read_bytes()).hexdigest(),
             'duration_seconds':duration,'width':video['width'],'height':video['height'],

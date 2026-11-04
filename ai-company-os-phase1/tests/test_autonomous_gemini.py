@@ -203,6 +203,19 @@ class GeminiTests(unittest.TestCase):
         self.assertEqual(digest(source),receipt['caption_reflow']['source_input_hash'])
         self.assertEqual(0,self.p['user_business_approval_requests'])
 
+    def test_local_failure_event_safe_and_no_automatic_retry(self):
+        from local_artifacts import LocalToolError
+        self.create(video=True);self.models=VideoModels();self.approve()
+        with patch('local_artifacts.execute',side_effect=LocalToolError('ffmpeg_segment','exit_nonzero',1)) as tool:
+            self.run_company()
+            self.assertEqual('local_tool_failed',self.p['reason_code'])
+            event=next(e for e in self.p['events'] if e['event']=='local_tool_failed')
+            self.assertEqual({'stage':'ffmpeg_segment','category':'exit_nonzero','exit_code':1},event['diagnostics'])
+            self.assertIs(False,event['automatic_retry'])
+            calls=len(self.requests);self.run_company()
+            self.assertEqual(calls,len(self.requests));self.assertEqual(1,tool.call_count)
+            self.assertFalse(self.p['artifacts']);self.assertTrue(self.p['active_operation'])
+
     def test_cli_prepare_provider_isolation_and_no_key_derivatives(self):
         with redirect_stdout(StringIO()) as output:
             code=main(['--provider','gemini','--store',str(self.store.root),'prepare',self.p['id'],'--confirm-gemini-free-account'])

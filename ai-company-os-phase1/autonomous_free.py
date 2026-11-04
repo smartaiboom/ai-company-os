@@ -362,7 +362,7 @@ class FreeCompany(LiveCompany):
             if content.startswith('{'):
                 spec=parse(content)
                 if isinstance(spec,dict) and 'tool' in spec:
-                    from local_artifacts import execute
+                    from local_artifacts import execute,LocalToolError
                     require(spec['tool'] in p['local_tools'],'tool_not_allowed')
                     self.store.grant(p)
                     folder=self.store.root/'artifacts'/p['id']/('tool-'+self.current['context_hash'])
@@ -370,7 +370,13 @@ class FreeCompany(LiveCompany):
                     require(folder.resolve().is_relative_to(self.store.root/'artifacts') and not folder.is_symlink(),'invalid_tool_directory')
                     p['events'].append({'at':now(),'event':'local_tool_reserved','input_hash':digest(spec),'task_id':task_id})
                     self.store.save(p)
-                    receipt=execute(spec['tool'],spec,folder)
+                    try:
+                        receipt=execute(spec['tool'],spec,folder)
+                    except LocalToolError as exc:
+                        p['events'].append({'at':now(),'event':'local_tool_failed','task_id':task_id,
+                                            'diagnostics':exc.diagnostics,'automatic_retry':False})
+                        self.store.save(p)
+                        raise
                     receipt['input_hash']=digest(spec)
                     name='video-'+self.current['context_hash']+'.mp4'
                     p['artifacts'][name]={'path':str((folder/'video.mp4').relative_to(self.store.root)), 'sha256':receipt['sha256']}

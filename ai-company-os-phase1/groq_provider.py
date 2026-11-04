@@ -54,6 +54,16 @@ def numeric_rate_headers(headers):
     return result
 
 
+def response_source_hints(headers,http_status=None):
+    """Presence flags are clues only; never attribute an origin or retain values."""
+    names={name.lower() for name in headers.keys() if isinstance(name,str)}
+    valid=type(http_status) is int and 100<=http_status<=599
+    return {'header_presence':{name:name in names for name in (
+                'server','via','www-authenticate','x-request-id','cf-ray','location','content-type')},
+            'redirect_status_observed':http_status in (301,302,303,307,308) if valid else None,
+            'origin_classification':'unverified'}
+
+
 # Exact, finite diagnostic vocabulary, never message/param/failed_generation text.
 # A matching code is a provider claim, not proof of a particular root cause.
 ERROR_CODES={

@@ -12,7 +12,7 @@ from ai_safety import guarded_urlopen
 from ai_provider_adapter import bounded_response_diagnostics
 from autonomous_company import CompanyError,Store,digest,now,parse,require
 from autonomous_groq import key_binding
-from groq_provider import MODEL,ENDPOINT,COST_POLICY,GroqFreeAdapter,numeric_rate_headers,provider_error_diagnostics
+from groq_provider import MODEL,ENDPOINT,COST_POLICY,GroqFreeAdapter,numeric_rate_headers,provider_error_diagnostics,response_source_hints
 from role_json_schema import obj,enum,matches
 
 # This authorization belongs to this Codespace/repository, not a configurable store.
@@ -147,6 +147,7 @@ def run_once():
                     status=getattr(response,'status',None)
                     record['http_status']=status if type(status) is int and 100<=status<=599 else None
                     record['rate_limits']=numeric_rate_headers(response.headers)
+                    record['response_source_hints']=response_source_hints(response.headers,record['http_status'])
                     raw=response.read(131073)
                 record['response_received_at']=now();record['state']='received';persist(record)
                 require(len(raw)<=131072,'response_too_large')
@@ -160,6 +161,7 @@ def run_once():
                     record['provider_error_diagnostics']=provider_error_diagnostics(exception=exc)
                     record['http_status']=record['provider_error_diagnostics']['http_status']
                     record['rate_limits']=numeric_rate_headers(exc.headers or {})
+                    record['response_source_hints']=response_source_hints(exc.headers or {},record['http_status'])
                     record['response_received_at']=now()
                 finally:exc.close()
                 record.update(state='failed',reason_code='http_rejected')

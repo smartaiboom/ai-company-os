@@ -268,7 +268,7 @@ class FreeCompany(LiveCompany):
         try:
             with transport(request,timeout=min(90,max(1,int(timeout)))) as response:
                 response_status=getattr(response,'status',None)
-                self._record_rate_headers(entry,getattr(response,'headers',{}))
+                self._record_rate_headers(entry,getattr(response,'headers',{}),response_status)
                 raw=response.read(ai_safety.MAX_RESPONSE_BYTES+1)
             entry['response_received_at']=now()
             entry['response_diagnostics']={'envelope_json':'not_parsed','response_bytes':min(len(raw),ai_safety.MAX_RESPONSE_BYTES+1)}
@@ -292,7 +292,7 @@ class FreeCompany(LiveCompany):
                 self._record_provider_error(entry,exception=exc)
             if isinstance(exc,HTTPError):
                 code=self._provider_code(exc.code)
-                self._record_rate_headers(entry,exc.headers or {})
+                self._record_rate_headers(entry,exc.headers or {},exc.code)
                 retry=exc.headers.get('Retry-After') if exc.headers else None
                 if isinstance(retry,str) and retry.isdigit():entry['retry_after_seconds']=min(86400,int(retry[:6]))
                 exc.close()
@@ -314,7 +314,7 @@ class FreeCompany(LiveCompany):
     def _request_policy(self):return ZERO_PRICE
     def _attempt_identity(self):return {}
     def _response_policy_fields(self):return {'cost_verified_zero':True}
-    def _record_rate_headers(self,entry,headers):pass
+    def _record_rate_headers(self,entry,headers,http_status=None):pass
     def _record_provider_error(self,entry,*,exception=None,envelope=None,http_status=None):pass
 
     def _operation_identity(self,task_id):

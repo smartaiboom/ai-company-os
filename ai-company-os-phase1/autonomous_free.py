@@ -267,6 +267,7 @@ class FreeCompany(LiveCompany):
         request=adapter.build_request(body,api_key)
         try:
             with transport(request,timeout=min(90,max(1,int(timeout)))) as response:
+                response_status=getattr(response,'status',None)
                 self._record_rate_headers(entry,getattr(response,'headers',{}))
                 raw=response.read(ai_safety.MAX_RESPONSE_BYTES+1)
             entry['response_received_at']=now()
@@ -279,6 +280,7 @@ class FreeCompany(LiveCompany):
             self.store.save(p)
             require(isinstance(envelope,dict),'invalid_response_envelope')
             if 'error' in envelope:
+                self._record_provider_error(entry,envelope=envelope,http_status=response_status)
                 code=envelope['error'].get('code') if isinstance(envelope['error'],dict) else None
                 raise CompanyError(self._provider_code(code))
             self._verify_response_policy(p,envelope)
@@ -286,6 +288,8 @@ class FreeCompany(LiveCompany):
             if isinstance(exc,(ValueError,UnicodeError,RecursionError)) and not isinstance(exc,CompanyError) and entry.get('response_diagnostics',{}).get('envelope_json')=='not_parsed':
                 entry['response_diagnostics']['envelope_json']='invalid'
             code=exc.code if isinstance(exc,CompanyError) else 'free_request_failed'
+            if 'provider_error_diagnostics' not in entry:
+                self._record_provider_error(entry,exception=exc)
             if isinstance(exc,HTTPError):
                 code=self._provider_code(exc.code)
                 self._record_rate_headers(entry,exc.headers or {})
@@ -311,6 +315,7 @@ class FreeCompany(LiveCompany):
     def _attempt_identity(self):return {}
     def _response_policy_fields(self):return {'cost_verified_zero':True}
     def _record_rate_headers(self,entry,headers):pass
+    def _record_provider_error(self,entry,*,exception=None,envelope=None,http_status=None):pass
 
     def _operation_identity(self,task_id):
         return {'phase':self.current['phase'],'task_id':task_id,'context_hash':self.current['context_hash']}

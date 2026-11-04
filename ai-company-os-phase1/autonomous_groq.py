@@ -8,7 +8,7 @@ import os
 from autonomous_company import require,exact,digest,parse,now
 from autonomous_free import FreeStore,FreeCompany,RULES
 from autonomous_live import LiveManagerProvider,LiveEmployeeProvider
-from groq_provider import MODEL,ENDPOINT,COST_POLICY,GroqFreeAdapter,require_adapter,numeric_rate_headers
+from groq_provider import MODEL,ENDPOINT,COST_POLICY,GroqFreeAdapter,require_adapter,numeric_rate_headers,provider_error_diagnostics
 from role_json_schema import response_format,matches
 
 GROQ_RULES={**RULES,'provider_cost_must_be_zero':False,'free_account_verification_required':True}
@@ -109,6 +109,9 @@ class GroqCompany(FreeCompany):
     def _request_policy(self):return COST_POLICY
     def _response_policy_fields(self):return {'free_account_policy_verified':True,'cost_basis':'signed_free_account_attestation'}
     def _record_rate_headers(self,entry,headers):entry['rate_limits']=numeric_rate_headers(headers)
+    def _record_provider_error(self,entry,*,exception=None,envelope=None,http_status=None):
+        diagnostics=provider_error_diagnostics(exception=exception,envelope=envelope,http_status=http_status)
+        if diagnostics is not None:entry['provider_error_diagnostics']=diagnostics
     def _operation_identity(self,task_id):
         return {**super()._operation_identity(task_id),**self._attempt_identity(),'model':MODEL}
     def _verify_response_policy(self,p,envelope):

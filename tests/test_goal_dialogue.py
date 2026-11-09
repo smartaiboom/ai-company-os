@@ -365,3 +365,153 @@ class LiveDialogueIntegrationTests(unittest.TestCase):
         self.assertIn('누가 보나요?', rendered)
         self.assertIn('검토 해시', rendered)
         self.assertNotIn(self.key, rendered)
+
+
+class OneCallAcceptanceTests(unittest.TestCase):
+    def setUp(self):
+        self.root = Path(self.enterContext(tempfile.TemporaryDirectory()))
+        self.store = live.OneCallAcceptanceStore(self.root/'acceptance')
+        self.draft_id = self.store.create()['id']
+        self.key = 'acceptance-test-credential'
+        self.enterContext(patch('socket.socket.connect', side_effect=AssertionError('network forbidden')))
+        self.enterContext(patch('socket.getaddrinfo', side_effect=AssertionError('DNS forbidden')))
+        self.transport = self.enterContext(patch('goal_dialogue_live.send_once'))
+
+    def verify(self):
+        return self.store.verify_project_key(self.draft_id, api_key=self.key, project_api_key=self.key,
+            project=live.ACCEPTANCE_PROJECT, free_tier_confirmed=True, billing_disabled=True)
+
+    def approve(self):
+        prepared = self.store.prepare_consent(self.draft_id)
+        self.store.approve_consent(self.draft_id, prepared['review_hash'], owner_confirmed=True,
+            free_project_confirmed=True, google_data_policy_accepted=True)
+        return prepared
+
+    def test_prepare_requires_real_local_key_comparison_and_explicit_data_consent(self):
+        prepared = self.store.prepare_consent(self.draft_id)
+        self.assertFalse(live.LIVE_TRANSPORT_ENABLED)
+        self.assertFalse(live.POLICY['account_quota_verified'])
+        self.assertEqual(prepared['body']['total_limit'], 1)
+        self.assertEqual(prepared['body']['policy']['scope_hash'], live.ACCEPTANCE_SCOPE_HASH)
+        self.assertEqual(digest(prepared['wire_payload']), prepared['body']['payload_hash'])
+        self.assertEqual(prepared['transmission']['goal'], live.ACCEPTANCE_GOAL)
+        self.assertEqual(prepared['transmission']['max_rounds'], 2)  # Allows questions, not a second call.
+        self.assertEqual(prepared['transmission']['answers'], {})
+        with self.assertRaises(CompanyError): self.store.ask_ai(self.draft_id, api_key=self.key)
+        with self.assertRaises(CompanyError): self.store.approve_consent(self.draft_id, prepared['review_hash'],
+            owner_confirmed=True, free_project_confirmed=True, google_data_policy_accepted=True)
+        for changed in (dict(project_api_key='other'), dict(billing_disabled=False),
+                        dict(free_tier_confirmed=False), dict(project='other project')):
+            options = dict(api_key=self.key, project_api_key=self.key, project=live.ACCEPTANCE_PROJECT,
+                           free_tier_confirmed=True, billing_disabled=True)
+            options.update(changed)
+            with self.assertRaises(CompanyError): self.store.verify_project_key(self.draft_id, **options)
+        self.verify()
+        with self.assertRaises(CompanyError): self.store.approve_consent(self.draft_id, prepared['review_hash'],
+            owner_confirmed=True, free_project_confirmed=True, google_data_policy_accepted=True)
+        prepared = self.store.prepare_consent(self.draft_id)
+        with self.assertRaisesRegex(CompanyError, 'google_unpaid_data_consent_required'):
+            self.store.approve_consent(self.draft_id, prepared['review_hash'], owner_confirmed=True, free_project_confirmed=True)
+        with self.assertRaises(CompanyError): self.store.approve_consent(self.draft_id, 'wrong-hash',
+            owner_confirmed=True, free_project_confirmed=True, google_data_policy_accepted=True)
+        self.transport.assert_not_called()
+        self.assertFalse(self.store.load(self.draft_id)['real_ai']['attempts'])
+        self.assertNotIn(self.key, ''.join(p.read_text() for p in self.store.root.glob('*.json')))
+
+    def test_one_scoped_native_request_questions_usage_and_no_global_unlock(self):
+        self.verify(); self.approve()
+        def response(request, timeout):
+            disk = self.store.load(self.draft_id)
+            self.assertEqual(len(disk['real_ai']['attempts']), 1)
+            self.assertEqual(disk['real_ai']['attempts'][0]['status'], 'reserved')
+            body = json.loads(request.data)
+            self.assertEqual(body['generationConfig']['maxOutputTokens'], 4096)
+            self.assertEqual(request.full_url, live.ENDPOINT)
+            value = json.loads(AdaptiveMock().respond(disk))
+            return BytesIO(json.dumps(envelope(value)).encode())
+        self.transport.side_effect = response
+        result = self.store.ask_ai(self.draft_id, api_key=self.key)  # Global gate stays FALSE.
+        self.assertEqual(len(result['questions']), 1)
+        self.assertEqual(result['real_ai']['attempts'][0]['usage']['total_tokens'], 30)
+        self.assertEqual(result['real_ai']['attempts'][0]['status'], 'completed')
+        self.store.answer(self.draft_id, 'audience', 'AI 초보자')
+        with self.assertRaises(CompanyError): self.store.ask_ai(self.draft_id, api_key=self.key)
+        with self.assertRaises(CompanyError): live.OneCallAcceptanceStore(self.store.root).create()
+        with self.assertRaises(CompanyError): self.store.prepare_consent(self.draft_id)
+        with self.assertRaises(CompanyError): self.store.handoff_video(self.draft_id, self.root/'video')
+        self.assertFalse((self.root/'video').exists())
+        self.assertEqual(self.transport.call_count, 1)
+        ordinary = LiveDialogueStore(self.root/'ordinary')
+        key = ordinary.create('일반 문답')['id']
+        prepared = ordinary.prepare_consent(key)
+        ordinary.approve_consent(key, prepared['review_hash'], owner_confirmed=True, free_project_confirmed=True)
+        with self.assertRaisesRegex(CompanyError, 'live_transport_disabled'):
+            ordinary.ask_ai(key, api_key=self.key)
+        self.assertFalse(live.LIVE_TRANSPORT_ENABLED)
+        self.assertFalse(live.POLICY['account_quota_verified'])
+        self.assertEqual(self.transport.call_count, 1)
+
+    def test_changed_key_account_signature_expiry_input_and_mode_blocked(self):
+        self.verify(); self.approve()
+        with self.assertRaisesRegex(CompanyError, 'active_key_changed'):
+            self.store.ask_ai(self.draft_id, api_key='different-credential')
+        with self.assertRaisesRegex(CompanyError, 'fixed_gemini_binding_required'):
+            self.store.ask_ai(self.draft_id, api_key=self.key, endpoint='https://example.com')
+        p = self.store.load(self.draft_id)
+        p['acceptance']['verification']['record']['project'] = 'tampered'
+        self.store.save(p)
+        with self.assertRaises(CompanyError): self.store.ask_ai(self.draft_id, api_key=self.key)
+        self.verify(); self.approve()
+        future = (datetime.fromisoformat(live.now())+timedelta(hours=2)).isoformat()
+        with patch('goal_dialogue_live.now', return_value=future):
+            with self.assertRaises(CompanyError): self.store.ask_ai(self.draft_id, api_key=self.key)
+        with self.assertRaises(CompanyError): LiveDialogueStore(self.store.root).load(self.draft_id)
+        self.store.clarify(self.draft_id, '추가 자료 전송 금지')
+        with self.assertRaisesRegex(CompanyError, 'acceptance_scope_changed'):
+            self.store.prepare_consent(self.draft_id)
+        self.transport.assert_not_called()
+
+    def test_timeout_interrupt_invalid_json_and_rate_limit_consume_attempt(self):
+        from urllib.error import HTTPError
+        for index, failure in enumerate((TimeoutError(), KeyboardInterrupt(), b'{',
+                                        HTTPError(live.ENDPOINT, 429, 'do not log', {}, None))):
+            self.store = live.OneCallAcceptanceStore(self.root/('failure-'+str(index)))
+            self.draft_id = self.store.create()['id']
+            self.verify(); self.approve()
+            if isinstance(failure, BaseException): self.transport.side_effect = failure
+            else: self.transport.side_effect = lambda *a, **kw: BytesIO(failure)
+            with self.assertRaises((CompanyError, KeyboardInterrupt)):
+                self.store.ask_ai(self.draft_id, api_key=self.key)
+            p = self.store.load(self.draft_id)
+            self.assertEqual(len(p['real_ai']['attempts']), 1)
+            self.assertIn(p['real_ai']['attempts'][0]['status'], ('reserved', 'uncertain'))
+            if isinstance(failure, HTTPError): self.assertEqual(p['real_ai']['attempts'][0]['http_status'], 429)
+            count = self.transport.call_count
+            with self.assertRaises(CompanyError): self.store.ask_ai(self.draft_id, api_key=self.key)
+            with self.assertRaises(CompanyError): self.store.create()
+            self.assertEqual(count, self.transport.call_count)
+            self.assertNotIn('do not log', json.dumps(p))
+
+    def test_cli_secure_input_review_and_scoped_single_request(self):
+        root = str(self.store.root)
+        prefix = ['--acceptance', '--root', root]
+        output = self.enterContext(patch('builtins.print'))
+        self.enterContext(patch.dict('os.environ', GEMINI_API_KEY=self.key))
+        self.assertEqual(main(prefix+['prepare-consent', self.draft_id]), 0)
+        with patch('sys.stdin.isatty', return_value=False):
+            self.assertEqual(main(prefix+['verify-acceptance-key', self.draft_id, '--free-tier-confirmed', '--billing-disabled']), 2)
+        with patch('sys.stdin.isatty', return_value=True), patch('getpass.getpass', return_value=self.key):
+            self.assertEqual(main(prefix+['verify-acceptance-key', self.draft_id, '--free-tier-confirmed', '--billing-disabled']), 0)
+        self.assertEqual(main(prefix+['prepare-consent', self.draft_id]), 0)
+        body = json.loads(self.store._proposal_path(self.draft_id).read_text())
+        self.assertEqual(main(prefix+['approve-consent', self.draft_id, digest(body), '--owner-confirmed',
+                                     '--verified-free-project', '--accept-google-data-policy']), 0)
+        self.transport.side_effect = lambda *a, **kw: BytesIO(json.dumps(envelope(dict(questions=[], sufficient=True,
+            spec=spec(self.store.load(self.draft_id))))).encode())
+        self.assertEqual(main(prefix+['ask-ai', self.draft_id]), 0)
+        self.assertEqual(main(prefix+['ask-ai', self.draft_id]), 2)
+        self.assertEqual(self.transport.call_count, 1)
+        rendered = '\n'.join(str(call) for call in output.call_args_list)
+        self.assertIn('전체 요청 본문', rendered)
+        self.assertIn('제품 개선', rendered)
+        self.assertNotIn(self.key, rendered)

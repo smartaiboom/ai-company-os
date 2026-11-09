@@ -100,3 +100,23 @@ PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live handoff <I
 실제 전송은 `core/goal_dialogue_live.py`의 정책 게이트에서 **비활성**이다. API 키, 환경 플래그, `--owner-confirmed`, `--verified-free-project`만으로 활성화할 수 없다. 계정/키의 무료 프로젝트 연결을 독립적으로 확인하는 운영 검증이 아직 없어 비용 0을 보장할 수 없기 때문이다. 구현된 Gemini wire 경로는 통합 테스트에서만 모의 HTTP로 실행한다. 키는 향후 `GEMINI_API_KEY`로만 읽으며 저장·출력하지 않는다. 게이트를 단순히 켜는 것을 무료 검증의 대안으로 사용하면 안 된다.
 
 2026-11-09 KST 공식 문서 확인: [모델](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite), [가격](https://ai.google.dev/gemini-api/docs/pricing), [한도](https://ai.google.dev/gemini-api/docs/rate-limits). `gemini-3.5-flash-lite`와 구조화 출력 지원, Standard 무료 티어와 유료 티어의 구분을 확인했다. 계정별 실제 쿼터·무료 이용 가능성은 확인하지 않았다. 무료 서비스 입력이 제품 개선에 사용될 수 있으므로 전송 동의 전에 제공자 정책도 확인한다. 유료 전환·모델 대체·검색/도구 호출·자동 재시도는 없다.
+
+## Gemini 실제 1회 인수 테스트 준비
+
+일반 `--live` 전송 차단은 유지한다. `--acceptance`는 지시서의 가상 목표 하나만 허용하는 별도 저장소(`data/gemini_one_call_acceptance`)다. 저장소당 초안은 하나이며 예약·실패·중단을 포함해 API 요청은 최대 1회다. 첫 응답에 질문을 허용하기 위해 문답 라운드는 2로 표시되지만 **실제 호출 예산은 1회**이며 후속 질문 전송은 불가능하다. 영상 회사 handoff도 차단한다.
+
+```bash
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --acceptance create
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --acceptance prepare-consent <ID>
+# 아래는 사용자가 해당 프로젝트의 Free 등급/Billing 비활성 및 키를 직접 확인한 후에만 수행한다.
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --acceptance verify-acceptance-key <ID> --free-tier-confirmed --billing-disabled
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --acceptance prepare-consent <ID>
+# 재준비 출력의 전체 요청·한도·만료·해시·Google 데이터 정책을 검토하고 명시적으로 승인한 뒤에만:
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --acceptance approve-consent <ID> <새 검토해시> --owner-confirmed --verified-free-project --accept-google-data-policy
+# 별도로 승인받은 시점에만 실행한다. 실패해도 반복하지 않는다.
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --acceptance ask-ai <ID>
+```
+
+키 대조는 AI Studio의 `Default Gemini Project`에서 사용자가 복사한 키와 현재 `GEMINI_API_KEY`를 비표시 로컬 터미널 입력으로 비교한다. **키를 채팅·명령 인수·로그에 넣지 않는다.** 비표시 입력이 보장되지 않으면 거절한다. 원격 프로젝트 조회나 추가 API 호출은 없으며 로컬 HMAC 결합만 저장한다. 키 대조와 Free/Billing 확인은 사용자 확인 근거이고, 제공자 측 계정 조회나 실시간 쿼터 검증이 아니다. 스크린샷/환경키 존재만으로 검증·승인을 대신하지 않는다. 계정·결제 상태가 불명확하면 전송하지 않는다.
+
+키 대조 후에는 반드시 동의를 다시 준비한다(상태·승인 해시 변경). 키 변경·서명 변경·입력 변경·1시간 만료 시 차단한다. 전송 본문과 scope/payload 해시는 `prepare-consent` 출력과 해당 초안의 `.review.json`에서 확인한다. 인증키는 본문/검토 파일에 포함하지 않으며 고정 Google endpoint의 인증 헤더에만 사용한다. 무료 입력·응답은 [Google 정책](https://ai.google.dev/gemini-api/terms)에 따라 제품 개선 및 사람의 검토에 이용될 수 있다. 비용 정책은 0원/무료 전용이지만 계정별 무과금·남은 쿼터를 코드가 보장하는 것은 아니다. 유료 전환·자동 재시도·fallback·영상 실행은 없다. 성공 시 검증된 토큰 usage를, 실패 시 제한된 오류 범주/HTTP 상태만 기존 시도 원장에 남긴다.

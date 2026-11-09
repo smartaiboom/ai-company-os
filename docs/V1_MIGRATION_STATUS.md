@@ -5,7 +5,7 @@
 ## 현재 구성
 - `src/`: 기존 Phase 1의 실제 Gemini 3.5 / AI 관리자·직원 협업 엔진을 구성하는 **16개의 기존 Python 모듈을 동일 Git blob SHA로 복사**. 코드를 재작성하거나 기능을 개선한 것이 아니다.
 - `phase1/`: Git 추적 대상 과거 소스·테스트·기록의 완전 보관본.
-- `ai-company-os-phase1/`: 현재 Codespaces의 미추적 data/와 이전 실행 경로를 보호하기 위해 임시 유지하는 구 폴더.
+- `ai-company-os-phase1/`: **2026-11-09 Git 추적 중복 파일 정리 완료**. Codespaces에는 예전 로컬 비추적 데이터가 남을 수 있으므로 삭제하지 않는다.
 - `docs/`: 현재 v1.0 개발 방향과 이전/정리 기준.
 - `tests/`: 독립 테스트 시작. 기존 테스트들이 간접적으로 `app.py` 등 구 코드를 가져오는 것으로 확인돼, 무분별하게 66개를 복사하지 않았다. 대신 `phase1`에 의존하지 않는 핵심 모의 회사 종단 간 테스트 4개와 필요한 fixture만 복사/작성했다. **신규 4개 테스트는 아직 Codespaces에서 실행 확인 전**이며 과거 150개 회귀 테스트를 대체하지 않는다.
 - 루트 `AGENTS.md`: 새 개발 목표 및 데이터/보존·정리 규칙.
@@ -31,7 +31,7 @@
 - Codespaces 실제 프로젝트 파일, 데이터 위치, 비추적 파일, 모듈 간 동적 import, 실행 환경 검증.
 - 루트 `tests/` 신규 독립 테스트 실제 실행·필요한 수정, 과거 150개 중 안전·API·실제 영상 렌더 등 추가해야 할 핵심 회귀 범위 선별. 신규 테스트만 통과한다고 기존 모든 기능을 보증하지 않는다.
 - root v1.0 진입점/CLI/UI, 목표 문답 및 경험 저장·검색·품질 개선 신규 기능.
-- `ai-company-os-phase1/` Git 추적 원본 제거. **새 src 검증 전에는 삭제 금지**.
+- `ai-company-os-phase1/` Git 추적 중복 폴더 제거 완료. 동일한 277개 파일을 `phase1/`에 Git blob SHA 일치로 보존한 뒤 정리했다. 로컬 미추적 파일은 보호 대상.
 
 ## 다음 Codex 작업 (개발 시간을 아끼도록 최소화)
 Codespaces에서 `git status --short`로 로컬 소스·비추적 data 보호 상태 확인 후 `git pull --ff-only`. 루트에서 `PYTHONPATH=src python -B -m unittest discover -s tests -p 'test_*.py' -v`로 **phase1을 Python 검색 경로에 넣지 않고** 새 독립 테스트 4개가 통과하는지 확인. 필요 시 테스트 코드만 최소 수정. 추가로 `PYTHONPATH=src python -B -c 'import video_production_company,autonomous_gemini35'` 등 독립 import 점검. 실제 외부 AI 호출 **0회**, 기존 데이터/원장/백업 쓰기 0회. 테스트 실패 시 내용 보고하고 코드 변경은 최소 범위. `git clean -fd`, `git reset --hard`, 프로젝트 replay 금지. 새 `src/`에 **진짜 사용자 실행 진입점/UI가 없는 상태**이므로 이번 테스트가 실서비스 독립 실행 완료를 의미하지 않는다고 명시.
@@ -54,3 +54,12 @@ Codespaces에서 `git status --short`로 로컬 소스·비추적 data 보호 �
 4. 과거 Git 추적 소스는 `phase1/` 보관본에서 완전히 열람 가능한 상태 유지. 구 `ai-company-os-phase1/` Git 추적 중복 폴더를 제거하기 직전에 사용자에게 범위와 영향을 설명하고 승인받을 것. 기존 실사용 데이터·비추적 파일 삭제 금지.
 
 **현재 상태: 새 v1 src·tests가 구 경로에 대한 모의/모듈 의존성을 제거한 것은 검증됐지만, 기존 실행 폴더 삭제에 대한 충분한 조건은 아직 충족하지 못함.**
+
+
+## 2026-11-09 KST — Git 추적 중복 폴더 정리 완료
+
+- `phase1/`의 277개 Git 추적 파일과 기존 `ai-company-os-phase1/`의 277개 Git 추적 파일 사이에 누락/내용 SHA 차이 0건 확인.
+- GitHub `main`에서 `ai-company-os-phase1/` 경로만 제거. `phase1/`, `src/`, `tests/`, `docs/` 및 현재 `reports/`는 유지. 소스 코드 내용 수정 없음.
+- **이 작업에 추가 실행 테스트를 하지 않음** (파일 정리 전 기존 독립 테스트 4개 통과 근거 보존).
+- Codespaces에서 `git pull` 시 예전 폴더의 추적 코드는 제거된다. `data/` 등 gitignored 자료는 Git이 추적하지 않지만 위치/백업 상태는 GitHub로 확인 불가. 따라서 로컬에서 예전 폴더 자체를 `rm -rf`로 삭제하지 말 것.
+- 사용자용 v1 진입점과 실제 AI/품질/경험 축적 기능은 **다음 제품 개발 단계**다. 폴더 정리의 범위를 넘는 검증은 다음 통합 개발 시 묶어서 수행한다.

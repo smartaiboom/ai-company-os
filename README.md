@@ -30,7 +30,7 @@ PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -p 'test
 PYTHONPATH=core:companies/video python -B -c 'import video_production_company, autonomous_gemini35'
 ```
 
-새 폴더 경로에서 기존 핵심 4개와 목표 문답 통합 3개 테스트를 통과했다. 목표 문답 CLI는 오프라인으로 제공하며 실제 AI 문답·산출물 품질 검토·경험 재사용은 후속 개발 대상이다.
+새 폴더 경로에서 기존 핵심 4개와 목표 문답 통합 3개 테스트를 통과했다. 목표 문답 CLI는 오프라인 및 승인 보호 Gemini 연결 경로를 제공한다. 실제 전송 운영 검증·산출물 품질 검토·경험 재사용은 후속 개발 대상이다.
 
 ## 과거 자료 정리
 
@@ -57,7 +57,7 @@ PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli handoff <초안ID
 
 모든 명령은 동일 ID로 재개한다. 기본 저장소는 `data/goal_dialogues`, 새 영상 초안은 `data/dialogue_video_projects`이며 기존 저장소와 분리한다. `--root`는 하위 명령 앞에 지정한다. `handoff`는 초안 생성만 하며 실행·운영 동의를 부여하지 않는다.
 
-현재 `propose`는 사용자가 준비한 **오프라인 JSON 제안**을 읽는다. 실제 AI 판단이 아니며 고정 질문 생성기도 제공하지 않는다. 테스트에서만 누적 답변에 따라 질문을 바꾸는 모의 관리자를 사용한다. 실 AI 질문은 전송·모델·비용·호출 한도 승인 계약 구현 전까지 차단한다.
+현재 `propose`는 사용자가 준비한 **오프라인 JSON 제안**을 읽는다. 실제 AI 판단이 아니며 고정 질문 생성기도 제공하지 않는다. 테스트에서만 누적 답변에 따라 질문을 바꾸는 모의 관리자를 사용한다. 오프라인 모드는 실 AI 질문을 허용하지 않는다. 별도 Gemini 모드의 승인 경로와 기본 차단 정책은 아래를 참고한다.
 
 제안 형식은 `{"questions":[{"id":"audience","text":"누가 보나요?","reason":"설명 수준 결정"}],"sufficient":false,"spec":{...}}`이다. 충분하면 `questions:[]`, `sufficient:true`를 사용한다. 명세는 아래 형식이며 모든 필드가 필요하다.
 
@@ -74,3 +74,29 @@ PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli handoff <초안ID
 ```
 
 `evidence`는 원래 목표 `goal` 또는 현재 답변의 질문 ID이다. 근거가 없는 값은 추정이다. 참조는 해석의 정확성을 보증하지 않으므로 사용자가 명세를 검토·수정하고 해시로 확정한다. 정정 시 기존 명세는 폐기된다. 라운드 한도는 기본 4회(최대 8회), 질문은 회당 1~3개다. 실패·중단된 제안은 자동 재호출하지 않으며 `revise`로 명세를 직접 검토해 복구할 수 있다. 확정 후 변경은 새 초안으로 시작한다. 목표·명세·답변 전체의 계획 입력이 기존 엔진의 4,000자 한도를 넘으면 연결을 차단한다. 비밀키는 입력하지 않는다(일반 키 패턴은 저장 전 차단하지만 완전한 비밀 탐지는 보장하지 않는다).
+
+## Gemini 관리자 문답 (별도 저장소·실제 전송 기본 차단)
+
+새 초안은 `--live`로 생성한다. 기존 오프라인 초안을 승격하지 않는다. JSON 파일 없이 다음 흐름으로 준비·승인·질문·답변·수정·확정할 수 있다.
+
+```bash
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live create '어린이 안전 교육 영상'
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live prepare-consent <ID>
+# 표시된 전송 내용, 모델, 한도, 무료 계정 여부를 실제로 검토한 뒤에만 승인한다.
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live approve-consent <ID> <검토해시> --owner-confirmed --verified-free-project
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live ask-ai <ID>
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live answer <ID> <질문ID>
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live revise <ID> --text '친근한 애니메이션으로 바꿔 주세요'
+# 답변/수정 후 prepare-consent → approve-consent → ask-ai를 다시 수행한다.
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live show <ID>
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live confirm <ID>
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --live handoff <ID>
+```
+
+`answer`는 값을 생략하면 질문을 보여주고 입력받는다. `confirm`은 명세를 표시하고 명시적인 최종 확인을 받는다. `revise --text`는 다음 관리자에게 보낼 사용자 수정이며 확정 전에 재검토가 필요하다. 기존 JSON `propose`/`revise`, `skip`, 해시를 지정하는 `confirm`도 유지한다. 출력은 기본 한국어이며 자동화 도구는 전역 `--json`을 사용할 수 있다. `--live`를 사용하면 `data/goal_dialogues_gemini35`에 별도 표식·서명키·동의·시도 원장을 저장한다. `--root`로 기존 오프라인 저장소를 지정해도 변환되지 않고 거절된다.
+
+동의는 현재 목표·질문/답변·사용자 수정·현재/사용자 수정 명세·라운드 한도와 **정확한 요청 해시**에 묶인 1회 전송이며 1시간 만료다. 입력이 바뀌면 재승인해야 한다. 원래 목표를 바꾸려면 새 초안을 만든다. 기본 총 호출 한도는 4회(`create --max-rounds 1~8`), 실패·중단 예약도 소모한다. 타임아웃/잘못된 응답/중단 후 재시도와 원장 초기화는 지원하지 않는다. 사용자가 명세를 직접 검토하는 기존 경로는 유지하되 미확정 호출은 계속 차단한다. 영상 초안 생성은 영상 실행 동의가 아니다.
+
+실제 전송은 `core/goal_dialogue_live.py`의 정책 게이트에서 **비활성**이다. API 키, 환경 플래그, `--owner-confirmed`, `--verified-free-project`만으로 활성화할 수 없다. 계정/키의 무료 프로젝트 연결을 독립적으로 확인하는 운영 검증이 아직 없어 비용 0을 보장할 수 없기 때문이다. 구현된 Gemini wire 경로는 통합 테스트에서만 모의 HTTP로 실행한다. 키는 향후 `GEMINI_API_KEY`로만 읽으며 저장·출력하지 않는다. 게이트를 단순히 켜는 것을 무료 검증의 대안으로 사용하면 안 된다.
+
+2026-11-09 KST 공식 문서 확인: [모델](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite), [가격](https://ai.google.dev/gemini-api/docs/pricing), [한도](https://ai.google.dev/gemini-api/docs/rate-limits). `gemini-3.5-flash-lite`와 구조화 출력 지원, Standard 무료 티어와 유료 티어의 구분을 확인했다. 계정별 실제 쿼터·무료 이용 가능성은 확인하지 않았다. 무료 서비스 입력이 제품 개선에 사용될 수 있으므로 전송 동의 전에 제공자 정책도 확인한다. 유료 전환·모델 대체·검색/도구 호출·자동 재시도는 없다.

@@ -1,8 +1,8 @@
 # 구현 현황 — 2026-11-09 KST
 
-- `core/goal_dialogue.py`: 별도 영속 초안, KST 이력, 적응형 오프라인 관리자 인터페이스, 답변 정정/건너뛰기, 중복·라운드 제한, 근거/가정 명세 검증, 사용자 해시 확정, 불확실 작업 재시도 차단.
-- `companies/video/goal_dialogue_cli.py`: 생성·질문 제안·답변·재개·명세 수정/확정·새 VideoProductionStore 초안 연결. 확정 명세와 답변을 기존 goal 채널로 전달하며 실행 권한 계약은 유지.
-- README/ARCHITECTURE에 실행법·JSON 형식·제약 기록. 테스트만 임시 디렉터리를 사용했으며 기존 프로젝트·원장·백업은 변경하지 않음.
-- 통합 검증: `PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -p 'test_*.py' -v` — **7개 통과**(기존 핵심 4개 유지). 적응형 추가 질문, 재개·정정·건너뛰기, 중복/확정 차단, CLI, 실제 영상 Store 초안과 기존 Company 계획 루프에서 답변에 따른 계획 변경을 오프라인 하네스로 검증.
-- 실제 AI API 호출 0회, 기능/테스트 네트워크 0회(소켓/DNS 차단). Git 동기화는 별도 수행. 실 Gemini 질문·실 영상 제작을 실행하거나 검증한 결과가 아님.
-- 미완료: 실 AI 문답의 전송 범위·모델·무료/유료·호출 제한 승인 계약. 현재 기본 차단하며 CLI는 사용자 제공 오프라인 제안만 지원. 영상 품질 개선·실 제작·경험 재사용은 후속 범위. 4,000자 계획 입력 한도 초과는 연결 차단, 불확실 초안 생성은 수동 확인 필요.
+- Gemini 관리자 연결: `core/goal_dialogue_live.py`에 별도 live mode/저장소, 기존 HMAC 서명·Gemini35 wire 어댑터 재사용, 현재 상태/입력/정확한 payload 해시에 묶인 1시간·1회 전송 동의, 누적 호출 한도, 디스크 선예약, 불확실 호출 재전송 차단 구현. 이전 승인·시도 이력 보존. 기존 오프라인 저장소를 자동 승격하지 않음.
+- 공통 문답 검증 재사용 및 사용자 자연어 수정/근거 추적 추가. CLI에 `--live`, `prepare-consent`, `approve-consent`, `ask-ai`, 질문별 대화 입력, 자연어 `revise --text`, 명세 표시 후 최종 확인 추가. 기존 JSON 방식과 영상 회사 handoff 유지. README/ARCHITECTURE에 실제 명령·운영 제한 기록.
+- 통합 명령: `PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -p 'test_*.py' -v` — **14개 통과**(기존 7개 + Gemini 경로 7개). 모의 native HTTP 요청/응답, 입력·상태·서명·만료 바인딩, 승인 누락, 고정 모델/endpoint, 답변/수정의 다음 요청 반영, 준비 완료 명세, CLI, 확정 후 영상 Store 초안 연결, 중복/예산/잠금/중단/타임아웃/잘못된 응답/비용/비밀키 차단 검증. 기존 실제 Company 계획 루프 오프라인 검증도 유지.
+- 실제 AI API 호출 **0회**. 기능/테스트 외부 네트워크 **0회**(소켓/DNS 차단, HTTP는 모의 응답). 개발 중 공식 모델·가격·한도 문서 조회와 Git 동기화만 별도 수행. 테스트 저장소는 임시 디렉터리만 사용했으며 기존 프로젝트·원장·백업·별도 보관본을 변경하거나 재실행하지 않음. 영상 실행 동의 및 기존 회사 실행 엔진 계약 변경 없음.
+- 공식 확인: [모델](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite), [가격](https://ai.google.dev/gemini-api/docs/pricing), [한도](https://ai.google.dev/gemini-api/docs/rate-limits). 문서의 모델/구조화 출력 및 무료·유료 티어 구분을 확인했지만 계정별 실제 무료 쿼터나 실시간 API 이용 가능성을 검증한 것은 아님.
+- 남은 운영 검증: 계정/키의 무료 프로젝트 연결과 쿼터를 독립 검증하는 경로. 그 전까지 **실제 전송 정책 게이트는 비활성**이며 키·env·사용자 확인 플래그만으로 활성화되지 않는다. 모의 HTTP 테스트에서만 게이트를 대체했다. 실 Gemini 대화·실 영상 제작 성공을 주장하지 않는다. 기존 4,000자 handoff 입력 한도와 불확실 호출의 수동 확인 제한은 유지.

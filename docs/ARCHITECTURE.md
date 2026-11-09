@@ -38,4 +38,12 @@ docs/                       # 현재 유효한 설계
 
 `core/goal_dialogue.py`는 독립 표식 저장소, 원자적 쓰기·상태 해시·프로세스 잠금을 기존 Store에서 재사용한다. 별도 초안에 원래 목표, 질문/답변 변경 이력, KST 시각, 제한 라운드, 명세, 사용자 확정 해시를 보존한다. 공급자는 명시적 offline 인터페이스만 허용하며 실 API 어댑터는 제공하지 않는다. 입력 JSON의 필드·근거 참조·중복 질문을 검증한다. 예약 후 실패한 제안과 프로젝트 생성은 자동 재시도하지 않는다.
 
-영상 진입점은 `companies/video/goal_dialogue_cli.py`다. 확정 명세·누적 답변은 새 VideoProductionStore 프로젝트의 goal에 JSON으로 포함되어 기존 Company의 plan 컨텍스트에 도달한다. 기존 전송 필드·prepare/approve·원장·비용·상태 해시 계약은 수정하지 않는다. 새 프로젝트는 실행 미승인 상태이며 기존 동의는 재사용하지 않는다. 자동 제작·실 AI 문답 승인 계약·실 영상 품질 평가·경험 재사용은 후속 개발이다.
+영상 진입점은 `companies/video/goal_dialogue_cli.py`다. 확정 명세·누적 답변은 새 VideoProductionStore 프로젝트의 goal에 JSON으로 포함되어 기존 Company의 plan 컨텍스트에 도달한다. 기존 전송 필드·prepare/approve·원장·비용·상태 해시 계약은 수정하지 않는다. 새 프로젝트는 실행 미승인 상태이며 기존 동의는 재사용하지 않는다. 자동 제작·실 AI 문답 운영 검증·실 영상 품질 평가·경험 재사용은 후속 개발이다. Gemini 문답 승인 계약은 아래 별도 모드에서 제공한다.
+
+## Gemini 관리자 연결
+
+`core/goal_dialogue_live.py`의 LiveDialogueStore는 독립 mode/표식, `simulation=False`, 별도 real_ai 원장과 서명키를 사용한다. 기존 DialogueStore의 생성 훅·응답 검증·답변·명세·확정·handoff를 재사용하며 기존 오프라인 데이터를 자동 변경하지 않는다. 모델 판단은 동일 questions/sufficient/spec 구조로만 받는다. 질문 목록은 코드에 고정하지 않는다. user_notes는 사용자 자연어 수정이며 `note-N` 근거로 추적한다. 사용자 수정 명세도 다음 전송 입력에 포함한다.
+
+기존 LiveStore의 HMAC 서명 함수를 독립 저장소에서 재사용한다. prepare-consent는 별도 제안 파일에 상태·입력·정확한 wire payload 해시, 고정 Gemini 3.5 모델/endpoint, 0비용/무료 전용 정책, 1회/전체 호출 한도 및 KST 만료를 묶는다. approve-consent는 검토 해시·현재 상태·명시적 사용자/무료 계정 확인을 검사하고 서명한다. 이전 서명 동의는 보존한다. ask-ai는 서명·입력 바인딩·미소진·만료·전체 예산·네임스페이스를 확인한다. 실제 전송은 무료 계정/키 검증 구현 전까지 코드 정책에서 기본 차단한다. 사용자 확인만으로 무료 계정이 검증되었다고 표시하지 않는다.
+
+네트워크 허용 시의 경로는 기존 Gemini35Adapter 요청/응답 정규화를 재사용하며, 호출 예약을 디스크에 먼저 기록하고 잠금을 유지한다. 제한 크기·정상 종료·usage·비용·JSON·근거·중복 질문·라운드를 검증한 뒤에만 completed로 저장한다. 실패는 uncertain, 프로세스 중단은 reserved로 남고 자동 재전송되지 않는다. 응답 원문·임의 오류·키는 원장에 남기지 않는다. 별도 HTTP opener는 프록시 환경과 리다이렉트를 허용하지 않는다. 전송 allowlist에 원장·서명·로컬 경로는 포함하지 않는다. 영상 Store.prepare/approve 및 기존 실행 원장은 수정하지 않았다.

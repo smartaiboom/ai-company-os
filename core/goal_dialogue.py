@@ -23,9 +23,12 @@ def validate_spec(spec, state):
         item = spec[field]
         exact(item, ('value', 'evidence'))
         safe_text(item['value'], 600)
-        require(isinstance(item['evidence'], list) and len(set(item['evidence'])) == len(item['evidence']), 'invalid_evidence')
+        require(isinstance(item['evidence'], list)
+                and all(isinstance(ref, str) for ref in item['evidence'])
+                and len(set(item['evidence'])) == len(item['evidence']), 'invalid_evidence')
         for ref in item['evidence']:
             require(isinstance(ref, str) and (ref == 'goal' or
+                    ref in {n['id'] for n in state.get('user_notes', [])} or
                     ref in state['answers'] and state['answers'][ref]['status'] == 'answered'), 'invalid_evidence')
     # Evidence references are traceability, never proof that a model's interpretation is correct.
     return spec
@@ -46,8 +49,12 @@ class DialogueStore(Store):
                  goal=goal, created_at=now(), limits=dict(max_calls=20, max_revisions_per_task=1, max_total_revisions=2),
                  max_rounds=max_rounds, rounds=0, questions=[], answers={}, history=[], spec=None,
                  status='draft', confirmed_hash=None, handoff=None)
+        self._initialize_state(p)
         self.save(p)
         return deepcopy(p)
+
+    def _initialize_state(self, p):
+        pass
 
     def _event(self, p, action, **data):
         p['history'].append(dict(at=now(), action=action, **deepcopy(data)))
@@ -67,24 +74,29 @@ class DialogueStore(Store):
             p['status'] = 'awaiting_proposal'
             self._event(p, 'proposal_reserved', provider=provider.name)
             value = parse(provider.respond(deepcopy(p)))
-            exact(value, ('questions', 'spec', 'sufficient'))
-            require(type(value['sufficient']) is bool and isinstance(value['questions'], list), 'invalid_proposal')
-            qs = value['questions']
-            require((value['sufficient'] and not qs) or (not value['sufficient'] and 1 <= len(qs) <= 3), 'invalid_questions')
-            require(p['rounds'] < p['max_rounds'] or not qs, 'round_limit_requires_spec')
-            seen_ids = {q['id'] for q in p['questions']}
-            seen_text = {q['text'].strip().casefold() for q in p['questions']}
-            for q in qs:
-                exact(q, ('id', 'text', 'reason'))
-                require(isinstance(q['id'], str) and ID.fullmatch(q['id']) and q['id'] not in seen_ids, 'duplicate_question')
-                safe_text(q['text'], 500); safe_text(q['reason'], 500)
-                normalized = q['text'].strip().casefold()
-                require(normalized not in seen_text, 'duplicate_question')
-                seen_ids.add(q['id']); seen_text.add(normalized)
-            p['spec'] = deepcopy(validate_spec(value['spec'], p))
-            p['questions'].extend(deepcopy(qs))
-            p['status'] = 'review' if value['sufficient'] else 'draft'
-            return self._event(p, 'proposal_received', provider=provider.name, proposal=value)
+            return self._accept_proposal(p, value, provider.name)
+
+    def _accept_proposal(self, p, value, provider_name):
+        exact(value, ('questions', 'spec', 'sufficient'))
+        require(type(value['sufficient']) is bool and isinstance(value['questions'], list), 'invalid_proposal')
+        qs = value['questions']
+        require((value['sufficient'] and not qs) or (not value['sufficient'] and 1 <= len(qs) <= 3), 'invalid_questions')
+        require(p['rounds'] < p['max_rounds'] or not qs, 'round_limit_requires_spec')
+        seen_ids = {q['id'] for q in p['questions']}
+        seen_text = {q['text'].strip().casefold() for q in p['questions']}
+        for q in qs:
+            exact(q, ('id', 'text', 'reason'))
+            require(isinstance(q['id'], str) and ID.fullmatch(q['id']) and q['id'] not in seen_ids
+                    and q['id'] != 'goal' and not q['id'].startswith('note-'), 'duplicate_question')
+            safe_text(q['id'], 64)
+            safe_text(q['text'], 500); safe_text(q['reason'], 500)
+            normalized = q['text'].strip().casefold()
+            require(normalized not in seen_text, 'duplicate_question')
+            seen_ids.add(q['id']); seen_text.add(normalized)
+        p['spec'] = deepcopy(validate_spec(value['spec'], p))
+        p['questions'].extend(deepcopy(qs))
+        p['status'] = 'review' if value['sufficient'] else 'draft'
+        return self._event(p, 'proposal_received', provider=provider_name, proposal=value)
 
     def answer(self, draft_id, question_id, value=None, *, skip=False):
         if not skip: safe_text(value, 1500)
@@ -105,6 +117,20 @@ class DialogueStore(Store):
             require(all(q['id'] in p['answers'] for q in p['questions']), 'pending_answers')
             p['spec'] = deepcopy(validate_spec(spec, p)); p['status'] = 'review'
             return self._event(p, 'user_spec_revision', spec=spec)
+
+    def clarify(self, draft_id, value):
+        """Natural-language correction for the next manager proposal, with user evidence."""
+        safe_text(value, 1500)
+        with self.lock(draft_id):
+            p = self.load(draft_id)
+            require(p['status'] in ('draft', 'review') and p['handoff'] is None, 'dialogue_locked')
+            notes = p.setdefault('user_notes', [])
+            require(len(notes) < 20 and not any(n['value'] == value for n in notes), 'duplicate_or_excess_note')
+            index = len(notes)+1
+            while 'note-'+str(index) in {q['id'] for q in p['questions']}: index += 1
+            note = dict(id='note-'+str(index), value=value)
+            notes.append(note); p['status'] = 'draft'
+            return self._event(p, 'user_clarification', note=note)
 
     def confirm(self, draft_id, review_hash):
         with self.lock(draft_id):
@@ -133,6 +159,6 @@ class DialogueStore(Store):
 def planning_goal(p):
     """Use existing approved goal channel, preserving all live consent/context contracts."""
     return json.dumps(dict(original_goal=p['goal'], requirements=p['spec'],
-                           user_answers=p['answers'], specification_hash=p['confirmed_hash'],
+                           user_answers=p['answers'], user_notes=p.get('user_notes', []), specification_hash=p['confirmed_hash'],
                            notice='User confirmed specification. Evidence references trace user input; empty evidence is an assumption. No execution consent.'),
                       ensure_ascii=False, separators=(',', ':'))

@@ -23,14 +23,14 @@ ai-company-os/
 
 ## 실행·개발 주의
 
-Python 모듈은 **내용을 바꾸지 않고 위치만 옮겼다**. 현재 import는 단일 패키지가 아니라 파일명 기준이므로 로컬에서 다음 경로를 지정한다.
+현재 import는 단일 패키지가 아니라 파일명 기준이므로 로컬에서 다음 경로를 지정한다.
 
 ```bash
 PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -p 'test_*.py' -v
 PYTHONPATH=core:companies/video python -B -c 'import video_production_company, autonomous_gemini35'
 ```
 
-위 명령은 새 폴더 기준 검증 명령이다. **폴더 이동 이후에는 아직 실제 실행 결과를 확인하지 않았다.** 기존 검증(16개 import/모의 4개 통과)은 이전 `src/`에서 이루어졌다. v1.0 사용자용 실행 진입점·목표 문답·실제 산출물 품질 검토·경험 재사용은 개발 대상이다.
+새 폴더 경로에서 기존 핵심 4개와 목표 문답 통합 3개 테스트를 통과했다. 목표 문답 CLI는 오프라인으로 제공하며 실제 AI 문답·산출물 품질 검토·경험 재사용은 후속 개발 대상이다.
 
 ## 과거 자료 정리
 
@@ -41,3 +41,36 @@ GitHub에 없는 과거 로컬 데이터·원장·백업·비밀키는 삭제/�
 ## 목표
 
 사용자 목표 → AI 관리자의 필요 질문 → 전문 AI 직원의 실제 제작 → 결과물 검토·수정 → 사용자 평가 → 경험·성공 방식 저장 → 다음 작업에서 재사용 및 성능 비교. 장기적으로 사용자 개입을 줄이고 회사의 자율 운영을 강화한다. 향후 AI Company OS vs ChatGPT 비교 콘텐츠로 품질·효율 변화 검증.
+
+## 목표 구체화 문답 (오프라인)
+
+```bash
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli create '안전 교육 영상'
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli show <초안ID>
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli propose <초안ID> proposal.json
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli answer <초안ID> audience '초등학생'
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli skip <초안ID> duration
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli revise <초안ID> spec.json
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli confirm <초안ID> <show의-review_hash>
+PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli handoff <초안ID>
+```
+
+모든 명령은 동일 ID로 재개한다. 기본 저장소는 `data/goal_dialogues`, 새 영상 초안은 `data/dialogue_video_projects`이며 기존 저장소와 분리한다. `--root`는 하위 명령 앞에 지정한다. `handoff`는 초안 생성만 하며 실행·운영 동의를 부여하지 않는다.
+
+현재 `propose`는 사용자가 준비한 **오프라인 JSON 제안**을 읽는다. 실제 AI 판단이 아니며 고정 질문 생성기도 제공하지 않는다. 테스트에서만 누적 답변에 따라 질문을 바꾸는 모의 관리자를 사용한다. 실 AI 질문은 전송·모델·비용·호출 한도 승인 계약 구현 전까지 차단한다.
+
+제안 형식은 `{"questions":[{"id":"audience","text":"누가 보나요?","reason":"설명 수준 결정"}],"sufficient":false,"spec":{...}}`이다. 충분하면 `questions:[]`, `sufficient:true`를 사용한다. 명세는 아래 형식이며 모든 필드가 필요하다.
+
+```json
+{
+  "audience": {"value":"미정", "evidence":[]},
+  "deliverable": {"value":"안전 교육 영상", "evidence":["goal"]},
+  "style": {"value":"미정", "evidence":[]},
+  "quality": {"value":"미정", "evidence":[]},
+  "constraints_budget": {"value":"미정", "evidence":[]},
+  "summary":"확인할 영상 요구사항",
+  "assumptions":["근거가 없는 항목은 미확정 가정"]
+}
+```
+
+`evidence`는 원래 목표 `goal` 또는 현재 답변의 질문 ID이다. 근거가 없는 값은 추정이다. 참조는 해석의 정확성을 보증하지 않으므로 사용자가 명세를 검토·수정하고 해시로 확정한다. 정정 시 기존 명세는 폐기된다. 라운드 한도는 기본 4회(최대 8회), 질문은 회당 1~3개다. 실패·중단된 제안은 자동 재호출하지 않으며 `revise`로 명세를 직접 검토해 복구할 수 있다. 확정 후 변경은 새 초안으로 시작한다. 목표·명세·답변 전체의 계획 입력이 기존 엔진의 4,000자 한도를 넘으면 연결을 차단한다. 비밀키는 입력하지 않는다(일반 키 패턴은 저장 전 차단하지만 완전한 비밀 탐지는 보장하지 않는다).

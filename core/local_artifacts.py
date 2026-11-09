@@ -21,7 +21,7 @@ TOOLS = {VIDEO_TOOL: {'network': False, 'uploads': False, 'audio': 'optional loc
 FONT = '/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc'
 
 
-COMMAND_STAGES=frozenset(('espeak_audio','ffprobe_audio','ffmpeg_segment','ffmpeg_concat','ffprobe_final','ffmpeg_decode'))
+COMMAND_STAGES=frozenset(('espeak_audio','local_tts','ffprobe_audio','ffmpeg_segment','ffmpeg_concat','ffprobe_final','ffmpeg_decode'))
 
 
 class LocalToolError(CompanyError):

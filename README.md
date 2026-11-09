@@ -120,3 +120,31 @@ PYTHONPATH=core:companies/video python -B -m goal_dialogue_cli --acceptance ask-
 키 대조는 AI Studio의 `Default Gemini Project`에서 사용자가 복사한 키와 현재 `GEMINI_API_KEY`를 비표시 로컬 터미널 입력으로 비교한다. **키를 채팅·명령 인수·로그에 넣지 않는다.** 비표시 입력이 보장되지 않으면 거절한다. 원격 프로젝트 조회나 추가 API 호출은 없으며 로컬 HMAC 결합만 저장한다. 키 대조와 Free/Billing 확인은 사용자 확인 근거이고, 제공자 측 계정 조회나 실시간 쿼터 검증이 아니다. 스크린샷/환경키 존재만으로 검증·승인을 대신하지 않는다. 계정·결제 상태가 불명확하면 전송하지 않는다.
 
 키 대조 후에는 반드시 동의를 다시 준비한다(상태·승인 해시 변경). 키 변경·서명 변경·입력 변경·1시간 만료 시 차단한다. 전송 본문과 scope/payload 해시는 `prepare-consent` 출력과 해당 초안의 `.review.json`에서 확인한다. 인증키는 본문/검토 파일에 포함하지 않으며 고정 Google endpoint의 인증 헤더에만 사용한다. 무료 입력·응답은 [Google 정책](https://ai.google.dev/gemini-api/terms)에 따라 제품 개선 및 사람의 검토에 이용될 수 있다. 비용 정책은 0원/무료 전용이지만 계정별 무과금·남은 쿼터를 코드가 보장하는 것은 아니다. 유료 전환·자동 재시도·fallback·영상 실행은 없다. 성공 시 검증된 토큰 usage를, 실패 시 제한된 오류 범주/HTTP 상태만 기존 시도 원장에 남긴다.
+
+## 수입한 영상 클립으로 9:16 쇼츠 제작 (오프라인)
+
+기존 SVG/espeak 제작 계약은 유지하며, 새 경로는 `companies/video/ai_clip_pipeline.py`다. 외부 생성/로그인/업로드를 자동화하지 않는다. Flow·Pika·Kling 등은 **manual_import**이며 현재 무료·상업 이용·워터마크 조건은 기본 미확인이다. 웹 크레딧과 API 비용은 별개다. 향후 API 공급자는 SceneProvider 계약으로 추가할 수 있지만 DisabledAPIProvider는 항상 실행을 거절한다.
+
+```bash
+# 기존 대본에서 3개 장면/클립 프롬프트를 만드는 Codex 기준선 (실 AI 관리자 호출 아님)
+PYTHONPATH=core:companies/video python -B -m ai_clip_pipeline baseline data/video_ai_clip_review/my-job
+# 또는 관리자/사용자가 준비한 scene_plan.json으로 생성
+PYTHONPATH=core:companies/video python -B -m ai_clip_pipeline create data/video_ai_clip_review/my-job scene_plan.json
+# 사용자가 웹 서비스에서 직접 생성·다운로드한 원본과 권리 근거를 inbox에 보관한 뒤 수입
+PYTHONPATH=core:companies/video python -B -m ai_clip_pipeline import data/video_ai_clip_review/my-job data/my-inbox scene1.mp4 scene-1 source.json
+# 모든 장면을 수입한 후, 기존 MeloTTS 환경으로 로컬 합성/편집
+PYTHONPATH=core:companies/video python -B -m ai_clip_pipeline render data/video_ai_clip_review/my-job
+```
+
+새 job 폴더는 없어야 한다. `baseline`과 `create` 중 하나만 사용한다. 장면별 파일을 수입해야 하며 duplicate hash·경로 이탈·symlink·가짜 확장자·비정상 미디어는 거절한다. 원본은 바꾸지 않고 해시를 검증한 복사본만 사용한다. `fixtures <새 inbox>` 명령은 로컬 코덱 테스트 영상을 생성하며 **AI 영상이 아니다**. source.json 예제도 함께 생성하므로 형식을 확인할 수 있다. 실제 클립은 provider, external_ai_clip 근거, KST 생성시각, license/terms_url/usage_rights, commercial_use, allowed_to_publish, watermark, rights_verified/rights_evidence, estimated_cost/actual_cost를 해당 원본에 맞게 기록한다. 자동으로 권리를 검증했다고 간주하지 않는다.
+
+기본 720×1280 레터박스는 피사체와 워터마크를 보존한다. crop은 계획에 명시하고 워터마크 absent 확인이 필요하다. 짧은 클립 반복은 `allow_repeat`가 true일 때만 허용하고 횟수를 기록한다. 원본 음성은 버리고 로컬 MeloTTS를 사용한다. 측정된 음성이 총 길이를 넘으면 실패하며 임의로 가속하거나 자르지 않는다. 24fps 타임라인과 60/60/180px 좌우/하단 안전여백의 한국어 자막을 합성한다. 발화 경계는 실측, 구절별 자막 시간은 문자 비중 추정으로 단어 정렬을 보장하지 않는다.
+
+MeloTTS는 기존 `data/tts_korean_review` 런타임/모델을 읽기 전용 재사용하고 실행 중 네트워크·DNS를 차단한다. 다운로드/자동 재시도/espeak 대체는 없다. 실행이 중단·실패한 job은 덮어쓰거나 재실행하지 않고 파일을 보존한다. 최종 MP4/음성/ASS·SRT/타임라인/원본 영수증/키프레임은 job 폴더에 저장하며 권리 미확인 시 publish_ready=false다. fixture가 하나라도 있으면 pending_external_clip이며 AI 클립 완성본이 아니다. 영상 회사의 `offline_clip_decision_context()`/`create_offline_clip_job()`은 향후 관리자 계획 입력 경계이며 기존 LiveCompany 권한·도구 목록을 확대하지 않는다.
+
+```bash
+# 기존 회귀 + 새 단위/미디어 테스트 (짧은 합성 테스트 음성 사용)
+PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -v
+# 실제 MeloTTS와 60초 기술 시안까지 한 번에 검증: 새 경로를 지정
+AI_CLIP_ACCEPTANCE_ROOT=data/video_ai_clip_review/my-acceptance PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -v
+```

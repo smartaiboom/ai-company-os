@@ -45,3 +45,19 @@ class VideoProductionCompany(Gemini35Company):
                 'stop or request operational permission instead of claiming that requirement met. '
                 'Keyframes/timing/source receipts are review evidence, not proof the text model watched or heard the media. '
                 'Actual MP4 plus accepted input/receipt required for delivery. Keep production choices and quality judgment with AI roles.')
+
+
+def offline_clip_decision_context():
+    """Capabilities for a future manager decision, without granting live tool permission."""
+    from ai_clip_pipeline import PROVIDERS, DisabledAPIProvider
+    return dict(workflow='offline_imported_clip_shorts_v1', providers=deepcopy(PROVIDERS),
+                future_api=DisabledAPIProvider().capabilities(), output_size=[720,1280],
+                fit_default='letterbox', speech='MeloTTS_local_cpu', incurred_cost_limit=0,
+                external_api_enabled=False, manager_must_supply='validated scene plan and source/rights receipts',
+                live_company_tool_catalog_unchanged=True)
+
+
+def create_offline_clip_job(folder, plan):
+    """Explicit local job; never creates/approves/resumes a Gemini project."""
+    from ai_clip_pipeline import ClipJob
+    return ClipJob(folder).create(plan)

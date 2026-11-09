@@ -35,3 +35,12 @@
 - 공식 TTS 체크포인트 207,860,748 bytes + 코드 지정 한국어 보조 인코더 475,782,997 bytes 및 소형 토크나이저 등 모델 파일 합계 688,518,638 bytes 다운로드. 출처: myshell-ai GitHub/Hugging Face, 코드 지정 보조 모델 원본, PyPI/공식 PyTorch CPU/conda-forge/NLTK. 독립 런타임 약2.40GB, 모델 약0.689GB, 캐시 약0.065GB; 설치 후 디스크 여유 약11GB. 세부 라이선스/용량은 로컬 평가·영수증에 기록.
 - 통합 실행/파일 검증: 네트워크·DNS 차단 상태에서 로컬 합성 → ffprobe → 전체 FFmpeg 디코딩 통과. 실제 신호 RMS -18.01dBFS, 피크 -2.70dBFS, 클리핑 0%, 전체 무음 아님. 15~20초 범위 충족. 이 수치는 청취·발음 품질 보증이 아님.
 - 이번 외부 AI API 호출 **0회**, 유료 서비스/업로드 없음. 기존 Gemini 원장 completed **1/1** 유지. 기존 코드·확정 초안/원장·원본 영상/대본은 전후 파일 해시로 불변 확인. 모델·환경·WAV는 gitignored 로컬에만 보관. Codespaces에서 WAV 우클릭 → Download 후 청취하여 다음 통합 여부 결정.
+
+## 클립 기반 9:16 쇼츠 경로 — 2026-11-09 KST
+- 공급자 비종속 장면/클립 계약, Flow·Pika·Kling manual_import와 차단된 api_adapter 경계, 안전한 inbox 수입·ffprobe/디코딩·중복/원본 해시·권리/워터마크 기록 구현. 기존 회사에 별도 오프라인 계획/팩토리 경계 추가, 기존 Gemini 도구·승인 계약은 유지.
+- 진입점: `PYTHONPATH=core:companies/video python -B -m ai_clip_pipeline`의 baseline/create → import → render. 기존 MeloTTS 런타임·모델 오프라인 재사용, 실측 음성 기반 장면·ASS/SRT 자막 배치, 720×1280 레터박스/명시 crop, 음성 초과/중복 실행 차단. core 실행 진단은 local_tts stage만 추가.
+- 실제 영상: `data/video_ai_clip_review/20261109T145000_KST/shorts/preview.mp4` — **60.000초, 720×1280·9:16·SAR1:1, H.264/24fps·1,440프레임, AAC 44.1kHz 모노, MeloTTS**, 3,474,902 bytes. 프롬프트3개/음성6개/자막14개/타임라인·출처·권리 영수증·키프레임·review.md 보존.
+- 외부 AI 클립 미제공으로 비AI 코덱 테스트 패턴3개 사용. **pending_external_clip, ai_generated_clip_used=false, publish_ready=false**. 실제 무료 웹 클립은 사용자가 수동 생성·다운로드·권리 확인 후 새 job에 수입. 무료/상업 이용/워터마크 미확인을 통과로 처리하지 않음.
+- 최종 통합: `AI_CLIP_ACCEPTANCE_ROOT=data/video_ai_clip_review/20261109T145000_KST PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -p 'test_*.py' -v` — **24개 통과**. 초기 혼합 규격 SAR 오류를 수정 후 전체 재검증, 실패 작업도 보존. 최종 ffprobe/전체 디코딩/음성·자막 타임라인 검증 통과. 프레임3개 확인, 연속 시청·청취 품질 합격은 미판정.
+- 이번 외부 AI API **0회**, 유료 비용 **0원**, 업로드0. 기존 인수/원장/기준선/TTS 샘플64개 파일 해시 불변, 모델 해시 재검증, 기존 Gemini completed **1/1** 유지. 바이너리·모델·프로젝트 데이터는 로컬 gitignored에만 보관.
+- 남은 목표: 실제 외부 AI 클립·권리 근거 수입, 사용자 최종 품질 피드백, AI 직원의 자율 완성과 피드백 학습, 승인된 유료 API 어댑터 실행. 현재 무료 웹 자동화/실 AI 관리자 호출 기능이 동작했다고 주장하지 않음.

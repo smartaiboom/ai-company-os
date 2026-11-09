@@ -108,7 +108,7 @@ def validate_source(source):
             and (source['allowed_to_publish'] is None or type(source['allowed_to_publish']) is bool)
             and type(source['rights_verified']) is bool, 'invalid_rights')
     from datetime import datetime, timedelta
-    try: valid = datetime.fromisoformat(source['generated_at']).utcoffset() == timedelta(hours=9)
+    try: valid = source['generated_at'] is None or datetime.fromisoformat(source['generated_at']).utcoffset() == timedelta(hours=9)
     except (ValueError, TypeError): valid = False
     require(valid, 'kst_timestamp_required')
     for field in ('estimated_cost', 'actual_cost'):
@@ -252,7 +252,8 @@ class ClipJob:
                 result = self._render(p, synthesizer or MeloLocal())
                 attempt['status'] = 'completed'; p['active_operation'] = None
                 p['output'] = result
-                p['status'] = 'pending_external_clip' if result['synthetic_test_fixture'] else 'rendered_for_review'
+                p['status'] = ('mixed_technical_preview' if result['mixed_source'] else
+                               'pending_external_clip' if result['synthetic_test_fixture'] else 'rendered_for_review')
                 self.save(p); return result
             except Exception as exc:
                 attempt['status'] = 'failed'
@@ -318,7 +319,10 @@ class ClipJob:
         write_captions(self.root, cues)
         Store.atomic(self.root/'timeline.json', dict(scenes=timeline, captions=cues, speech=speech,
                      alignment='measured_utterance_boundaries_phrase_timing_estimated', human_listening_verified=False))
-        synthetic = any(c['source']['provenance']['kind'] == 'synthetic_test_fixture' for c in state['clips'])
+        fixture_count = sum(c['source']['provenance']['kind'] == 'synthetic_test_fixture' for c in state['clips'])
+        ai_count = sum(c['source']['provenance']['kind'] == 'external_ai_clip' for c in state['clips'])
+        synthetic = fixture_count > 0
+        mixed = synthetic and ai_count > 0
         args = ['ffmpeg','-nostdin','-v','error']
         for scene in plan['scenes']:
             if plan['allow_repeat']: args += ['-stream_loop','-1']
@@ -331,7 +335,9 @@ class ClipJob:
             filters.append(f'[{i}:v]scale=trunc(iw*sar/2)*2:ih,setsar=1,{fit},setsar=1,fps=24,trim=duration={length:.9f},setpts=PTS-STARTPTS[v{i}]')
         filters.append(''.join(f'[v{i}]' for i in range(len(allocated)))+f'concat=n={len(allocated)}:v=1:a=0[joined]')
         overlay = ',drawtext=fontfile='+FONT+':textfile=fixture_notice.txt:expansion=none:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.7:x=48:y=100' if synthetic else ''
-        (self.root/'fixture_notice.txt').write_text('기술 시안 · 비AI 테스트 클립' if synthetic else '')
+        notice = (f'혼합 기술 시안 · 사용자 제공 AI {ai_count} / 비AI {fixture_count}' if mixed else
+                  '기술 시안 · 비AI 테스트 클립' if synthetic else '')
+        (self.root/'fixture_notice.txt').write_text(notice)
         filters.append("[joined]subtitles=filename=captions.ass:fontsdir=/usr/share/fonts/opentype/noto"+overlay+'[final]')
         args += ['-filter_complex_threads','1','-filter_complex',';'.join(filters),'-map','[final]',
                  '-map',f'{len(allocated)}:a','-t',f'{offset:.9f}','-c:v','libx264','-preset','veryfast',
@@ -349,7 +355,8 @@ class ClipJob:
                          '-frames:v','1','-threads','1',str(self.root/f'keyframe-{i:02}.png')],stage='ffmpeg_decode')
         result = dict(file='preview.mp4', sha256=file_hash(output), duration=media['duration'], width=720,height=1280,
             audio=True, audio_engine=speech['engine'], decoded=True, external_api_calls=0, incurred_cost=0,
-            synthetic_test_fixture=synthetic, ai_generated_clip_used=not synthetic,
+            synthetic_test_fixture=synthetic, ai_generated_clip_used=ai_count > 0, mixed_source=mixed,
+            external_ai_clip_count=ai_count, synthetic_fixture_count=fixture_count,
             publish_ready=all(c['publish_ready'] for c in state['clips']) and not synthetic,
             human_viewing_verified=False, human_listening_verified=False,
             subtitle_alignment='measured_utterance_boundaries_phrase_timing_estimated',

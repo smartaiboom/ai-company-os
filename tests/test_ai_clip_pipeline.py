@@ -101,6 +101,24 @@ class ClipPipelineTests(unittest.TestCase):
         self.assertIn('원하는 일을',(job.root/'captions.ass').read_text())
         with self.assertRaisesRegex(CompanyError,'render_not_replayable'): job.render(TestSpeech())
 
+    def test_mixed_user_declared_source_counts_and_unknown_generation_time(self):
+        inbox=self.root/'inbox';fixture=create_fixtures(inbox)
+        plan=self.plan();plan['scenes'].append({**deepcopy(plan['scenes'][0]),'id':'scene-2'})
+        job=ClipJob(self.root/'mixed');job.create(plan)
+        source=deepcopy(fixture);source['provider']='google_flow'
+        source['provenance']=dict(kind='external_ai_clip',evidence='Test-only user declaration; media is a local test fixture')
+        source['generated_at']=None
+        source.update(license='unknown',terms_url='unknown',watermark='unknown')
+        validate_source(source)
+        job.import_generated_clip(inbox,'fixture-1.mp4','scene-1',source)
+        job.import_generated_clip(inbox,'fixture-2.mp4','scene-2',fixture)
+        result=job.render(TestSpeech())
+        self.assertTrue(result['ai_generated_clip_used'] and result['mixed_source'])
+        self.assertEqual((result['external_ai_clip_count'],result['synthetic_fixture_count']),(1,1))
+        self.assertFalse(result['publish_ready'])
+        self.assertEqual(job.load()['status'],'mixed_technical_preview')
+        self.assertIn('혼합 기술 시안',(job.root/'fixture_notice.txt').read_text())
+
     def test_too_long_audio_fails_instead_of_truncation_or_speedup(self):
         inbox=self.root/'inbox';source=create_fixtures(inbox)
         plan=self.plan();plan['total_seconds']=1

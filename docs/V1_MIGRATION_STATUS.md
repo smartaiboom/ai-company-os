@@ -35,3 +35,22 @@
 
 ## 다음 Codex 작업 (개발 시간을 아끼도록 최소화)
 Codespaces에서 `git status --short`로 로컬 소스·비추적 data 보호 상태 확인 후 `git pull --ff-only`. 루트에서 `PYTHONPATH=src python -B -m unittest discover -s tests -p 'test_*.py' -v`로 **phase1을 Python 검색 경로에 넣지 않고** 새 독립 테스트 4개가 통과하는지 확인. 필요 시 테스트 코드만 최소 수정. 추가로 `PYTHONPATH=src python -B -c 'import video_production_company,autonomous_gemini35'` 등 독립 import 점검. 실제 외부 AI 호출 **0회**, 기존 데이터/원장/백업 쓰기 0회. 테스트 실패 시 내용 보고하고 코드 변경은 최소 범위. `git clean -fd`, `git reset --hard`, 프로젝트 replay 금지. 새 `src/`에 **진짜 사용자 실행 진입점/UI가 없는 상태**이므로 이번 테스트가 실서비스 독립 실행 완료를 의미하지 않는다고 명시.
+
+
+## 2026-11-09 KST — v1 독립 오프라인 테스트 결과 확인
+
+근거: `reports/v1_standalone_src_tests_verification_20261109.md` (GitHub Codex 검증 보고서).
+
+- 원본 Phase 1 폴더, 기존 루트 app.py 및 기존 데이터가 없는 격리 환경에서 `src/` 16개 모듈 import 성공.
+- 루트 `tests/` 신규 4개 회귀 테스트 독립 실행 통과. 실패·오류·건너뜀 0건.
+- 실제 AI 호출 0회, 이전 프로젝트 재실행 0회, 일반 파일 750개 변경 없음.
+- 수정 사항은 위 검증 보고서 신규 추가만이며, 구현 소스·테스트는 그대로였다.
+
+### 정리 전에 남은 조건
+
+1. **Codespaces의 현재 사용 경로와 gitignored `data/`, `backups/`, `artifacts/` 실제 위치를 확인**. GitHub에서는 비추적 자료의 독립 보관 여부를 검증할 수 없다.
+2. 새 v1.0의 사용자 실행 진입점(CLI/UI)과 최소 실제 산출물 생성 루트를 정한다. 기존 `ai-company-os-phase1/`의 실행 명령/사용 데이터에 의존하는 사용자는 삭제 시 즉시 영향받는다.
+3. 핵심 회귀 4개 외에 예산/동의/원장, 실제 도구 실행, 프로젝트 저장·복구 등을 v1 루트에서 보호하도록 단계적으로 핵심 테스트 선별·실행.
+4. 과거 Git 추적 소스는 `phase1/` 보관본에서 완전히 열람 가능한 상태 유지. 구 `ai-company-os-phase1/` Git 추적 중복 폴더를 제거하기 직전에 사용자에게 범위와 영향을 설명하고 승인받을 것. 기존 실사용 데이터·비추적 파일 삭제 금지.
+
+**현재 상태: 새 v1 src·tests가 구 경로에 대한 모의/모듈 의존성을 제거한 것은 검증됐지만, 기존 실행 폴더 삭제에 대한 충분한 조건은 아직 충족하지 못함.**

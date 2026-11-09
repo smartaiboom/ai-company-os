@@ -17,3 +17,12 @@
 - 전체 본문/정책: 로컬 `data/gemini_one_call_acceptance/dialogue-f4eb35fc53a3415093e37815964f51d7.review.json`. 키 대조·서명 승인·ask-ai는 이번 작업에서 수행하지 않음.
 - 다음 조건: 사용자가 AI Studio의 Default Gemini Project에서 Free 등급/Billing 비활성 및 해당 키를 로컬 터미널로 대조 → 전송 내용을 재검토 → 1회/무료 전용·Google 데이터 정책·새 승인 해시에 명시 동의 → 그 이후에만 ask-ai 1회. 불명확하면 계속 중단. 실패해도 재실행 금지.
 - 공식 [모델](https://ai.google.dev/gemini-api/docs/models/gemini-3.5-flash-lite), [가격](https://ai.google.dev/gemini-api/docs/pricing), [키/프로젝트](https://ai.google.dev/gemini-api/docs/api-key), [한도](https://ai.google.dev/gemini-api/docs/rate-limits), [데이터 정책](https://ai.google.dev/gemini-api/terms) 확인. 사용자 스크린샷의 무료 등급·RPM 15/TPM 250K/RPD 500은 사용자 제공 근거이며 잔여 쿼터/무과금 보장이 아님. 코드의 로컬 키 대조도 원격 Cloud 계정/Billing 조회를 대신하지 않으며 현재는 아직 그 대조도 미수행. Google 무료 입력·응답은 제품 개선과 사람의 검토에 사용될 수 있음.
+
+## 현재 명세 기준선 결과 — 2026-11-09 KST
+
+- 확정 인수 초안의 실제 목표·질문 2개·답변·명세를 읽어 첫 기준선을 제작. 기존 초안은 confirmed, 기존 Gemini 호출 completed **1/1**이며 이번 추가 API 호출 **0회**. 인수 저장소 전체 기존 파일을 작업 전후 해시 비교하여 내용 불변 확인. 기존 프로젝트·승인·원장/백업을 수정하거나 재실행하지 않았고 회사 handoff도 만들지 않음.
+- 출처: **Codex가 대본·연출을 작성하고 기존 production_video.render()를 수정 없이 1회 실행한 오프라인 기술 시안**. 제품 AI 직원의 실제 제작·관리자 평가 결과가 아님. 기능/질문 생성 프롬프트·영상 규격은 변경하지 않음.
+- 로컬 산출물: `data/video_baseline_review/20261109T132912_KST/`의 `preview.mp4`, `script.md`, `storyboard.md`, `narration.txt`, `captions.srt`, `evaluation.md`. 렌더 입력/receipt/ffprobe/장면 중간 프레임 6개/무결성 증거도 같은 폴더에 보존. GitHub에는 이 요약만 반영하며 바이너리·프로젝트 데이터·키는 올리지 않음.
+- 실제 결과: **1280×720(16:9), H.264, 24fps·1,440프레임, 60.023220초, AAC 44.1kHz 모노 로봇 한국어 참고 음성, 921,391 bytes**. ffprobe와 전체 디코딩 검사 통과. 장면별 정지 프레임 6개를 확인했으나 전체 연속 시청/음성 청취는 미수행. 이번에는 코드 회귀 테스트 대신 기존 렌더러 실행과 실제 미디어 결과만 확인.
+- 사용자 요구와 차이: 1분 안내·한국어 대본·내레이션 트랙은 제공했지만 **9:16 세로형 요구는 미충족**. 자연스러운 음성/실제 ChatGPT 화면 시연은 제공하지 않았고 관련 선호는 미정. 스타일·예시·색상 등은 제작 가정으로 구분. 게시용 최종 쇼츠로 합격 처리하지 않음.
+- 후속 검토 후보: 활용 사례(일상 문자/업무/학습), 실제 화면 또는 결과 전후 비교, 음성 허용 수준·별도 예산, 60초 학습 목표. 이미 확정된 9:16은 재질문이 아니라 렌더러 개선 대상. 사용자에게 실제 산출물을 먼저 보여준 뒤 보완할 항목을 결정한다. Codespaces 파일 탐색기에서 preview.mp4를 우클릭 → Download하여 재생 가능.

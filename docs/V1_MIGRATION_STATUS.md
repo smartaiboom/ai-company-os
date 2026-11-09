@@ -6,7 +6,9 @@
 - `src/`: 기존 Phase 1의 실제 Gemini 3.5 / AI 관리자·직원 협업 엔진을 구성하는 **16개의 기존 Python 모듈을 동일 Git blob SHA로 복사**. 코드를 재작성하거나 기능을 개선한 것이 아니다.
 - `phase1/`: Git 추적 대상 과거 소스·테스트·기록의 완전 보관본.
 - `ai-company-os-phase1/`: 현재 Codespaces의 미추적 data/와 이전 실행 경로를 보호하기 위해 임시 유지하는 구 폴더.
-- `docs/`: 현재 v1.0 개발 방향과 이전/정리 기준. `tests/`는 아직 기존 테스트 의존성을 전수 확인하지 못해 루트로 옮기지 않았다.
+- `docs/`: 현재 v1.0 개발 방향과 이전/정리 기준.
+- `tests/`: 독립 테스트 시작. 기존 테스트들이 간접적으로 `app.py` 등 구 코드를 가져오는 것으로 확인돼, 무분별하게 66개를 복사하지 않았다. 대신 `phase1`에 의존하지 않는 핵심 모의 회사 종단 간 테스트 4개와 필요한 fixture만 복사/작성했다. **신규 4개 테스트는 아직 Codespaces에서 실행 확인 전**이며 과거 150개 회귀 테스트를 대체하지 않는다.
+- 루트 `AGENTS.md`: 새 개발 목표 및 데이터/보존·정리 규칙.
 
 ## 새 코드의 성격 및 실행주의
 - 진입점 후보: `src/video_production_company.py`의 VideoProductionCompany, `src/autonomous_gemini35.py`의 Gemini35Company.
@@ -27,9 +29,9 @@
 
 ## 아직 미완료 — 안전상 남긴 항목
 - Codespaces 실제 프로젝트 파일, 데이터 위치, 비추적 파일, 모듈 간 동적 import, 실행 환경 검증.
-- 핵심 회귀 테스트를 새 작업 폴더에서 작동하게 선별/수정.
+- 루트 `tests/` 신규 독립 테스트 실제 실행·필요한 수정, 과거 150개 중 안전·API·실제 영상 렌더 등 추가해야 할 핵심 회귀 범위 선별. 신규 테스트만 통과한다고 기존 모든 기능을 보증하지 않는다.
 - root v1.0 진입점/CLI/UI, 목표 문답 및 경험 저장·검색·품질 개선 신규 기능.
 - `ai-company-os-phase1/` Git 추적 원본 제거. **새 src 검증 전에는 삭제 금지**.
 
 ## 다음 Codex 작업 (개발 시간을 아끼도록 최소화)
-Codespaces에서 `git pull` 후 `git status --short`로 로컬 소스·비추적 data 보호 상태 확인. 실제 외부 AI 호출을 **0회**로 유지하면서 `src/`의 로컬 import·offline smoke test 및 기존 핵심 회귀 테스트의 최소 실행가능성만 점검. 필요한 코드 수정/테스트 선별이 있으면 범위를 먼저 보고. 절대로 old data와 역사 원장 이동/삭제, `git clean -fd`, `git reset --hard`, 프로젝트 replay를 하지 않음.
+Codespaces에서 `git status --short`로 로컬 소스·비추적 data 보호 상태 확인 후 `git pull --ff-only`. 루트에서 `PYTHONPATH=src python -B -m unittest discover -s tests -p 'test_*.py' -v`로 **phase1을 Python 검색 경로에 넣지 않고** 새 독립 테스트 4개가 통과하는지 확인. 필요 시 테스트 코드만 최소 수정. 추가로 `PYTHONPATH=src python -B -c 'import video_production_company,autonomous_gemini35'` 등 독립 import 점검. 실제 외부 AI 호출 **0회**, 기존 데이터/원장/백업 쓰기 0회. 테스트 실패 시 내용 보고하고 코드 변경은 최소 범위. `git clean -fd`, `git reset --hard`, 프로젝트 replay 금지. 새 `src/`에 **진짜 사용자 실행 진입점/UI가 없는 상태**이므로 이번 테스트가 실서비스 독립 실행 완료를 의미하지 않는다고 명시.

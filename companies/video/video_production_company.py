@@ -61,3 +61,9 @@ def create_offline_clip_job(folder, plan):
     """Explicit local job; never creates/approves/resumes a Gemini project."""
     from ai_clip_pipeline import ClipJob
     return ClipJob(folder).create(plan)
+
+
+def quality_tool_decision_context():
+    """Read-only paid-tool preparation; does not enlarge the live tool allowlist."""
+    from quality_tool_adapters import capabilities
+    return capabilities()

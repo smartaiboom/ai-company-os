@@ -235,3 +235,17 @@ PYTHONPATH=core:companies/video python -B -m manager_plan_cli --root /tmp/<새-�
 자막 경계를 검사한다. 도입의 의미·음성 자연스러움·최종 시청 품질은 수치 검사와 구분한다.
 샘플 최종 영상, 수정 전후 기록과 다운로드 절차는 `reports/VIDEO_QUALITY_ITERATION_RESULT.md` 참조.
 영상·음성·프로젝트 데이터는 로컬에 보존하고 GitHub에는 코드/테스트/요약만 반영한다.
+
+## 실제 사용자 피드백 이후의 시각·음성 게이트
+
+`companies/video/audience_visual_review.py`는 실제 파일/해시/길이,외부 클립 반복,
+카드 총6초·연속3초 상한과 대체 음성 비교 상태를 검사한다. 미확보 자산은
+`asset_missing`,대체 음성은 사용자 청취 및 동일 대본 A/B가 준비되기 전까지
+`replacement_voice_pending`으로 남긴다. 코덱 정상만으로 자연스러운 음성 합격을 주지 않는다.
+새 모델 다운로드/설치는 하지 않으며 후보 자원 점검도 실행 허가와 구분한다.
+
+기존 Flow의 미확인 권리를 유지하는 별도15초 무음 시각 검토 도구는
+`render_motion_study(새폴더, 허용된 inbox, 원본명2개)`다. 전체 프레임을 보존하고
+게시 불가/예시 고지를 넣는다.60초 완성 영상이나 음성 비교 합격으로 표시하지 않는다.
+관련 실제 사용자 피드백·소재 선택·검토 자료·음성 보류 사유는
+`reports/USER_FEEDBACK_QUALITY_UPGRADE_RESULT.md`에 기록한다.

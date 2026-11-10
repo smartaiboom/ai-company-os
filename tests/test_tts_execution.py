@@ -161,3 +161,83 @@ class ExecutionTests(unittest.TestCase):
             handlers = opener.call_args.args
             self.assertEqual(handlers[0].proxies, {}); self.assertIsInstance(handlers[1], NoRedirect)
             with self.assertRaises(CompanyError): handlers[1].redirect_request(None, None, 302, '', {}, 'https://other.test')
+
+
+    def setup_chat(self, root):
+        from autonomous_live import LiveStore
+        from autonomous_company import digest
+        repo = Path(root)/'repo'; (repo/'data/trial').mkdir(parents=True)
+        runner, _ = self.setup_scope(repo/'data/trial', approve=False)
+        document = repo/'approval.md'; document.write_text('explicit scoped chat approval fixture')
+        self.enterContext(patch('tts_execution.REPO_ROOT', repo))
+        self.enterContext(patch('tts_execution.CHAT_TRIAL_ROOT', runner.root))
+        self.enterContext(patch('tts_execution.CHAT_APPROVAL', document))
+        self.enterContext(patch('tts_execution.CHAT_APPROVAL_SHA', sha(document.read_bytes())))
+        self.enterContext(patch('tts_execution.CHAT_PROJECT_SHA', sha(b'owner-test-project')))
+        self.enterContext(patch('tts_execution.CHAT_PAYLOAD_SHA', sha((runner.root/'payload.json').read_bytes())))
+        self.enterContext(patch('tts_execution.CHAT_REFERENCE_SHA', sha(b'fixture reference')))
+        listing = repo/'data/gemini_tts_model_list/20261110T160007_KST/result.json'
+        listing.parent.mkdir(parents=True)
+        listing.write_bytes(canonical_bytes(dict(complete=True, requests=[dict(http_status=200)],
+            models=[dict(name='models/gemini-3.8-flash-tts')])))
+        previous = repo/'data/gemini_one_call_acceptance'; previous.mkdir()
+        signer = LiveStore.__new__(LiveStore); signer.root = previous
+        record = dict(project='Default Gemini Project', scope='historical-test',
+            credential_binding=signer._sign(dict(scope='historical-test', credential=KEY), create=True))
+        (previous/'dialogue-fixture.json').write_bytes(canonical_bytes(dict(acceptance=dict(
+            verification=dict(record=record, signature=signer._sign(record))))))
+        return runner, repo, document
+
+    def test_chat_only_exact_unknown_quota_receipt_and_default_stays_disabled(self):
+        from tts_execution import execute_chat_trial
+        import tts_execution
+        with tempfile.TemporaryDirectory() as root, patch('socket.socket.connect', side_effect=AssertionError('offline')):
+            runner, repo, document = self.setup_chat(root)
+            with patch('tts_execution.send_once', return_value=self.response()) as send:
+                result = execute_chat_trial(runner, KEY)
+                self.assertEqual(send.call_count, 1); self.assertFalse(result['publish_ready'])
+                self.assertFalse(tts_execution.TTS_EXECUTION_ENABLED)
+                receipt = json.loads((runner.root/'chat_approval_receipt.json').read_bytes())
+                self.assertEqual(receipt['consent_source'], 'explicit_chat_user_approval_2026-11-10')
+                self.assertEqual(receipt['quota_remaining'], 'unknown')
+                self.assertFalse(receipt['independently_verified']); self.assertFalse(receipt['owner_hmac_signature'])
+                self.assertFalse((runner.root/'consent.json').exists())
+                with self.assertRaises(FileExistsError): execute_chat_trial(runner, KEY)
+                with self.assertRaisesRegex(CompanyError, 'tts_execution_disabled'): runner.execute(KEY)
+                self.assertEqual(send.call_count, 1)
+
+    def test_chat_wrong_scope_document_credential_paid_or_prior_attempt_block(self):
+        from tts_execution import execute_chat_trial
+        for fault in ('document', 'key', 'paid', 'prior_attempt', 'project', 'payload', 'root'):
+            with self.subTest(fault=fault), tempfile.TemporaryDirectory() as root:
+                runner, repo, document = self.setup_chat(root)
+                key = KEY
+                if fault == 'document': document.write_text('changed approval')
+                elif fault == 'key': key += 'changed'
+                elif fault == 'paid':
+                    (repo/'data/tts_paid').mkdir()
+                    (repo/'data/tts_paid/account.json').write_text('{"record":{"evidence":{"billing":"enabled"}}}')
+                elif fault == 'prior_attempt':
+                    (repo/'data/tts_other').mkdir(); (repo/'data/tts_other/attempt.json').write_text('{}')
+                elif fault == 'project': self.enterContext(patch('tts_execution.CHAT_PROJECT_SHA', '0'*64))
+                elif fault == 'root': self.enterContext(patch('tts_execution.CHAT_TRIAL_ROOT', repo/'other'))
+                elif fault == 'payload':
+                    path = runner.root/'payload.json';path.chmod(0o600);path.write_bytes(b'{}')
+                with patch('tts_execution.send_once') as send:
+                    with self.assertRaises(CompanyError): execute_chat_trial(runner, key)
+                    send.assert_not_called(); self.assertFalse((runner.root/'attempt.json').exists())
+
+    def test_chat_http_failure_consumes_global_guard_without_retry(self):
+        from tts_execution import execute_chat_trial
+        for failure in (TimeoutError(), HTTPError(ENDPOINT, 400, 'private', None, None), HTTPError(ENDPOINT, 429, 'private', None, None)):
+            with self.subTest(failure=type(failure).__name__), tempfile.TemporaryDirectory() as root:
+                runner, repo, document = self.setup_chat(root)
+                with patch('tts_execution.send_once', side_effect=failure) as send:
+                    with self.assertRaisesRegex(CompanyError, 'tts_attempt_failed_no_retry'): execute_chat_trial(runner, KEY)
+                    self.assertTrue((runner.root.parent/'trial_attempt.json').exists())
+                    self.assertTrue((runner.root/'attempt.json').exists())
+                    with self.assertRaises(FileExistsError): execute_chat_trial(runner, KEY)
+                    self.assertEqual(send.call_count, 1)
+                    result = json.loads((runner.root/'result.json').read_bytes())
+                    self.assertIn(result['error_category'], ('timeout', 'http_error'))
+                    self.assertNotIn('private', json.dumps(result))

@@ -1,5 +1,7 @@
 # 현재 진행 현황 — 2026-11-10 KST
 
+최신 실제1회 실행 점검: **무료 계정 증거와 exact-review 서명 동의가 없어 선예약 전 중단**. 실전송0회·선예약0/1·비용$0·실제 B 없음. 실행 상수 False 유지. [실행 결과](GEMINI_TTS_REAL_ONE_SHOT_RESULT.md). 기존 요청 해시/원 job/A 해시만 재검증했으며 원장·미디어·코드는 변경하지 않았다. 다음 행동은 실제 AI Studio 프로젝트 ID와 해당 모델 Free Tier/Billing 비활성/지역/잔여 요청·입출력 쿼터 확인 결과를 알려주는 것 하나다. 키는 보내지 않는다.
+
 |단계|상태/실제 근거|남은 조건|
 |---|---|---|
 |카드 없는 음성 API|Gemini Developer Standard 무료 TTS 공식 확인. 우선3.8 Flash, 보조3.8 Flash-Lite; Cloud Chirp3-HD Billing 경로 보류|현재 키/프로젝트의 무료 모델 권한·지역·남은 쿼터 미확인|

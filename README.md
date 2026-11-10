@@ -222,3 +222,16 @@ PYTHONPATH=core:companies/video python -B -m manager_plan_cli --root /tmp/<새-�
 후속 실행 전 검토 사항과 현재 준비 경로는 `reports/REAL_MANAGER_CALL_REVIEW.md`,
 개발 검증 결과는 `reports/real_manager_one_call_prepare_result.md`를 확인한다.
 저장소가 사라지거나 호출이 불확실하면 새 저장소를 만들어 재시도하지 않는다.
+
+## 로컬 설명 장면으로 만드는 품질 개선 시안
+
+`companies/video/editorial_video.py`는 외부 소스가 부족할 때 질문 비교·조건 강조·문장 구성 등
+설명용 벡터 장면을 만드는 오프라인 합성 도구다. 실제 앱 녹화나 AI 생성 클립으로 표시하지 않는다.
+기존 `ClipJob` 잠금/저장, 로컬 MeloTTS, 자막 writer, probe/전체 decode를 재사용한다.
+`inspect_edit(plan)`의 수치 결함을 먼저 해결하고 `EditorialJob(새폴더).create(plan)` 후
+`render()`를 한 번 실행한다. 같은 폴더의 실패·중단·완료 작업을 자동 재실행하지 않는다.
+
+새 대본과 음성 receipt의 텍스트·해시·실측 길이를 대조하고 첫3초/총60초 타임라인과
+자막 경계를 검사한다. 도입의 의미·음성 자연스러움·최종 시청 품질은 수치 검사와 구분한다.
+샘플 최종 영상, 수정 전후 기록과 다운로드 절차는 `reports/VIDEO_QUALITY_ITERATION_RESULT.md` 참조.
+영상·음성·프로젝트 데이터는 로컬에 보존하고 GitHub에는 코드/테스트/요약만 반영한다.

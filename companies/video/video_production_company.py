@@ -73,3 +73,11 @@ def prepare_staff_tts_job(text, reference, *, fictional, model='gemini-3.8-flash
     """Voice employee handoff; isolated job and independent TTS approval required."""
     from tts_job import prepare_voice_job
     return prepare_voice_job(text, reference, fictional=fictional, model=model, voice=voice)
+
+
+def voice_staff_quality_context(selection, *, target_segment):
+    """Scoped recommendation for a new voice assignment; never authorizes TTS."""
+    from voice_quality import scoped_voice_policy, next_voice_sample
+    policy = scoped_voice_policy(selection, target_segment)
+    return dict(voice_policy=policy, next_sample=next_voice_sample() if policy['recommended'] else None,
+                external_calls=False, cost_limit=0)

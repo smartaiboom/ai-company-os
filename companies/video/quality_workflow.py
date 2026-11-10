@@ -23,7 +23,8 @@ VIDEO_ROLES = {
     'editor': '60초 샷별 내레이션 대응·소스 수·필요 길이·시연·교차편집 계획. '
               '5~8초 클립 반복으로 20초를 채우지 말 것. 소스 없으면 external_clip_pending.',
     'voice': '발음하기 쉬운 한국어, 영어/이름 발음 보정, 대상별 톤·속도 지시. '
-             'MeloTTS 자연스러움 한계 명시. 새 TTS/API/다운로드 금지. 청취 전 자연스러움 unassessed.',
+             '정확한 대상의 실제 사용자 평가가 있으면 추천 후보/점수 근거를 인수. 다음 개선은 hypothesis. '
+             '새 TTS/API/다운로드 권한과 추천은 분리. 새 음성 청취 전 품질 unassessed.',
     'qa': '기술 미디어 검사와 콘텐츠 평가 분리. 근거 없는 점수/게시 합격 금지. '
           '각 결함의 근거·심각도·담당·수정 요청·기대 지표와 전후 차이를 기록.'}
 
@@ -95,8 +96,11 @@ class VideoQualityCompany(Company):
     """Opt-in mock adapter over existing orchestration. Live providers remain rejected."""
     def _workflow_context(self, p):
         require('quality_context' in p, 'quality_context_required')
-        return dict(quality=deepcopy(p['quality_context']), role_contracts=deepcopy(ROLE_CONTRACTS),
-                    video_roles=deepcopy(VIDEO_ROLES))
+        from voice_quality import scoped_voice_policy
+        quality = p['quality_context']
+        return dict(quality=deepcopy(quality), role_contracts=deepcopy(ROLE_CONTRACTS),
+                    video_roles=deepcopy(VIDEO_ROLES), voice_policy=scoped_voice_policy(
+                        quality['experiences'], quality['answers'].get('audience')))
 
     def _call(self, p, provider, phase, task_id, context):
         if 'previous_results' in context:
@@ -104,13 +108,28 @@ class VideoQualityCompany(Company):
             context['handoff_refs']=[dict(task_id=r['task_id'], revision=r['revision'],
                                          result_hash=digest(r), source=r['source'])
                                      for r in context['previous_results']]
+        voice_mode = p['quality_context']['capabilities'].get('voice_quality_contract_v1') is True
+        role=next((t['role'] for t in p['assignments'] if t['id']==task_id),None)
         if phase == 'review':
-            role=next(t['role'] for t in p['assignments'] if t['id']==task_id)
-            context={**context, 'plan_inspection':inspect_plan(role,parse(context['result']['content']))}
-        return super()._call(p,provider,phase,task_id,context)
+            if voice_mode:
+                from voice_quality import inspect_voice_stage
+                inspection=inspect_voice_stage(role,parse(context['result']['content']),context['previous_results'],context['voice_policy'])
+            else: inspection=inspect_plan(role,parse(context['result']['content']))
+            context={**context, 'plan_inspection':inspection}
+        result=super()._call(p,provider,phase,task_id,context)
+        if voice_mode and phase == 'execute':
+            from voice_quality import inspect_voice_stage
+            inspect_voice_stage(role,parse(result['content']),context['previous_results'],context['voice_policy'])
+        return result
 
     def _validate_review_decision(self,p,task,review):
-        inspection=inspect_plan(task['role'],parse(task['versions'][-1]['content']))
+        if p['quality_context']['capabilities'].get('voice_quality_contract_v1') is True:
+            from voice_quality import inspect_voice_stage, scoped_voice_policy
+            quality=p['quality_context']
+            previous=[next(t for t in p['assignments'] if t['id']==dep)['versions'][-1] for dep in task['depends_on']]
+            inspection=inspect_voice_stage(task['role'],parse(task['versions'][-1]['content']),previous,
+                scoped_voice_policy(quality['experiences'],quality['answers'].get('audience')))
+        else: inspection=inspect_plan(task['role'],parse(task['versions'][-1]['content']))
         require(review['action'] != 'accept' or not inspection['defects'], 'known_plan_defects')
         task.setdefault('plan_inspections',[]).append(inspection)
 

@@ -67,14 +67,20 @@ class ExperienceJournal:
 
     def select(self, journal_id, *, domain, target_segment):
         p = self.store.load(journal_id)
-        selected, excluded = [], []
-        for e in p['experiences']:
-            if e['active'] and e['domain'] == domain and e['target_segment'] == target_segment:
-                selected.append({**deepcopy(e), 'selection_reason': 'exact domain and audience match',
-                                 'record_hash': digest(e)})
-            else:
-                excluded.append(dict(id=e['id'], reason='inactive or domain/audience mismatch'))
-        return dict(selected=selected, excluded=excluded, journal_hash=p['storage_hash'])
+        return {**select_experiences(p['experiences'], domain=domain, target_segment=target_segment),
+                'journal_hash': p['storage_hash']}
+
+
+def select_experiences(records, *, domain, target_segment):
+    """Shared selection policy; journal/transport provenance remains with the caller."""
+    selected, excluded = [], []
+    for e in records:
+        if e['active'] and e['domain'] == domain and e['target_segment'] == target_segment:
+            selected.append({**deepcopy(e), 'selection_reason': 'exact domain and audience match',
+                             'record_hash': digest(e)})
+        else:
+            excluded.append(dict(id=e['id'], reason='inactive or domain/audience mismatch'))
+    return dict(selected=selected, excluded=excluded)
 
 
 def bind_context(store, project_id, context):

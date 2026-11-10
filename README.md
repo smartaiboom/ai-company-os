@@ -174,3 +174,34 @@ PYTHONPATH=core:companies/video python -B -m unittest tests.test_quality_feedbac
 지정하면 대본/샷 계획의 수정 전후 버전, 검토, 경험 적용/비적용 데이터를 보존한다.
 실제 미디어가 없는 이 계획 경로는 `external_clip_pending`으로 끝나며 완료·게시 승인을 하지 않는다.
 10점 체크리스트의 감각 품질은 미평가로 남긴다. 실제 모델·영상 품질 개선은 별도 승인·검증 대상이다.
+
+## 품질 작업의 실AI provider 연결 준비
+
+`core/quality_provider.py`의 `QualityProviderStore`와 영상 회사의
+`VideoProviderQualityCompany`는 기존 mock 경로와 분리된 실AI 전용 모드다.
+기존 Gemini35 native 어댑터·서명 동의·호출 원장·엄격한 역할 JSON 검증을 재사용한다.
+새 빈 저장소에서 `create(goal, inputs=..., max_calls=...)`로 준비한다. inputs 필드는
+`domain/target_segment/answers/constraints/capabilities/experiences/feedback_text`이며,
+영상 capabilities는 `quality_workflow.capabilities()`를 쓴다.
+선별 경험은 `quality_provider.experience_context(selection)`으로 전송 필드만 투영한다.
+
+`prepare()`는 전송 입력과 해시를 포함한 동의 제안을 만들며 승인을 뜻하지 않는다.
+**실제 전송은 코드 정책에서 비활성**이고 키·환경변수·서명 동의만으로 활성화되지 않는다.
+기존 인수 저장소를 지정하거나 기존 동의를 재사용하지 않는다. 현재 계정의 무료 등급·결제·키 연결 확인과
+별도 실제 호출 승인/활성화 절차는 후속 작업이다. 비용 0은 계정 상태 검증 없이 보장하지 않는다.
+
+writer/editor/voice/qa/feedback 작업은 모델이 의존성과 함께 배정한다.
+직원은 선행 결과/해시·이전 버전·관리자 수정 지시를 받는다. QA의 텍스트 평가는 모델의 주장이고
+수치 검사와 별개이며 실제 미디어가 없으면 감각 점수는 미평가다.
+승인된 feedback 직원 결과를 `record_feedback()`으로 수신·검증하고
+`select_feedback()`으로 대상별 선택, `withdraw_feedback()`으로 철회한다.
+`record_feedback(..., replaces=id)`는 새로 검증된 직원 결과로 대체할 때 버전을 남긴다.
+실제 전송을 하지 않는 계약 검증은 다음으로 실행한다.
+
+```bash
+PYTHONPATH=core:companies/video python -B -m unittest tests.test_quality_provider -v
+```
+
+테스트만 HTTP를 대체하고 차단 정책을 메모리에서 임시 교체한다. 소켓과 DNS는 차단된다.
+`PROVIDER_SAMPLE_OUTPUT=/tmp/<파일명>.json`으로 요청/수정/QA/피드백 샘플을 보존할 수 있다.
+상세 결과·필수 승인 게이트는 `reports/manager_staff_provider_readiness_result.md`를 참조한다.

@@ -118,3 +118,80 @@ class VideoQualityCompany(Company):
         # A source plan never proves files, rights, technical media or perceived quality.
         p['quality_checklist']=checklist()
         return ['external_clip_pending','needs_user_review']
+
+
+# Provider adapter is a separate real-mode boundary; the mock class above is unchanged.
+from quality_provider import QualityProviderCompany
+
+
+def validate_qa_claim(value):
+    """Text-only model evaluation is a claim, never sensory evidence or a score."""
+    exact(value, ('assessments','defects','sensory_quality'))
+    require(value['sensory_quality']=='unassessed','sensory_evidence_missing')
+    require(isinstance(value['assessments'],list) and 1<=len(value['assessments'])<=10,'invalid_assessments')
+    seen=set()
+    for a in value['assessments']:
+        exact(a,('criterion_id','status','evidence','source'))
+        require(a['criterion_id'] in ('hook','message','facts','alignment','variety','composition','voice','sync','flow','publish')
+                and a['criterion_id'] not in seen,'invalid_assessment_id')
+        seen.add(a['criterion_id'])
+        require(a['status'] in ('met','unmet','unassessed') and a['source']=='model_claim','invalid_assessment')
+        require(isinstance(a['evidence'],str) and bool(a['evidence'].strip()),'missing_qa_evidence')
+        if a['criterion_id'] in ('composition','voice','sync','publish'):
+            require(a['status']=='unassessed','sensory_evidence_missing')
+    require(isinstance(value['defects'],list) and len(value['defects'])<=30,'invalid_defects')
+    for d in value['defects']:
+        exact(d,('issue','severity','owner','evidence','correction','expected_metric'))
+        require(all(isinstance(v,str) and bool(v.strip()) for v in d.values()),'invalid_defect')
+        require(d['severity'] in ('minor','major','critical'),'invalid_severity')
+        require(d['owner'] in ('writer','editor','voice','qa'),'invalid_defect_owner')
+    return value
+
+
+class VideoProviderQualityCompany(QualityProviderCompany):
+    """Gemini native wire, independent signed store, disabled production transport."""
+    def _additional_context_fields(self,phase):
+        return super()._additional_context_fields(phase) | {'plan_evidence'} | ({'plan_inspection'} if phase=='review' else set())
+
+    def _tool_notice(self,p):
+        return (super()._tool_notice(p)+' Video roles: '+__import__('json').dumps(VIDEO_ROLES,ensure_ascii=False)+
+                ' Choose necessary roles writer/editor/voice/qa/feedback and dependencies; no fixed pipeline required. '
+                'Writer/editor/voice content must be a JSON string matching quality.capabilities.artifact_contract. '
+                'QA content must be a JSON string {assessments:[{criterion_id,status,evidence,source}],'
+                'defects:[{issue,severity,owner,evidence,correction,expected_metric}],sensory_quality:"unassessed"}. '
+                'assessment source=model_claim, status=met|unmet|unassessed, criterion_id uses rubric ids. '
+                'composition/voice/sync/publish must be unassessed. No numeric sensory score. '
+                'Separate plan_inspection deterministic counts from semantic judgments. '
+                'Read actual predecessor content/hash and previous versions; explain each revision and remaining blockers.')
+
+    def _call(self,p,provider,phase,task_id,context):
+        task=next((t for t in p['assignments'] if t['id']==task_id),None)
+        context={**context,'plan_evidence':[dict(task_id=r['task_id'],**inspect_plan(r['role'],parse(r['content'])))
+                  for r in context.get('previous_results',[]) if r['role'] in ('writer','editor','voice')]}
+        if phase=='review':
+            if task['role'] in ('writer','editor','voice'):
+                inspection=inspect_plan(task['role'],parse(context['result']['content']))
+            else:
+                inspection=dict(source='deterministic_plan_check',defects=[],sensory_quality='unassessed')
+            context={**context,'plan_inspection':inspection}
+        result=super()._call(p,provider,phase,task_id,context)
+        if phase=='plan' and 'tasks' in result:
+            require(all(t.get('role') in ('writer','editor','voice','qa','feedback') for t in result['tasks']),
+                    'unsupported_quality_role')
+        if phase=='execute' and task:
+            content=parse(result['content'])
+            if task['role'] in ('writer','editor','voice'):validate_artifact(task['role'],content)
+            elif task['role']=='qa':validate_qa_claim(content)
+        return result
+
+    def _validate_review_decision(self,p,task,review):
+        super()._validate_review_decision(p,task,review)
+        if task['role'] in ('writer','editor','voice'):
+            inspection=inspect_plan(task['role'],parse(task['versions'][-1]['content']))
+            require(review['action']!='accept' or not inspection['defects'],'known_plan_defects')
+            task.setdefault('plan_inspections',[]).append(inspection)
+        elif task['role']=='qa':
+            claim=validate_qa_claim(parse(task['versions'][-1]['content']))
+            require(review['action']!='accept' or not claim['defects'],'unresolved_qa_defects')
+
+    _delivery_blockers=VideoQualityCompany._delivery_blockers

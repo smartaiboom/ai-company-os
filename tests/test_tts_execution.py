@@ -241,3 +241,108 @@ class ExecutionTests(unittest.TestCase):
                     result = json.loads((runner.root/'result.json').read_bytes())
                     self.assertIn(result['error_category'], ('timeout', 'http_error'))
                     self.assertNotIn('private', json.dumps(result))
+
+    def setup_148_chat(self, root):
+        import tts_execution as execution
+        from autonomous_company import digest
+
+        source = Path(__file__).resolve().parents[1]
+        document_name = 'docs/RUN_APPROVED_GEMINI_TTS_148_CHARS_20261111.md'
+        approval = (source/document_name).read_bytes()
+        narration = next(line for line in approval.decode().splitlines() if line.startswith('금요일 세 시.'))
+        raw = canonical_bytes(dict(model='gemini-3.8-flash-tts', store=False,
+            input=[dict(type='user_input', content=[dict(type='text', text=narration,
+                annotations=[dict(type='speech_metadata', style=execution.NEXT_STYLE)])])],
+            generation_config=dict(max_output_tokens=1024, speech_config=[dict(voice='Puck')]),
+            response_format=dict(type='audio', mime_type='audio/wav', sample_rate=24000)))
+        old_runner, repo, _ = self.setup_chat(root)
+        approval_path = repo/document_name
+        approval_path.parent.mkdir()
+        approval_path.write_bytes(approval)
+        selection = repo/'data/video_voice_selection/20261110_v1'
+        selection.mkdir(parents=True)
+        (selection/'next_payload_REVIEW_ONLY.json').write_bytes(raw)
+        _, old_scope, _ = old_runner._load()
+        listing = repo/'data/gemini_tts_model_list/20261110T160007_KST/result.json'
+        consent = dict(scope_hash=digest(old_scope), account_evidence_source='owner_screenshot_free_tier',
+            billing='owner_reported_not_linked', model_list_receipt_sha256=sha(listing.read_bytes()))
+        old_runner._write('chat_approval_receipt.json', consent)
+        old_runner._write('attempt.json', dict(scope_hash=digest(old_scope), consent_hash=digest(consent)))
+        old_runner._write('result.json', dict(http_status=200, status='audio_validated'))
+        (old_runner.root.parent/'trial_attempt.json').write_bytes(b'{}')
+        return selection, approval_path, raw
+
+    def test_148_chat_reserves_before_exact_send_and_decodes_21_seconds(self):
+        import base64
+        import wave
+        from tts_execution import execute_148_char_chat_trial
+
+        with tempfile.TemporaryDirectory() as root, patch('socket.socket.connect', side_effect=AssertionError('offline')):
+            selection, _, raw = self.setup_148_chat(root)
+            buf = io.BytesIO()
+            with wave.open(buf, 'wb') as audio:
+                audio.setparams((1, 2, 24000, 0, 'NONE', 'not compressed'))
+                audio.writeframes(bytes(21 * 24000 * 2))
+            envelope = json.loads(self.envelope())
+            envelope['steps'][0]['content'][0]['data'] = base64.b64encode(buf.getvalue()).decode()
+            trial = selection/'next_trial'
+
+            def respond(request, timeout):
+                self.assertEqual(request.data, raw)
+                for path in (trial/'attempt.json', selection/'next_trial_attempt.json'):
+                    self.assertEqual(json.loads(path.read_bytes())['payload_sha256'], sha(raw))
+                return self.response(json.dumps(envelope).encode())
+
+            with patch('tts_execution.send_once', side_effect=respond) as send:
+                result = execute_148_char_chat_trial(KEY)
+                self.assertEqual(result['usage']['seconds'], 21)
+                self.assertEqual((trial/'B_next_gemini.wav').read_bytes(), buf.getvalue())
+                with self.assertRaises(FileExistsError):
+                    execute_148_char_chat_trial(KEY)
+                send.assert_called_once()
+            receipt = json.loads((trial/'chat_approval_receipt.json').read_bytes())
+            self.assertEqual(receipt['consent_source'], 'explicit_chat_user_approval_2026-11-11')
+            self.assertFalse(receipt['owner_hmac_signature'])
+            with self.assertRaisesRegex(CompanyError, 'tts_execution_disabled'):
+                TTSExecution(trial).execute(KEY)
+
+    def test_148_chat_blocks_invalid_evidence_and_consumes_oversize_response(self):
+        from tts_execution import execute_148_char_chat_trial
+
+        with tempfile.TemporaryDirectory() as root, patch('socket.socket.connect', side_effect=AssertionError('offline')):
+            selection, approval, raw = self.setup_148_chat(root)
+            payload = selection/'next_payload_REVIEW_ONLY.json'
+            with patch('tts_execution.send_once') as send:
+                payload.write_bytes(raw + b' ')
+                with self.assertRaisesRegex(CompanyError, 'tts_148_payload_changed'):
+                    execute_148_char_chat_trial(KEY)
+                payload.write_bytes(raw)
+                approved = approval.read_bytes()
+                approval.write_bytes(approved + b' ')
+                with self.assertRaisesRegex(CompanyError, 'tts_148_approval_changed'):
+                    execute_148_char_chat_trial(KEY)
+                approval.write_bytes(approved)
+                with self.assertRaisesRegex(CompanyError, 'tts_chat_key_changed'):
+                    execute_148_char_chat_trial(KEY + 'changed')
+                account = selection/'account.json'
+                account.write_text('{"billing_enabled":true}')
+                with self.assertRaisesRegex(CompanyError, 'tts_chat_paid_account_evidence'):
+                    execute_148_char_chat_trial(KEY)
+                account.unlink()
+                prior = selection/'previous_attempt.json'
+                prior.write_text('{}')
+                with self.assertRaisesRegex(CompanyError, 'tts_148_prior_attempt'):
+                    execute_148_char_chat_trial(KEY)
+                prior.unlink()
+                send.assert_not_called()
+                self.assertFalse((selection/'next_trial').exists())
+
+                send.return_value = self.response(raw=b'x' * 2000001)
+                with self.assertRaisesRegex(CompanyError, 'tts_attempt_failed_no_retry'):
+                    execute_148_char_chat_trial(KEY)
+                send.return_value.read.assert_called_once_with(2000001)
+                result = json.loads((selection/'next_trial/result.json').read_bytes())
+                self.assertEqual(result['validation_code'], 'tts_response_limit')
+                with self.assertRaises(FileExistsError):
+                    execute_148_char_chat_trial(KEY)
+                send.assert_called_once()

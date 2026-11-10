@@ -68,7 +68,7 @@ class GeminiTTSAdapter:
         with wave.open(io.BytesIO(audio)) as wav:
             frames = wav.getnframes()
             require(wav.getnchannels() == 1 and wav.getsampwidth() == 2 and wav.getframerate() == 24000
-                    and wav.getcomptype() == 'NONE' and 0 < frames <= 480000
+                    and wav.getcomptype() == 'NONE' and 0 < frames <= 24000 * job.get('max_seconds', 20)
                     and len(wav.readframes(frames)) == frames*2, 'tts_audio_format')
         return audio, dict(input_tokens=usage['total_input_tokens'], output_tokens=usage['total_output_tokens'], seconds=frames/24000)
 
@@ -201,29 +201,36 @@ class TTSExecution:
         require(key.encode() not in raw and key not in canonical_bytes(scope).decode(), 'tts_secret_in_payload')
         if (self.root/'attempt.json').exists() or (self.root/'attempt.json').is_symlink():
             raise FileExistsError('tts_attempt_already_consumed')
-        for name in ('B_gemini.wav', 'result.json'):
+        output = Path(scope['output'])
+        for name in (output.name, 'result.json'):
             require(not (self.root/name).exists() and not (self.root/name).is_symlink(), 'tts_output_exists')
         if reservation_guard is not None:
-            private_write(reservation_guard, canonical_bytes(dict(at=now(), root=str(self.root), retry=False)))
+            private_write(reservation_guard, canonical_bytes(dict(at=now(), root=str(self.root), payload_sha256=sha(raw), retry=False)))
         self._write('attempt.json', dict(status='reserved_consumed', at=now(), scope_hash=digest(scope),
-            consent_hash=digest(consent), retry=False))
+            consent_hash=digest(consent), payload_sha256=sha(raw), retry=False))
         http_status = None
+        stage = 'transport'
         try:
             # send_once uses a direct opener with no proxy, redirects, or retry.
             with send_once(request, 30) as response:
                 http_status = response.status
                 require(response.status == 200, 'tts_http_failed')
+                stage = 'response_headers'
                 declared = response.headers.get('Content-Length')
                 require(declared is None or 0 <= int(declared) <= 2000000, 'tts_response_limit')
                 require(response.headers.get_content_type() == 'application/json', 'tts_response_type')
+                stage = 'response_body'
                 encoded = response.read(2000001)
+            stage = 'audio_validation'
             audio, usage = GeminiTTSAdapter.decode(encoded, job)
             require(key.encode() not in audio, 'tts_secret_in_response')
-            output = self.root/'B_gemini.wav'; private_write(output, audio)
+            stage = 'audio_write'
+            private_write(output, audio)
+            stage = 'media_verification'
             probe = json.loads(run_command(['ffprobe', '-v', 'error', '-show_streams', '-of', 'json', str(output)], stage='ffprobe_audio'))
             require(len(probe['streams']) == 1 and probe['streams'][0]['codec_name'] == 'pcm_s16le', 'tts_codec')
             run_command(['ffmpeg', '-v', 'error', '-xerror', '-i', str(output), '-f', 'null', '-'], stage='ffmpeg_decode')
-            result = dict(status='audio_validated', audio_sha256=sha(audio), codec='pcm_s16le', sample_rate=24000,
+            result = dict(status='audio_validated', audio_sha256=sha(audio), codec='pcm_s16le', sample_rate=24000, channels=1, audio_bytes=len(audio),
                 decoded=True, usage=usage, quality='unassessed', publish_ready=False, rights='unverified',
                 http_status=http_status,
                 spoken_text_match='unverified_requires_human_AB', retry=False,
@@ -235,7 +242,10 @@ class TTSExecution:
             elif isinstance(exc, TimeoutError): category = 'timeout'
             elif isinstance(exc, URLError): category = 'network_or_tls_error'
             self._write('result.json', dict(status='failed_or_uncertain', retry=False,
-                http_status=http_status, error_category=category))
+                http_status=http_status, error_category=category, stage=stage,
+                validation_code=str(exc) if type(exc) is CompanyError and str(exc) in (
+                    'tts_http_failed', 'tts_response_limit', 'tts_response_type', 'tts_incomplete',
+                    'tts_usage_limit', 'tts_audio_envelope', 'tts_audio_format', 'tts_codec') else None))
             raise CompanyError('tts_attempt_failed_no_retry') from None
         self._write('result.json', result)
         return result
@@ -265,6 +275,33 @@ def execute_chat_trial(runner, key):
             'tts_chat_scope_mismatch')
     require(not CHAT_APPROVAL.is_symlink() and sha(CHAT_APPROVAL.read_bytes()) == CHAT_APPROVAL_SHA,
             'tts_chat_approval_changed')
+    listing_sha = _chat_free_key_evidence(key)
+    bases = [base for base in (REPO_ROOT/'data').iterdir() if base.is_dir() and 'tts' in base.name]
+    _check_chat_billing(bases)
+    for base in bases:
+        for path in base.rglob('attempt.json'):
+            if path == runner.root/'attempt.json':
+                raise FileExistsError('tts_trial_already_consumed')
+            # The only previous mock attempt is explicit and not a live operation.
+            if path.parent.name == 'mock_project':
+                value = json.loads(path.read_bytes())
+                require(value.get('simulation') is True, 'tts_chat_prior_attempt')
+            else: require(False, 'tts_chat_prior_attempt')
+    GeminiTTSAdapter.request(raw, key)
+    consent = dict(policy='user_chat_approved_single_free_tts_trial',
+        consent_source='explicit_chat_user_approval_2026-11-10',
+        approval_document_sha256=CHAT_APPROVAL_SHA, scope_hash=digest(scope),
+        account_evidence_source='owner_screenshot_free_tier', independently_verified=False,
+        billing='owner_reported_not_linked', quota_remaining='unknown', region='unverified',
+        model_list_receipt_sha256=listing_sha,
+        owner_hmac_signature=False, max_requests=1, max_cost_usd=0, paid_fallback=False,
+        provider_zero_cost_independently_guaranteed=False)
+    runner._write('chat_approval_receipt.json', consent)
+    return runner._send_authorized(key, job, scope, raw, consent,
+        reservation_guard=CHAT_TRIAL_ROOT.parent/'trial_attempt.json')
+
+
+def _chat_free_key_evidence(key):
     # Reuse actual authenticated list evidence, without another external request.
     listing_path = REPO_ROOT/'data/gemini_tts_model_list/20261110T160007_KST/result.json'
     require(not listing_path.is_symlink(), 'tts_chat_evidence_invalid')
@@ -287,30 +324,102 @@ def execute_chat_trial(runner, key):
             and record.get('project') == 'Default Gemini Project'
             and hmac.compare_digest(record['credential_binding'], signer._sign(dict(scope=record['scope'], credential=key))),
             'tts_chat_key_changed')
-    # Stop on any recorded contrary account evidence. Never claim independent billing verification.
-    for base in (REPO_ROOT/'data').iterdir():
-        if base.is_dir() and ('tts' in base.name):
-            for path in base.rglob('account.json'):
-                data = json.loads(path.read_bytes()); evidence = data.get('record', {}).get('evidence', {})
-                require(evidence.get('billing') != 'enabled' and evidence.get('tier') != 'Paid',
-                        'tts_chat_paid_account_evidence')
-            for path in base.rglob('attempt.json'):
-                if path == runner.root/'attempt.json':
-                    raise FileExistsError('tts_trial_already_consumed')
-                # The only previous mock attempt is explicit and not a live operation.
-                if path.parent.name == 'mock_project':
-                    value = json.loads(path.read_bytes())
-                    require(value.get('simulation') is True, 'tts_chat_prior_attempt')
-                else: require(False, 'tts_chat_prior_attempt')
+    return sha(listing_path.read_bytes())
+
+
+def _check_chat_billing(bases):
+    for base in bases:
+        for path in base.rglob('account.json'):
+            data = json.loads(path.read_bytes())
+            evidence = data.get('record', {}).get('evidence', data)
+            require(str(evidence.get('billing')).lower() not in ('enabled', 'active', 'linked', 'true')
+                    and str(evidence.get('tier')).lower() != 'paid'
+                    and evidence.get('billing_enabled') is not True, 'tts_chat_paid_account_evidence')
+
+
+NEXT_PAYLOAD_SHA = '1216b0c8c575c37dbaba04e18d474bbee13c4aa67e33f12edc519466b05cf354'
+NEXT_TEXT_SHA = 'dee1aef757a0c7edac0a6314fef7559591bab1e506ab59066dbb62a5fe3d243b'
+NEXT_APPROVAL_SHA = 'ca18d0dd0ead1676ef96942cf7f02dd87d004460281d0c85b3b9f78d4a659c1e'
+NEXT_STYLE = '친근하고 또렷한 한국어 대화체. 질문 뒤 짧게 쉬고 의미 단위로 나눠 말하기. 과장·성우 모사 없음.'
+
+
+def execute_148_char_chat_trial(key):
+    """Execute only the 2026-11-11 approved wire and consume its own reservation."""
+    data = REPO_ROOT/'data'
+    selection = data/'video_voice_selection/20261110_v1'
+    runner = TTSExecution(selection/'next_trial')
+    guard = selection/'next_trial_attempt.json'
+    output = runner.root/'B_next_gemini.wav'
+    if any(path.exists() or path.is_symlink() for path in (runner.root, guard)):
+        raise FileExistsError('tts_148_output_or_reservation_exists')
+
+    approval = REPO_ROOT/'docs/RUN_APPROVED_GEMINI_TTS_148_CHARS_20261111.md'
+    require(not approval.is_symlink() and sha(approval.read_bytes()) == NEXT_APPROVAL_SHA,
+            'tts_148_approval_changed')
+    payload = selection/'next_payload_REVIEW_ONLY.json'
+    require(not payload.is_symlink() and payload.is_file() and payload.stat().st_size == 814,
+            'tts_148_payload_changed')
+    raw = payload.read_bytes()
+    require(sha(raw) == NEXT_PAYLOAD_SHA, 'tts_148_payload_changed')
+    wire = json.loads(raw)
+    text = wire['input'][0]['content'][0]['text']
+    require(len(text) == 148 and sha(text.encode()) == NEXT_TEXT_SHA
+            and wire == dict(model='gemini-3.8-flash-tts', store=False,
+                input=[dict(type='user_input', content=[dict(type='text', text=text,
+                    annotations=[dict(type='speech_metadata', style=NEXT_STYLE)])])],
+                generation_config=dict(max_output_tokens=1024, speech_config=[dict(voice='Puck')]),
+                response_format=dict(type='audio', mime_type='audio/wav', sample_rate=24000))
+            and raw == canonical_bytes(wire), 'tts_148_payload_structure')
     GeminiTTSAdapter.request(raw, key)
-    consent = dict(policy='user_chat_approved_single_free_tts_trial',
-        consent_source='explicit_chat_user_approval_2026-11-10',
-        approval_document_sha256=CHAT_APPROVAL_SHA, scope_hash=digest(scope),
-        account_evidence_source='owner_screenshot_free_tier', independently_verified=False,
-        billing='owner_reported_not_linked', quota_remaining='unknown', region='unverified',
-        model_list_receipt_sha256=sha(listing_path.read_bytes()),
-        owner_hmac_signature=False, max_requests=1, max_cost_usd=0, paid_fallback=False,
-        provider_zero_cost_independently_guaranteed=False)
+    listing_sha = _chat_free_key_evidence(key)
+    previous = TTSExecution(CHAT_TRIAL_ROOT)
+    old_scope = json.loads(previous._read('scope.json'))
+    old_consent = json.loads(previous._read('chat_approval_receipt.json'))
+    old_attempt = json.loads(previous._read('attempt.json'))
+    old_result = json.loads(previous._read('result.json'))
+    project = old_scope['project']
+    require(sha(project.encode()) == CHAT_PROJECT_SHA
+            and old_scope['payload_sha256'] == CHAT_PAYLOAD_SHA
+            and old_consent.get('scope_hash') == old_attempt.get('scope_hash') == digest(old_scope)
+            and old_attempt.get('consent_hash') == digest(old_consent)
+            and old_consent.get('account_evidence_source') == 'owner_screenshot_free_tier'
+            and old_consent.get('billing') == 'owner_reported_not_linked'
+            and old_consent.get('model_list_receipt_sha256') == listing_sha
+            and old_result.get('http_status') == 200 and old_result.get('status') == 'audio_validated'
+            and (previous.root.parent/'trial_attempt.json').is_file(), 'tts_148_free_trial_evidence')
+
+    bases = [base for base in data.iterdir()
+             if base.is_dir() and ('tts' in base.name or 'voice' in base.name or 'gemini' in base.name)]
+    _check_chat_billing(bases)
+    known_attempts = {previous.root/'attempt.json', previous.root.parent/'trial_attempt.json',
+        data/'gemini_tts_model_list/20261110T160007_KST/page_1_attempt.json'}
+    for base in bases:
+        for path in base.rglob('*attempt*.json'):
+            if path in known_attempts:
+                continue
+            require(not path.is_symlink() and path.parent.name == 'mock_project'
+                    and json.loads(path.read_bytes()).get('simulation') is True, 'tts_148_prior_attempt')
+        for path in base.rglob('*receipt*.json'):
+            if NEXT_PAYLOAD_SHA.encode() not in path.read_bytes():
+                continue
+            record = json.loads(path.read_bytes())
+            require(path == selection/'execution_receipt.json' and record.get('simulation') is True
+                    and record.get('external_requests') == 0, 'tts_148_prior_receipt')
+        for path in base.rglob('*guard*.json'):
+            require(NEXT_PAYLOAD_SHA.encode() not in path.read_bytes(), 'tts_148_prior_attempt')
+
+    job = dict(model=wire['model'], max_response_bytes=2000000, max_seconds=35)
+    scope = dict(scope='video_tts_148_char_chat_once_20261111', project=project, model=job['model'],
+        voice='Puck', endpoint=ENDPOINT, payload_sha256=NEXT_PAYLOAD_SHA, text_sha256=NEXT_TEXT_SHA,
+        output=str(output), requests=1, max_cost_usd=0, store=False,
+        max_output_tokens=1024, local_max_seconds=35, local_max_response_bytes=2000000)
+    consent = dict(consent_source='explicit_chat_user_approval_2026-11-11',
+        approval_document_sha256=NEXT_APPROVAL_SHA, scope_hash=digest(scope),
+        account_evidence_source='owner_screenshot_free_tier', billing='owner_reported_not_linked',
+        model_list_receipt_sha256=listing_sha, prior_free_trial_http_status=200,
+        owner_hmac_signature=False, quota_remaining='unknown', region='unverified',
+        independently_verified=False, max_requests=1, max_cost_usd=0, paid_fallback=False)
+    runner.root.mkdir(mode=0o700, exist_ok=False)
+    runner._write('scope.json', scope)
     runner._write('chat_approval_receipt.json', consent)
-    return runner._send_authorized(key, job, scope, raw, consent,
-        reservation_guard=CHAT_TRIAL_ROOT.parent/'trial_attempt.json')
+    return runner._send_authorized(key, job, scope, raw, consent, reservation_guard=guard)

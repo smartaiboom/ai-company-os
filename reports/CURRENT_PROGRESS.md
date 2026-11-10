@@ -1,21 +1,17 @@
 # 현재 진행 현황 — 2026-11-10 KST
 
-| 단계 | 상태 | 판단 주체/실제 증거 | 미달·다음 입력 |
+| 단계 | 상태 | 실제 증거 | 다음 조건 |
 | --- | --- | --- | --- |
-| 실제 사용자 피드백3건 | 기록·선별 적용 | 두 시안 시청 의견을 별도 ExperienceJournal에 user_structured로 저장,fixture 아님 | 새 대상 적용/개선 효과는 가설,다른 대상0건 선택 |
-| 소재3후보 비교·선정 | 완료 | Codex 편집 판단+날짜/범위 명시 공개 자료 | 직장인 원문 날짜 검증 선택. 급상승 키워드 미확인 |
-| 대본 비판/재작성·초별 미디어 계획 | 완료 |30초 성능 주장 삭제,가상 오류 예시 고지 | 실제 LLM 응답 아님. script/manager_review/shot_plan |
-| 실제 움직임 검토 | 완료 |15초 무음,Flow2개4초씩1회+문서 대조7초,전체 decode | 새60초 아님. 기존 소스 권리 미확인,게시 불가 |
-| 음성 A | 실제 파일 보존 | 기존 Melo3구절10.982초 그대로 연결,새 합성0 | 사용자 ‘어색함’ 평가 유지,B 없음 |
-| 대체 음성 B | 보류 |Qwen0.6B Sohee 공식 조사/환경 확인 | 다운로드 무승인,가용RAM3.95GB<보수조건6.5GB,CPU 실행 미검증 |
-|60초 완성 게이트 | 실패/부분 완료 | 실제 파일·해시·카드/반복·음성 비교 검사 |6개 장면 자산 미확보+replacement_voice_pending |
-| 통합 검증 | 완료 |55개 중53pass/2skip,실패0 | 기존60초 재제작시험skip,원본 반복 실행 없음 |
-| 기존 자료 보존 | 완료 |45,454개 SHA-256/목록 일치 | 기존 변경/삭제0,새 작업 폴더 밖 추가0 |
-| 자율성/게시/최종 품질 | 미통과 |Codex+deterministic 도구,실제 회사 LLM API0 | 새 사용자 점수·자연스러움·게시 합격 없음 |
+| Qwen0.6B/Sohee 조건부 승인 | 받음 | docs/QWEN_TTS_CAPCUT_LEVEL_AB_20261110.md |모델+의존성 최대6GB/B최대1회/600초,자원 조건 유지 |
+| 현재 자원 사전 점검 | 실패 |11:24:19KST 실효 가용RAM3,886,338,048bytes<6.5GB.디스크11,398,340,608bytes>8GB |RAM 조건 충족 환경에서 재측정 |
+| 다운로드·설치 | 미시작 |download_receipt.json:0bytes/설치없음 |RAM 게이트 미달.추정 전체 패키지 크기도 미확정 |
+| B 음성 합성 | 미실행 |synthesis_receipt.json:0/1시도,B=null |조건 미달,우회·자동 재시도 없음 |
+| A 기준 음성·동일 대본 | 보존·검사 완료 |새 폴더의 A_reference_melo.wav 원본 SHA 일치,10.982초/probe·decode·RMS/peak 검사 |A 새 합성 없음,기술 통과가 자연스러움 합격 아님 |
+| CapCut 수준 목표 | 실제 사용자 선호로 기록 |별도 ExperienceJournal/quality_target.json,user_structured |실제 B 청취 전 발음·리듬·친근함/품질 미평가 |
+| 이전 시각·영상·원장 | 보존 완료 |기존45,499개 파일SHA·목록 일치 |변경/삭제0,새 A/B 폴더 밖 추가0 |
 
-새 자료: `data/video_quality_iteration/20261110T110100_KST/`.
-실제 출력: `motion_study/visual_motion_study_15s.mp4`, `contact_sheet.png`, `A_reference_melo.wav`.
-**새 B WAV/새60초 preview.mp4는 없음.** 마지막 완전한60초 시안은 `data/video_quality_iteration/20261110T102849_KST/preview.mp4`이며 이전 평가/파일을 유지한다.
-결과: `reports/USER_FEEDBACK_QUALITY_UPGRADE_RESULT.md`.
-단일 승인 미결정: 조건 충족 후 Qwen0.6B+CPU 의존성 최대6GB 준비와 동일 대본 B1회/600초. 자세한 범위·권리·실행 보류는 새 폴더의 tts_comparison_plan.md.
-GUI/웹 서버/무승인 설치·모델 다운로드/전체 Melo 재합성/미디어 업로드·게시 없음.
+새 준비/보류 자료: `data/tts_quality_ab/20261110T112419_KST/`.
+결과: `reports/QWEN_TTS_AB_RESULT.md`.
+**B WAV 없음.** 조건부 승인은 받았고 추가 승인 부족으로 차단한 것이 아니다. 현재 RAM 기준 때문에 다운로드부터 중단했다.
+지난15초 무음 시각 검토는 `data/video_quality_iteration/20261110T110100_KST/motion_study/visual_motion_study_15s.mp4`,마지막60초 시안은 `data/video_quality_iteration/20261110T102849_KST/preview.mp4`. 새60초 제작 없음.
+실제 외부AI0회/추가비용0/업로드·게시0.기존프로세스 강제종료/swap확대/환경강제변경/GUI 없음.

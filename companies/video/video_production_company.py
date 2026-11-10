@@ -67,3 +67,9 @@ def quality_tool_decision_context():
     """Read-only paid-tool preparation; does not enlarge the live tool allowlist."""
     from quality_tool_adapters import capabilities
     return capabilities()
+
+
+def prepare_staff_tts_job(text, reference, *, fictional, model='gemini-3.8-flash-tts', voice='Puck'):
+    """Voice employee handoff; isolated job and independent TTS approval required."""
+    from tts_job import prepare_voice_job
+    return prepare_voice_job(text, reference, fictional=fictional, model=model, voice=voice)

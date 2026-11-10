@@ -1,5 +1,7 @@
 # 현재 진행 현황 — 2026-11-10 KST
 
+최신 실제 A/B 실행: **대화상1회 승인은 인정했으나 최신 무료 조건 근거·로컬 개인 서명 미충족으로 전송 전 중단**. 기존 CLI prepare로 실제 프로젝트를 바인딩한 격리 루트 `data/gemini_tts_actual_ab/20261110T160649_KST/` 준비, 동일 payload 해시 검증. 생성요청0/1·attempt0/1·비용$0·B없음·상수False 유지. 모델 목록 재조회0·신규 코드0·원장 변경0. [실제 A/B 결과와 사용자 직접 CLI 세션 안내](GEMINI_TTS_ACTUAL_AB_RESULT.md). 다음 행동은 보고서에 모은 **계정 확인·개인 서명 터미널 세션** 하나이며 Codex가 대신 키 프롬프트/owner-confirmed를 처리하지 않는다.
+
 최신 실제 모델 조회: **기존 GEMINI_API_KEY로 models.list GET1회/HTTP200,61개 모델 반환**. 3.8 Flash TTS·3.8 Flash-Lite TTS·2.5 Flash Preview TTS 모두 응답에 포함. 목록 완결/추가 페이지0/재시도0. TTS 생성0·추론0·추가비용0원. [모델 목록 조회 결과](GEMINI_TTS_MODEL_LIST_CHECK_RESULT.md). 다음 최소 조치는 AI Studio에서3.8 Flash TTS의 잔여 무료쿼터와 Billing 비활성 확인. 실제 생성 서명 동의와 분리한다.
 
 이전 실제 음성1회 실행 점검: **무료 계정 증거와 exact-review 서명 동의가 없어 선예약 전 중단**. 실전송0회·선예약0/1·비용$0·실제 B 없음. 실행 상수 False 유지. [실행 결과](GEMINI_TTS_REAL_ONE_SHOT_RESULT.md). 기존 요청 해시/원 job/A 해시만 재검증했으며 원장·미디어·코드는 변경하지 않았다. 다음 행동은 실제 AI Studio 프로젝트 ID와 해당 모델 Free Tier/Billing 비활성/지역/잔여 요청·입출력 쿼터 확인 결과를 알려주는 것 하나다. 키는 보내지 않는다.

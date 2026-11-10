@@ -148,3 +148,29 @@ PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -v
 # 실제 MeloTTS와 60초 기술 시안까지 한 번에 검증: 새 경로를 지정
 AI_CLIP_ACCEPTANCE_ROOT=data/video_ai_clip_review/my-acceptance PYTHONPATH=core:companies/video python -B -m unittest discover -s tests -v
 ```
+
+## 관리자·직원 품질 루프와 피드백 (오프라인 계약 검증)
+
+`core/quality_feedback.py`는 기존 Store를 사용하는 별도 경험 저널과 계획 컨텍스트를,
+`companies/video/quality_workflow.py`는 기존 Company를 사용하는 영상 품질 어댑터를 제공한다.
+새 빈 로컬 폴더의 `Store.create(..., opt_in=True)` 결과에 `bind_context()`로
+`answers/constraints/capabilities/experiences/permissions`를 한 번 결합하고,
+`VideoQualityCompany(store, MockManagerProvider(...), MockEmployeeProvider(...)).run(id)`로 실행한다.
+`capabilities()`가 역할별 입력·출력 계약과 수동 클립 수입 경계를 제공한다.
+`permissions`는 정확히 `{"external_calls": false, "cost_limit": 0}`이어야 한다.
+기존 사용자 프로젝트 저장소를 지정하지 않는다.
+
+피드백은 원문과 명시적으로 구조화한 값으로 `ExperienceJournal.record()`에 저장하고,
+`select(domain=..., target_segment=...)`의 선택/제외 기록을 다음 프로젝트 컨텍스트에 전달한다.
+`record(..., replaces=id)`와 `withdraw()`는 수정·철회 이력을 보존한다.
+현재 자동 자연어 추론기는 없으며, 제공되는 모의 시나리오는 실제 AI 판단이 아니다.
+역할별 향후 모델 지시는 `ROLE_CONTRACTS`에 있지만 실제 provider 전송을 활성화하지 않는다.
+
+```bash
+PYTHONPATH=core:companies/video python -B -m unittest tests.test_quality_feedback -v
+```
+
+샘플은 테스트가 만드는 임시 저장소에서 실행된다. `QUALITY_SAMPLE_OUTPUT=/tmp/<파일명>.json`을
+지정하면 대본/샷 계획의 수정 전후 버전, 검토, 경험 적용/비적용 데이터를 보존한다.
+실제 미디어가 없는 이 계획 경로는 `external_clip_pending`으로 끝나며 완료·게시 승인을 하지 않는다.
+10점 체크리스트의 감각 품질은 미평가로 남긴다. 실제 모델·영상 품질 개선은 별도 승인·검증 대상이다.

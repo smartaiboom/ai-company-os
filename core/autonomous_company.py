@@ -280,13 +280,17 @@ class Company:
         with self.store.lock(project_id):
             return self._run_workflow(project_id)
 
+    def _workflow_context(self,p):return {}
+
+    def _delivery_blockers(self,p):return []
+
     def _employee_version_metadata(self,p,task):return {}
 
     def _validate_review_decision(self,p,task,review):pass
 
     def _run_workflow(self, project_id):
         p=self.store.load(project_id)
-        if p['status'] in ('delivered','stopped','needs_operational_permission'):return self.store.result(project_id)
+        if p['status'] in ('delivered','stopped','needs_operational_permission','external_clip_pending','needs_user_review'):return self.store.result(project_id)
         self._validate_mode(p)
         providers={'manager':self.manager.name,'employee':self.employee.name}
         require(p['providers'] in (None,providers),'provider_changed')
@@ -296,7 +300,7 @@ class Company:
             p['status']='running';self.store.save(p)
             while True:
                 base={'goal':p['goal'],'mode':p['mode'],'limits':p['limits'],
-                      'data_notice':self.data_notice}
+                      'data_notice':self.data_notice, **self._workflow_context(p)}
                 if p['phase']=='plan':
                     proposed=self._call(p,self.manager,'plan',None,base)
                     if isinstance(proposed,dict) and proposed.get('action') in ('stop','needs_operational_permission'):
@@ -366,6 +370,11 @@ class Company:
                     require(passed,'final_quality_unverified')
                     p['final']={**value,'provider':self.manager.name,'source':self.source}
                     p['events'].append({'at':now(),'event':'ai_manager_decision','phase':'finalize','actor':self.manager.name,'decision':value})
+                    blockers=self._delivery_blockers(p)
+                    if blockers:
+                        p['status']=blockers[0];p['reason_code']=blockers[0]
+                        self._commit(p,'delivery_blocked',blockers=blockers)
+                        return self.store.result(project_id)
                     self.store.deliver(p)
                     p['status']='delivered';p['phase']='done'
                     self._commit(p,'company_result_delivered',actor='system',artifacts=p['artifacts'])

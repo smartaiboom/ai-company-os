@@ -75,9 +75,12 @@ def prepare_staff_tts_job(text, reference, *, fictional, model='gemini-3.8-flash
     return prepare_voice_job(text, reference, fictional=fictional, model=model, voice=voice)
 
 
-def voice_staff_quality_context(selection, *, target_segment):
+def voice_staff_quality_context(selection, *, target_segment, video_brief=None):
     """Scoped recommendation for a new voice assignment; never authorizes TTS."""
-    from voice_quality import scoped_voice_policy, next_voice_sample
-    policy = scoped_voice_policy(selection, target_segment)
-    return dict(voice_policy=policy, next_sample=next_voice_sample() if policy['recommended'] else None,
-                external_calls=False, cost_limit=0)
+    from voice_quality import voice_policy_for_brief, next_voice_sample, AUDIENCE
+    policy = voice_policy_for_brief(selection, target_segment, video_brief)
+    sample=next_voice_sample() if (policy['recommended'] and target_segment==AUDIENCE and
+        (video_brief is None or video_brief['language']=='ko-KR' and video_brief['genre']=='ai_tips')) else None
+    if sample and policy.get('video_selection',{}).get('style'):
+        sample['direction']['style']=policy['video_selection']['style']
+    return dict(voice_policy=policy, next_sample=sample, external_calls=False, cost_limit=0)

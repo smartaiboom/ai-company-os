@@ -96,11 +96,11 @@ class VideoQualityCompany(Company):
     """Opt-in mock adapter over existing orchestration. Live providers remain rejected."""
     def _workflow_context(self, p):
         require('quality_context' in p, 'quality_context_required')
-        from voice_quality import scoped_voice_policy
+        from voice_quality import voice_policy_for_brief
         quality = p['quality_context']
         return dict(quality=deepcopy(quality), role_contracts=deepcopy(ROLE_CONTRACTS),
-                    video_roles=deepcopy(VIDEO_ROLES), voice_policy=scoped_voice_policy(
-                        quality['experiences'], quality['answers'].get('audience')))
+                    video_roles=deepcopy(VIDEO_ROLES), voice_policy=voice_policy_for_brief(
+                        quality['experiences'], quality['answers'].get('audience'),quality['answers'].get('video_voice_brief')))
 
     def _call(self, p, provider, phase, task_id, context):
         if 'previous_results' in context:
@@ -124,11 +124,11 @@ class VideoQualityCompany(Company):
 
     def _validate_review_decision(self,p,task,review):
         if p['quality_context']['capabilities'].get('voice_quality_contract_v1') is True:
-            from voice_quality import inspect_voice_stage, scoped_voice_policy
+            from voice_quality import inspect_voice_stage, voice_policy_for_brief
             quality=p['quality_context']
             previous=[next(t for t in p['assignments'] if t['id']==dep)['versions'][-1] for dep in task['depends_on']]
             inspection=inspect_voice_stage(task['role'],parse(task['versions'][-1]['content']),previous,
-                scoped_voice_policy(quality['experiences'],quality['answers'].get('audience')))
+                voice_policy_for_brief(quality['experiences'],quality['answers'].get('audience'),quality['answers'].get('video_voice_brief')))
         else: inspection=inspect_plan(task['role'],parse(task['versions'][-1]['content']))
         require(review['action'] != 'accept' or not inspection['defects'], 'known_plan_defects')
         task.setdefault('plan_inspections',[]).append(inspection)

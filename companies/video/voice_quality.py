@@ -102,27 +102,127 @@ def scoped_voice_policy(selection, audience):
         publish_ready=False, comparison='Melo A preserved; no general provider ranking')
 
 
+
+def select_video_voice(selection, brief):
+    """A versioned staff decision, never a voice-gender rule or execution grant."""
+    from autonomous_company import exact, text
+    exact(brief, ('channel_id','series_id','video_id','target_segment','language','topic','genre','mood',
+                  'brand_consistency','representative','exception','constraints'))
+    for field in ('channel_id','series_id','video_id','target_segment','language','topic','genre','mood'):
+        text(brief[field], 300)
+    require(type(brief['brand_consistency']) is bool and brief['constraints'] ==
+            dict(external_calls=False, publish_ready=False, max_cost_usd=0), 'voice_selection_permissions')
+    baseline = scoped_voice_policy(selection, brief['target_segment'])
+    fit = (brief['language'] == 'ko-KR' and brief['genre'] == 'ai_tips'
+           and brief['mood'] == 'friendly_explainer' and baseline['recommended'] is not None)
+    style = {'friendly_explainer':'친근하고 또렷한 한국어 대화체. 질문 뒤 짧게 쉬고 의미 단위로 나눠 말하기. 과장·성우 모사 없음.',
+             'news':'차분하고 명료한 정보 전달. 감정 과장·성우 모사 없음.',
+             'calm_information':'차분하고 또렷하게, 중요한 뜻을 구분하기. 과장·성우 모사 없음.',
+             'playful_shorts':'가볍고 경쾌하게, 정보는 또렷하게. 과장·성우 모사 없음.'}.get(brief['mood'])
+    candidate = None; status = 'unassessed'; reason = 'No matching listening evidence or designated representative; audition needed.'
+    rep = brief['representative']; exception = brief['exception']; matches = False
+    def validate_candidate(value):
+        exact(value, ('provider','model','voice'))
+        for val in value.values(): text(val, 200)
+    if rep is not None:
+        exact(rep, ('candidate','scope','channel_id','series_id','target_segment','language','mood','source','evidence_refs'))
+        validate_candidate(rep['candidate'])
+        require(rep['scope'] in ('channel','series') and rep['source'] in ('user_designated','evidence_based')
+                and isinstance(rep['evidence_refs'],list) and bool(rep['evidence_refs'])
+                and all(isinstance(ref,str) and bool(ref.strip()) for ref in rep['evidence_refs']), 'voice_representative_basis')
+        require(rep['channel_id'] == brief['channel_id'] and
+                (rep['scope']=='channel' or rep['series_id']==brief['series_id']), 'voice_representative_scope')
+        if rep['source']=='evidence_based':
+            require(fit and rep['candidate']==CANDIDATE and len(set(rep['evidence_refs']))>=2 and
+                    set(rep['evidence_refs']).issubset({ref['evaluation_sha256'] for ref in baseline['evidence_refs']}), 'voice_representative_unverified')
+        matches = all(rep[field] == brief[field] for field in ('target_segment','language','mood'))
+        if matches and brief['brand_consistency']:
+            candidate=deepcopy(rep['candidate']);status='representative_preferred'
+            reason='Matching existing channel/series representative takes precedence; designation is not listening verification.'
+        else: status='reassessment_required';reason='Audience/tone/consistency changed; representative needs reviewed reassessment.'
+    if exception is not None:
+        exact(exception, ('candidate','scope','reason','reviewed_by','review_note','version'))
+        validate_candidate(exception['candidate'])
+        require(exception['scope'] in ('video','series','channel') and exception['reviewed_by'] in ('user','manager')
+                and isinstance(exception['reason'],str) and len(exception['reason'].strip())>=5
+                and isinstance(exception['review_note'],str) and len(exception['review_note'].strip())>=5
+                and type(exception['version']) is int and exception['version']>=1, 'voice_exception_review_required')
+        candidate=deepcopy(exception['candidate']);status='reviewed_exception_unassessed'
+        reason=exception['reason']+' / '+exception['review_note']
+    elif rep is None and fit:
+        candidate=deepcopy(CANDIDATE);status='scoped_listening_candidate'
+        reason='Exact audience/language/AI-tip genre/friendly tone match to the actual B preference; no channel default created.'
+    tested = candidate == CANDIDATE and fit
+    result=dict(contract='video_voice_selection_v1', decision_version=1, decided_by='deterministic_policy_for_voice_staff',
+        brief=deepcopy(brief), brief_sha256=digest(brief), candidate=candidate, style=style, status=status,
+        reason=reason, listening_status='scoped_user_AB_7_of_10' if tested else 'unassessed',
+        selected_voice_score=7 if tested else None, selected_evidence_refs=baseline['evidence_refs'] if tested else [],
+        reference_AB_score=baseline['baseline_score'], reference_AB_scope='the_original_B_sample_only',
+        target_score=8 if tested else None, improvement_status='hypothesis',
+        permission_to_generate=False, publish_ready=False, channel_default_created=False)
+    result['decision_sha256']=digest(result)
+    return result
+
+
+def voice_policy_for_brief(selection, audience, brief=None):
+    policy=scoped_voice_policy(selection,audience)
+    if brief is not None:
+        require(brief['target_segment']==audience, 'voice_brief_audience_mismatch')
+        decision=select_video_voice(selection,brief)
+        policy.update(recommended=decision['candidate'],baseline_score=decision['selected_voice_score'],
+            target_score=decision['target_score'],evidence_refs=decision['selected_evidence_refs'],video_selection=decision)
+    return policy
+
+
+def record_voice_selection(journal, journal_id, decision, *, selection):
+    """Reuse ExperienceJournal for scoped choices/exceptions; never invent user feedback."""
+    require(decision == select_video_voice(selection,decision['brief']), 'voice_decision_changed')
+    value=deepcopy(decision);expected=value.pop('decision_sha256',None)
+    require(expected==digest(value) and decision['permission_to_generate'] is False
+            and decision['publish_ready'] is False, 'voice_decision_changed')
+    lock=os.open(journal.store.root/'.voice-selection.lock',os.O_CREAT|os.O_RDWR|os.O_NOFOLLOW,0o600)
+    try:
+        fcntl.flock(lock,fcntl.LOCK_EX)
+        p=journal.store.load(journal_id)
+        matches=[e for e in p['experiences'] if json.loads(e['evidence']).get('decision_sha256')==expected]
+        if matches:return matches[0]
+        brief=decision['brief']
+        return journal.record(journal_id,'Codex-authored offline voice-selection decision; no new user listening evaluation.',dict(
+            project=brief['video_id'],domain='video',target_segment=brief['target_segment'],
+            issue='Per-video voice/brand selection; new audio unassessed',
+            positive_preference=decision['reason'],proposed_correction='Audition and explicit generation approval remain separate',
+            evidence=json.dumps(dict(decision_sha256=expected,brief=brief,candidate=decision['candidate']),ensure_ascii=False),
+            source='voice_selection_contract_v1_codex_authored',confidence=.5,verification='hypothesis'),provenance='offline_fixture')
+    finally:fcntl.flock(lock,fcntl.LOCK_UN);os.close(lock)
+
 def next_voice_sample():
-    """One authored fictional20s proposal. Text/style preparation is not synthesis."""
+    """One authored fictional proposal; timing is estimated until synthesis. Text/style preparation is not synthesis."""
     scenes = [
-        (3, '금요일 세 시, 회의가 확정된 걸까요?', '원문 시각 선택', '세 시: 숫자 읽기 확인'),
-        (5, '설명을 위한 가상 메모예요. 금요일 세 시는 제안이고, 회의는 아직 미정입니다.', '제안/미정 분리 표시', '미정 뒤 의미 단위 쉼'),
-        (7, '목요일까지 고객에게 확인하고 다시 알려주겠다는 말은, 확인 업무의 기한이죠.', '목요일 확인 업무 강조', '목요일/금요일 구분 청취'),
-        (5, '회의 시간과 확인 기한, 두 칸으로 나눠 보세요.', '두 칸 문서 대조', '두 칸을 가볍게 강조')]
+        (3, '금요일 세 시. 회의가 확정된 걸까요?', '원문 시각 선택', '세 시: 숫자 읽기 확인'),
+        (5, '이건 가상 회의 메모예요. 금요일 세 시는 제안일 뿐, 아직 확정이 아닙니다.', '제안/미정 분리 표시', '미정 뒤 의미 단위 쉼'),
+        (7, '반면, 목요일까지 고객에게 확인하고 다시 알려주겠다는 말은 확인 업무의 기한이죠.', '목요일 확인 업무 강조', '목요일/금요일 구분 청취'),
+        (5, '회의 시간은 미정, 확인 기한은 목요일. 두 칸으로 나눠 보세요.', '두 칸 문서 대조', '두 칸을 가볍게 강조')]
     parts = [dict(id=f'scene-{i+1}', seconds=seconds, narration=text, visual=visual,
-                  subtitle=text, pronunciation_check=check) for i, (seconds, text, visual, check) in enumerate(scenes)]
+                  subtitle=text, pronunciation_check=check, actual_seconds=None) for i, (seconds, text, visual, check) in enumerate(scenes)]
     narration = ' '.join(p['narration'] for p in parts)
     return dict(authorship='codex-authored', title='금요일 세 시, 확정인가요?', audience=AUDIENCE,
         fictional=True, narration=narration, narration_sha256=sha(narration.encode()), scenes=parts,
-        target_seconds=20, actual_seconds=None,
+        target_seconds=20, actual_seconds=None, accepted_actual_seconds_range=[15,35],
+        revision_of_narration_sha256='2cdff7ca3a91bbeaa4249cd3765c65548fdec016a9688dd1d9af13f7e49556ea',
+        revision_notes=['질문 전 의미 쉼을 문장부호로 표시','제안/확정과 목요일/금요일 대조 명시'],
         source_text='가상 메모: 민수가 금요일 세 시를 제안. 고객 확인 필요로 회의는 미정. 민수가 목요일까지 확인 후 재공유.',
         fact_checks=[dict(claim='금요일 세 시는 제안/회의는 미정', source='source_text', status='fictional_source_consistent'),
                      dict(claim='목요일은 확인 후 재공유 기한', source='source_text', status='fictional_source_consistent')],
         direction=dict(style='친근하고 또렷한 한국어 대화체. 질문 후 짧게 쉬고 제안과 미정을 자연스럽게 구분. 과장·성우 모사 없음.',
             editorial_only=['쉼표 위치/호흡은 청취 확인', '서두르지 않기; 실제 발화 길이로 검토', '숫자·영어·고유명사 등장 시 발음표 확인'],
             supported_style_field='speech_metadata.style', extra_wire_parameters={}),
-        proposed_limits=dict(requests=1, max_cost_usd=0, max_output_tokens=1024, max_response_bytes=2000000, max_audio_seconds=20),
-        timing='target_only_actual_speech_and_subtitle_sync_unmeasured',
+        proposed_limits=dict(requests=1, max_cost_usd=0, max_output_tokens=1024, max_response_bytes=2000000, max_audio_seconds=35),
+        timing='estimate_only_align_scenes_after_measuring_audio',
+        comparison_rubric=dict(reference_audio_sha256=BINDINGS['B'],reference_overall_score=7,
+            target_overall_score=8,new_overall_score=None,
+            dimensions=[dict(id=i,before=None,after=None,evaluator='user_pending') for i in
+                ('voice_tone','listening_ease','pace_pauses','hook_delivery')],
+            caveat='기존8초와 새 긴 샘플은 다른 발화이므로 길이·문맥 차이를 고려하며 모델 우열로 일반화하지 않는다'),
         authorization='not_granted_new_exact_payload_approval_required', publish_ready=False)
 
 
@@ -131,14 +231,22 @@ def inspect_voice_stage(role, value, previous, policy):
     expected_refs = [dict(task_id=r['task_id'], revision=r['revision'], result_hash=digest(r)) for r in previous]
     require(value.get('upstream_refs') == expected_refs, 'voice_handoff_changed')
     require(value.get('authorship') == 'codex-authored' and value.get('publish_ready') is False, 'voice_authorship_or_publish_claim')
+    require(value.get('video_voice_selection') == policy.get('video_selection'), 'voice_selection_handoff_changed')
     if role == 'writer':
         sample = value['sample']; scenes = sample['scenes']
+        if policy.get('video_selection') is not None:
+            brief=policy['video_selection']['brief']
+            require(sample['audience']==brief['target_segment']==AUDIENCE and brief['language']=='ko-KR'
+                    and brief['genre']=='ai_tips', 'voice_sample_scope_mismatch')
         require(sample['narration'] == ' '.join(s['narration'] for s in scenes)
                 and sample['narration_sha256'] == sha(sample['narration'].encode()), 'voice_narration_changed')
         require(all(type(s['seconds']) in (int, float) and math.isfinite(s['seconds']) and s['seconds'] > 0
                     and s['subtitle'] == s['narration'] for s in scenes)
                 and sum(s['seconds'] for s in scenes) == sample['target_seconds'] == 20, 'voice_timeline_changed')
         require(sample['fictional'] is True and sample['actual_seconds'] is None
+                and sample['accepted_actual_seconds_range'] == [15,35]
+                and sample['timing'] == 'estimate_only_align_scenes_after_measuring_audio'
+                and sample['comparison_rubric']['new_overall_score'] is None
                 and sample['direction']['extra_wire_parameters'] == {}
                 and sample['authorization'] == 'not_granted_new_exact_payload_approval_required'
                 and bool(sample['fact_checks']), 'voice_unverified_generation')
@@ -166,12 +274,12 @@ def run_voice_quality_offline(store, project_id):
     def manager(phase, context):
         policy = context['voice_policy']
         if phase == 'plan':
-            require(policy['baseline_score'] == 7, 'voice_scoped_feedback_required')
+            require(policy.get('video_selection') is not None or policy['baseline_score'] == 7, 'voice_scoped_feedback_required')
             tasks = [dict(id=role, title=role, role=role, depends_on=deps, criteria_ids=['handoff'],
                 instructions='인수 해시/원문/장면 시간/사용자7점 기준과8점 목표를 구분. 추가 생성/게시 불허.')
                 for role, deps in [('writer', []), ('voice', ['writer']), ('editor', ['writer', 'voice']), ('qa', ['writer', 'voice', 'editor'])]]
             value = dict(tasks=tasks, criteria=[dict(id='handoff', description='실제 사용자 평가에 근거한 오프라인 음성 인수 계약')],
-                rationale='Codex-authored contract; B7/10 observed, next8/10 hypothesis', uncertainty='No new audio or live model decision')
+                rationale='Codex-authored per-video voice contract; original B7/10 only, future quality hypothesis', uncertainty='No new audio or live model decision')
         elif phase == 'review':
             value = dict(action='accept', rationale='인수 계약만 확인; 음질 합격 아님', evidence='deterministic_voice_handoff_check',
                 uncertainty='새 음성 없음', checks=[dict(criterion_id='handoff', status='met', evidence='hash/timing/score scope checked', source='model_claim')], feedback='', operation=None)
@@ -184,7 +292,11 @@ def run_voice_quality_offline(store, project_id):
         role = context['assignment']['role']; previous = context['previous_results']; policy = context['voice_policy']
         value = dict(contract='voice_quality_v1', role=role, authorship='codex-authored', publish_ready=False,
             upstream_refs=[dict(task_id=r['task_id'], revision=r['revision'], result_hash=digest(r)) for r in previous])
-        if role == 'writer': value['sample'] = next_voice_sample()
+        if 'video_selection' in policy: value['video_voice_selection']=deepcopy(policy['video_selection'])
+        if role == 'writer':
+            value['sample']=next_voice_sample()
+            if policy.get('video_selection',{}).get('style'):
+                value['sample']['direction']['style']=policy['video_selection']['style']
         elif role == 'voice':
             sample = json.loads(previous[0]['content'])['sample']
             value.update(narration_sha256=sample['narration_sha256'], candidate=policy['recommended'],

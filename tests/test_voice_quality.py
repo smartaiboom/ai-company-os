@@ -88,3 +88,82 @@ class VoiceQualityTests(unittest.TestCase):
         with self.assertRaises(CompanyError):inspect_voice_stage('writer',changed,[],{})
         changed=deepcopy(writer);changed['sample']['direction']['extra_wire_parameters']={'speed':1.3}
         with self.assertRaises(CompanyError):inspect_voice_stage('writer',changed,[],{})
+
+
+    def brief(self, video_id='tip-1'):
+        return dict(channel_id='work-ai',series_id='ai-tips',video_id=video_id,target_segment=AUDIENCE,
+            language='ko-KR',topic='가상 회의 메모 구분',genre='ai_tips',mood='friendly_explainer',
+            brand_consistency=True,representative=None,exception=None,
+            constraints=dict(external_calls=False,publish_ready=False,max_cost_usd=0))
+
+    def representative(self):
+        return dict(candidate=dict(provider='gemini_developer',model='gemini-3.8-flash-tts',voice='Kore'),
+            scope='series',channel_id='work-ai',series_id='ai-tips',target_segment=AUDIENCE,language='ko-KR',
+            mood='friendly_explainer',source='user_designated',evidence_refs=['fixture-user-setting-not-listening-proof'])
+
+    def test_per_video_selection_consistency_reassessment_and_no_global_default(self):
+        from voice_quality import select_video_voice, record_voice_selection
+        evidence=self.record();selection=evidence['selection']
+        first=select_video_voice(selection,self.brief());second=select_video_voice(selection,self.brief('tip-2'))
+        self.assertEqual(first['candidate']['voice'],'Puck');self.assertEqual(second['candidate']['voice'],'Puck')
+        self.assertNotEqual(first['decision_sha256'],second['decision_sha256'])
+        self.assertFalse(first['channel_default_created']);self.assertEqual(first['selected_voice_score'],7)
+        brief=self.brief();brief['representative']=self.representative()
+        rep=select_video_voice(selection,brief)
+        self.assertEqual(rep['candidate']['voice'],'Kore');self.assertIsNone(rep['selected_voice_score'])
+        self.assertEqual(rep['listening_status'],'unassessed');self.assertEqual(rep['reference_AB_score'],7)
+        brief['mood']='news';changed=select_video_voice(selection,brief)
+        self.assertIsNone(changed['candidate']);self.assertEqual(changed['status'],'reassessment_required')
+        other=self.brief('children-1');other.update(target_segment='초등학생',genre='story',mood='playful_shorts')
+        self.assertIsNone(select_video_voice(selection,other)['candidate'])
+        journal=ExperienceJournal(self.root/'decisions');jid=journal.create()
+        entry=record_voice_selection(journal,jid,rep,selection=selection)
+        self.assertEqual(record_voice_selection(journal,jid,rep,selection=selection),entry)
+        self.assertEqual(entry['verification'],'hypothesis');self.assertEqual(entry['extraction_source'],'offline_fixture')
+
+    def test_exceptions_require_reason_review_and_never_grant_generation(self):
+        from voice_quality import select_video_voice, record_voice_selection
+        selection=self.record()['selection'];brief=self.brief();brief['representative']=self.representative()
+        override=dict(candidate=dict(provider='gemini_developer',model='gemini-3.8-flash-tts',voice='Puck'),
+            scope='video',reason='가상 변경 이유 검토',reviewed_by='manager',review_note='offline authored review fixture',version=1)
+        brief['exception']=override
+        valid=select_video_voice(selection,brief);self.assertEqual(valid['status'],'reviewed_exception_unassessed')
+        for key,bad in [('reason',''),('reviewed_by',''),('review_note',''),('version',True)]:
+            invalid=deepcopy(brief);invalid['exception'][key]=bad
+            with self.subTest(key=key),self.assertRaises(CompanyError):select_video_voice(selection,invalid)
+        invalid=self.brief();invalid['constraints']['external_calls']=True
+        with self.assertRaises(CompanyError):select_video_voice(selection,invalid)
+        invalid=self.brief();invalid['representative']=self.representative()
+        invalid['representative'].update(source='evidence_based',candidate=dict(provider='gemini_developer',model='gemini-3.8-flash-tts',voice='Puck'),
+            evidence_refs=[json.loads(selection['selected'][0]['evidence'])['evaluation_sha256']])
+        with self.assertRaises(CompanyError):select_video_voice(selection,invalid)
+        journal=ExperienceJournal(self.root/'bad-decisions');jid=journal.create()
+        tampered=deepcopy(valid);tampered['permission_to_generate']=True
+        with self.assertRaises(CompanyError):record_voice_selection(journal,jid,tampered,selection=selection)
+
+    def test_video_selection_reaches_all_engine_handoffs_and_new_sample_is_unmeasured(self):
+        from voice_quality import voice_policy_for_brief
+        evidence=self.record();brief=self.brief();store=Store(self.root/'video-selection-company')
+        p=store.create('Per-video voice contract',opt_in=True);caps=capabilities();caps['voice_quality_contract_v1']=True
+        bind_context(store,p['id'],dict(answers={'audience':AUDIENCE,'video_voice_brief':brief},constraints={'new_audio':False},
+            capabilities=caps,experiences=evidence['selection'],permissions={'external_calls':False,'cost_limit':0}))
+        result=run_voice_quality_offline(store,p['id']);self.assertEqual(result['reason_code'],'manager_final_stopped')
+        expected=voice_policy_for_brief(evidence['selection'],AUDIENCE,brief)
+        for task in result['assignments']:
+            value=json.loads(task['versions'][-1]['content'])
+            self.assertEqual(value['video_voice_selection']['decision_sha256'],expected['video_selection']['decision_sha256'])
+        writer,voice,editor,qa=[t['versions'][-1] for t in result['assignments']]
+        value=json.loads(voice['content']);tampered=deepcopy(value)
+        tampered['video_voice_selection']['selected_voice_score']=8
+        with self.assertRaises(CompanyError):inspect_voice_stage('voice',tampered,[writer],expected)
+        sample=json.loads(writer['content'])['sample']
+        self.assertEqual(sample['accepted_actual_seconds_range'],[15,35]);self.assertIsNone(sample['actual_seconds'])
+        self.assertEqual(sample['proposed_limits']['max_audio_seconds'],35)
+        self.assertIsNone(sample['comparison_rubric']['new_overall_score'])
+        self.assertTrue(all(d['before'] is None and d['after'] is None for d in sample['comparison_rubric']['dimensions']))
+        self.assertEqual(json.loads(editor['content'])['actual_alignment'],None)
+        other=deepcopy(brief);other['target_segment']='초등학생';other['genre']='story'
+        other_policy=voice_policy_for_brief(evidence['selection'],'초등학생',other)
+        changed=json.loads(writer['content']);changed['video_voice_selection']=other_policy['video_selection']
+        with self.assertRaisesRegex(CompanyError,'voice_sample_scope_mismatch'):
+            inspect_voice_stage('writer',changed,[],other_policy)

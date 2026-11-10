@@ -109,6 +109,12 @@ class LiveDialogueStore(DialogueStore):
     def _authorize_transport(self, p, api_key):
         require(LIVE_TRANSPORT_ENABLED, 'live_transport_disabled_pending_account_verification')
 
+    def _context(self, p):return dialogue_context(p)
+
+    def _payload(self, p):return payload_for(p)
+
+    def _wire_bytes(self, payload):return json.dumps(payload, ensure_ascii=False).encode()
+
     def _proposal_path(self, draft_id):
         path = self.path(draft_id).with_suffix('.proposal.json')
         require(not path.is_symlink(), 'invalid_consent_path')
@@ -117,16 +123,16 @@ class LiveDialogueStore(DialogueStore):
     def prepare_consent(self, draft_id):
         with self.lock(draft_id):
             p = self.load(draft_id); self._ready(p)
-            payload = payload_for(p)
-            require(len(json.dumps(payload, ensure_ascii=False).encode()) <= 65536, 'dialogue_input_too_large')
+            payload = self._payload(p)
+            require(len(self._wire_bytes(payload)) <= 65536, 'dialogue_input_too_large')
             body = dict(id=uuid.uuid4().hex, draft_id=draft_id, store_root=str(self.root),
-                        initial_state_hash=p['storage_hash'], input_hash=digest(dialogue_context(p)),
+                        initial_state_hash=p['storage_hash'], input_hash=digest(self._context(p)),
                         payload_hash=digest(payload), policy=self._policy(p), calls=1,
                         total_limit=p['real_ai']['limit'], issued_at=now(),
                         expires_at=(datetime.fromisoformat(now())+timedelta(hours=1)).isoformat())
             self.atomic(self._proposal_path(draft_id), body)
-            result = dict(body=body, review_hash=digest(body), transmission=dialogue_context(p),
-                          wire_payload=payload, request_bytes=len(json.dumps(payload, ensure_ascii=False).encode()))
+            result = dict(body=body, review_hash=digest(body), transmission=self._context(p),
+                          wire_payload=payload, request_bytes=len(self._wire_bytes(payload)))
             if isinstance(self, OneCallAcceptanceStore):
                 self.atomic(self.path(draft_id).with_suffix('.review.json'), result)
             return result
@@ -137,7 +143,7 @@ class LiveDialogueStore(DialogueStore):
         require(body['draft_id'] == p['id'] and body['store_root'] == str(self.root), 'consent_binding')
         require(body['policy'] == self._policy(p) and type(body['calls']) is int and body['calls'] == 1
                 and type(body['total_limit']) is int and body['total_limit'] == p['real_ai']['limit'], 'consent_policy')
-        require(body['input_hash'] == digest(dialogue_context(p)) and body['payload_hash'] == digest(payload_for(p)),
+        require(body['input_hash'] == digest(self._context(p)) and body['payload_hash'] == digest(self._payload(p)),
                 'consent_input_changed')
         try:
             issued = datetime.fromisoformat(body['issued_at']); expires = datetime.fromisoformat(body['expires_at'])
@@ -181,8 +187,8 @@ class LiveDialogueStore(DialogueStore):
             grant = self._grant(p)
             self._authorize_transport(p, api_key)
             adapter = Gemini35Adapter()
-            payload = payload_for(p)
-            raw_body = json.dumps(payload, ensure_ascii=False).encode()
+            payload = self._payload(p)
+            raw_body = self._wire_bytes(payload)
             request = adapter.build_request(raw_body, api_key)
             require(api_key not in json.dumps(p, ensure_ascii=False) and api_key.encode() not in raw_body, 'secret_in_input')
             attempt = dict(id=uuid.uuid4().hex, grant_id=grant['id'], status='reserved', reserved_at=now(),
@@ -239,8 +245,13 @@ class OneCallAcceptanceStore(LiveDialogueStore):
     mode = 'goal_dialogue_gemini35_one_call_v1'
     marker_name = '.goal-dialogue-gemini35-one-call-v1'
 
+    acceptance_goal = ACCEPTANCE_GOAL
+    acceptance_project = ACCEPTANCE_PROJECT
+    acceptance_scope = ACCEPTANCE_SCOPE
+    acceptance_scope_hash = ACCEPTANCE_SCOPE_HASH
+
     def create(self, goal=ACCEPTANCE_GOAL, *, max_rounds=None):
-        require(goal == ACCEPTANCE_GOAL and max_rounds is None, 'fixed_acceptance_goal_and_budget_required')
+        require(goal == self.acceptance_goal and max_rounds is None, 'fixed_acceptance_goal_and_budget_required')
         require(fcntl is not None, 'cross_process_lock_unavailable')
         self._initialize()
         lock_path = self.root/'.one-call-creation.lock'
@@ -258,31 +269,31 @@ class OneCallAcceptanceStore(LiveDialogueStore):
         super()._initialize_state(p)
         p['real_ai']['limit'] = 1
         p['limits']['max_calls'] = 1
-        p['acceptance'] = dict(scope=ACCEPTANCE_SCOPE, verification=None)
+        p['acceptance'] = dict(scope=self.acceptance_scope, verification=None)
 
     def valid_mode(self, p):
         return (super().valid_mode(p) and isinstance(p.get('acceptance'), dict)
-                and p['acceptance'].get('scope') == ACCEPTANCE_SCOPE)
+                and p['acceptance'].get('scope') == self.acceptance_scope)
 
     def _check_budget(self, p):
-        require(p['goal'] == ACCEPTANCE_GOAL and type(p['max_rounds']) is int and p['max_rounds'] == 2
+        require(p['goal'] == self.acceptance_goal and type(p['max_rounds']) is int and p['max_rounds'] == 2
                 and type(p['real_ai']['limit']) is int and p['real_ai']['limit'] == 1
                 and type(p['limits']['max_calls']) is int and p['limits']['max_calls'] == 1,
                 'fixed_acceptance_goal_and_budget_required')
-        require(dialogue_context(p) == dict(goal=ACCEPTANCE_GOAL, questions=[], answers={}, specification=None,
+        require(dialogue_context(p) == dict(goal=self.acceptance_goal, questions=[], answers={}, specification=None,
                     user_notes=[], user_spec_revisions=[], round=1, max_rounds=2), 'acceptance_scope_changed')
 
     def _policy(self, p):
-        return {**super()._policy(p), 'acceptance_scope': ACCEPTANCE_SCOPE, 'scope_hash': ACCEPTANCE_SCOPE_HASH,
+        return {**super()._policy(p), 'acceptance_scope': self.acceptance_scope, 'scope_hash': self.acceptance_scope_hash,
                 'verification_hash': digest(p['acceptance']['verification']),
                 'terms_source': GOOGLE_TERMS, 'requires_google_unpaid_data_consent': True,
                 'account_evidence_required': 'owner_compares_project_key_locally_and_confirms_Free_with_Billing_disabled',
-                'project_name': ACCEPTANCE_PROJECT,
+                'project_name': self.acceptance_project,
                 'quota_guaranteed': False}
 
     def verify_project_key(self, draft_id, *, api_key, project_api_key, project,
                            free_tier_confirmed=False, billing_disabled=False):
-        require(project == ACCEPTANCE_PROJECT and free_tier_confirmed is True and billing_disabled is True,
+        require(project == self.acceptance_project and free_tier_confirmed is True and billing_disabled is True,
                 'free_project_and_disabled_billing_confirmation_required')
         Gemini35Adapter().build_request(b'{}', api_key)  # Validate locally; no transport.
         require(isinstance(project_api_key, str) and hmac.compare_digest(api_key.encode(), project_api_key.encode()),
@@ -291,8 +302,8 @@ class OneCallAcceptanceStore(LiveDialogueStore):
             p = self.load(draft_id); self._ready(p)
             require(api_key not in json.dumps(p, ensure_ascii=False), 'secret_in_input')
             # HMAC binds the active credential without storing an API key or a public key fingerprint.
-            binding = self._sign(dict(scope=ACCEPTANCE_SCOPE, credential=api_key), create=True)
-            proof = dict(scope=ACCEPTANCE_SCOPE, draft_id=draft_id, store_root=str(self.root),
+            binding = self._sign(dict(scope=self.acceptance_scope, credential=api_key), create=True)
+            proof = dict(scope=self.acceptance_scope, draft_id=draft_id, store_root=str(self.root),
                          project=project, free_tier_confirmed=True, billing_disabled=True,
                          method='owner_direct_local_key_comparison', credential_binding=binding,
                          verified_at=now(), expires_at=(datetime.fromisoformat(now())+timedelta(hours=1)).isoformat())
@@ -307,8 +318,8 @@ class OneCallAcceptanceStore(LiveDialogueStore):
         exact(proof, ('scope', 'draft_id', 'store_root', 'project', 'free_tier_confirmed', 'billing_disabled',
                       'method', 'credential_binding', 'verified_at', 'expires_at'))
         require(hmac.compare_digest(str(verification['signature']), self._sign(proof)), 'invalid_account_signature')
-        require(proof['scope'] == ACCEPTANCE_SCOPE and proof['draft_id'] == p['id']
-                and proof['store_root'] == str(self.root) and proof['project'] == ACCEPTANCE_PROJECT
+        require(proof['scope'] == self.acceptance_scope and proof['draft_id'] == p['id']
+                and proof['store_root'] == str(self.root) and proof['project'] == self.acceptance_project
                 and proof['free_tier_confirmed'] is True and proof['billing_disabled'] is True
                 and proof['method'] == 'owner_direct_local_key_comparison', 'acceptance_account_binding')
         try:
@@ -320,7 +331,7 @@ class OneCallAcceptanceStore(LiveDialogueStore):
         require(valid, 'account_verification_expired')
         if api_key is not None:
             Gemini35Adapter().build_request(b'{}', api_key)
-            binding = self._sign(dict(scope=ACCEPTANCE_SCOPE, credential=api_key))
+            binding = self._sign(dict(scope=self.acceptance_scope, credential=api_key))
             require(hmac.compare_digest(str(proof['credential_binding']), binding), 'active_key_changed')
         return proof
 

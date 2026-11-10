@@ -1,4 +1,5 @@
 """Versioned strict schemas for existing autonomous role contracts, no business rules."""
+import math
 from autonomous_company import require
 
 
@@ -32,10 +33,16 @@ def matches(value,schema):
     """Validate only the small JSON Schema subset emitted above; no coercion."""
     if 'anyOf' in schema:return any(matches(value,s) for s in schema['anyOf'])
     kinds=schema['type'];kinds=[kinds] if isinstance(kinds,str) else kinds
-    kind=('null' if value is None else 'string' if isinstance(value,str) else
+    kind=('null' if value is None else 'boolean' if type(value) is bool else
+          'integer' if type(value) is int else 'number' if type(value) is float and math.isfinite(value) else
+          'string' if isinstance(value,str) else
           'object' if isinstance(value,dict) else 'array' if isinstance(value,list) else 'unsupported')
-    if kind not in kinds or 'enum' in schema and value not in schema['enum']:return False
+    if kind not in kinds and not (kind=='integer' and 'number' in kinds):return False
+    if 'enum' in schema and value not in schema['enum']:return False
+    if kind in ('integer','number'):
+        return value>=schema.get('minimum',-math.inf) and value<=schema.get('maximum',math.inf)
+    if kind=='string' and not schema.get('minLength',0)<=len(value)<=schema.get('maxLength',131072):return False
     if kind=='object':
         return set(value)==set(schema['required']) and all(matches(value[k],s) for k,s in schema['properties'].items())
-    if kind=='array':return all(matches(v,schema['items']) for v in value)
+    if kind=='array':return schema.get('minItems',0)<=len(value)<=schema.get('maxItems',131072) and all(matches(v,schema['items']) for v in value)
     return True

@@ -205,3 +205,20 @@ PYTHONPATH=core:companies/video python -B -m unittest tests.test_quality_provide
 테스트만 HTTP를 대체하고 차단 정책을 메모리에서 임시 교체한다. 소켓과 DNS는 차단된다.
 `PROVIDER_SAMPLE_OUTPUT=/tmp/<파일명>.json`으로 요청/수정/QA/피드백 샘플을 보존할 수 있다.
 상세 결과·필수 승인 게이트는 `reports/manager_staff_provider_readiness_result.md`를 참조한다.
+
+## 관리자 계획1회 인수 준비 (실제 전송 비활성)
+
+`manager_plan_cli`는 새 빈 보호 저장소에서 가상 영상 목표의 관리자 plan1회만 준비한다.
+기존 인수/품질 프로젝트를 지정하지 않는다. 계정 확인과 승인은 별도 단계이며,
+키·환경변수·승인 기록만으로 실제 전송 정책을 열지 않는다.
+
+```bash
+PYTHONPATH=core:companies/video python -B -m manager_plan_cli --root /tmp/<새-보호-저장소> create
+PYTHONPATH=core:companies/video python -B -m manager_plan_cli --root /tmp/<새-보호-저장소> prepare <ID>
+PYTHONPATH=core:companies/video python -B -m manager_plan_cli --root /tmp/<새-보호-저장소> status <ID>
+```
+
+전체 정확 payload와 검토 해시는 해당 로컬 폴더에만 저장한다. 파일·원장과 키는 커밋하지 않는다.
+후속 실행 전 검토 사항과 현재 준비 경로는 `reports/REAL_MANAGER_CALL_REVIEW.md`,
+개발 검증 결과는 `reports/real_manager_one_call_prepare_result.md`를 확인한다.
+저장소가 사라지거나 호출이 불확실하면 새 저장소를 만들어 재시도하지 않는다.

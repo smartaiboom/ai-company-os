@@ -250,6 +250,9 @@ class LiveCompany(Company):
 
     def _before_transport(self, p):pass
 
+    def _open_transport(self, request, timeout):
+        return urlopen(request, timeout=timeout)
+
     def _tool_notice(self, p):return ""
 
     def _additional_context_fields(self, phase):return set()
@@ -295,7 +298,7 @@ class LiveCompany(Company):
             require(disk['storage_hash']==p['storage_hash'] and p['active_operation']==entry['id']
                     and entry['status']=='reserved' and not entry.get('transport_started_at'),'uncertain_operation')
             entry['transport_started_at']=now();self.store.save(p)
-            return urlopen(request,timeout=timeout)
+            return self._open_transport(request, timeout)
         try:
             envelope=self._request_json(p,model=self.config.model,base_url=self.config.endpoint,
                 body=body,api_key=self.config.api_key,timeout=90,transport=transport,

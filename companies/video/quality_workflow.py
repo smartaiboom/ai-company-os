@@ -287,6 +287,8 @@ def validate_qa_claim(value):
 
 class VideoProviderQualityCompany(QualityProviderCompany):
     """Gemini native wire, independent signed store, disabled production transport."""
+    allowed_video_roles = ('writer','editor','voice','qa','feedback')
+
     def _additional_context_fields(self,phase):
         return super()._additional_context_fields(phase) | {'plan_evidence'} | ({'plan_inspection'} if phase=='review' else set())
 
@@ -322,7 +324,7 @@ class VideoProviderQualityCompany(QualityProviderCompany):
         if phase=='plan' and 'tasks' in result:
             if script_mode:
                 _validate_script_plan(result)
-            require(all(t.get('role') in ('writer','editor','voice','qa','feedback') for t in result['tasks']),
+            require(all(t.get('role') in self.allowed_video_roles for t in result['tasks']),
                     'unsupported_quality_role')
         if phase=='execute' and task:
             content=parse(result['content'])

@@ -39,6 +39,8 @@ const metrics = [
   ['revision','수정 요청','revision','rose',p=>p.stage.endsWith('_revision')],
   ['completed','완료','check','green',p=>p.stage==='completed'],
 ];
+const reportOrigin = (plan) => plan?.provenance==='provider_model_claim' ? '실제 AI 결과' :
+  plan?.provenance==='offline_http_fixture' ? '오프라인 HTTP 검증' : '오프라인 모의 검증';
 const eventRoles = {writer:'대본 직원', editor:'편집 직원', voice:'음성 직원', qa:'QA 직원', research:'조사 직원'};
 let studio = {projects:[], deferred:[]};
 let filter = null;
@@ -125,7 +127,15 @@ function planPanel(p, plan, previous) {
   const script = plan.script;
   return `<section class="panel" id="plan-panel">
     <div class="panel-heading"><h2>${icon('script')} 기획·대본</h2>${versionSelect('plan',p.flow.plan_versions,plan)}</div>
-    <h3>${h(plan.topic)}</h3><p>${h(plan.summary)}</p>${facts([['첫 3초 후크',script.hook_0_3s],['시청자 문제',script.viewer_problem],['전달할 효용',script.payoff],['작성 출처','오프라인 모의 검증'],['비용 한도',`$${plan.cost_limit_usd}`],['보고 시각',time(plan.reported_at)]])}
+    <h3>${h(plan.topic)}</h3><p>${h(plan.summary)}</p>${facts([['첫 3초 후크',script.hook_0_3s],['시청자 문제',script.viewer_problem],['전달할 효용',script.payoff],['작성 출처',reportOrigin(plan)],['비용 한도',`$${plan.cost_limit_usd}`],['보고 시각',time(plan.reported_at)]])}
+    ${plan.research ? `<details class="subpanel" open><summary>조사 후보·선정 근거</summary>
+      <p>${h(plan.research.selection_reason)}</p>
+      ${plan.research.candidates.map(c=>`<p><strong>${h(c.topic)}</strong> · ${h(c.rationale)} · 최신성 미검증</p>`).join('')}
+      <p class="muted">${h(plan.research.uncertainty)}</p></details>` : ''}
+    ${plan.task_history ? `<details class="subpanel"><summary>AI 업무·내부 검토 이력</summary>
+      <p>${h(plan.manager_plan.rationale)}</p>
+      ${plan.task_history.map(t=>`<div><h3>${h(eventRoles[t.role] || t.role)} · 버전 ${t.versions.length}</h3>
+      ${t.reviews.map((r,i)=>`<p>v${i+1} · ${r.action==='accept'?'수락':'수정 요청'} · ${h(r.rationale)} ${h(r.feedback)}</p>`).join('')}</div>`).join('')}</details>` : ''}
     <details class="subpanel" open><summary>대본 전문</summary><p class="script">${h(script.transcript)}</p></details>
     <details class="subpanel" open><summary>장면 스토리보드</summary><div class="beats">${script.narrative_beats.map(beat => `<article class="beat">
       ${badge(`${beat.start}–${beat.end}초`,beat.shot_type==='demo'?'film':'script')}<h3>${h(beat.caption)}</h3>
@@ -167,13 +177,36 @@ function videoPanel(p, video) {
     <p class="muted">글꼴 · ${h(r.font_license)}</p></details>
     ${reviewActions(p,'video',video)}</section>`;
 }
+function missionStatus(mission) {
+  if (!mission) return '';
+  const reasons = {provider_rate_limit:'요청 한도에 도달했습니다.', free_request_failed:'요청이 실패했거나 시간 초과되었습니다.',
+    known_script_defects:'대본의 검증 결함이 남아 있습니다.', manager_stopped:'관리자가 내부 작업을 중단했습니다.',
+    manager_plan_stopped:'관리자가 계획 단계에서 중단했습니다.', optional_technical_cap_reached:'승인된 호출 한도에 도달했습니다.'};
+  const terminal = ['stopped','paused','needs_operational_permission'].includes(mission.status);
+  const status = mission.status==='needs_user_review' ? '내부 검토 완료 · 대표 제출 확인' :
+    terminal ? '실행 중단 · 자동 재호출 없음' : mission.status==='running' ? '기획 작업 진행 중 · 재호출 금지' :
+    mission.authorized ? '외부 전송 승인 기록 있음 · 별도 실행 대기' : '외부 AI 실행 권한 필요';
+  return `<div class="subpanel"><h3>미션 01 · 기획과 대본</h3><p class="warning">${h(status)}</p>
+    ${facts([['모델',mission.model],['기록된 시도',mission.attempts.length]])}
+    ${mission.reason ? `<p class="muted">${h(reasons[mission.reason] || mission.reason)}</p>` : ''}
+    ${mission.assignments.map(t=>`<p class="muted">${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 수락':'작업·검토 대기'} · v${t.versions}</p>`).join('')}
+    ${mission.attempts.length ? `<details><summary>요청·응답 기록</summary>${mission.attempts.map(a=>`
+      <div class="subpanel"><p>${h(a.phase)} · ${h(a.task_id || a.role_kind)} · ${h(a.status)} · HTTP ${h(a.http_status ?? '미수신')}</p>
+      <p class="muted">${h(time(a.response_received_at || a.reserved_at))} · ${h(a.usage.total_tokens ?? '미확인')} 토큰 · ${a.cost_basis?'무료 계정 확인 기준':'청구 미확인'}</p>
+      <p class="mono">요청 ${h(a.request_hash)}</p><p class="mono">응답 ${h(a.response_hash || '미수신')}</p></div>`).join('')}</details>` : ''}
+    <button class="button ghost" data-action="refresh">${icon('revision')} 상태 새로고침</button></div>`;
+}
 function operations(p) {
   if (p.readonly) return '<p class="warning">기존 검증 사례 · 읽기 전용</p>';
   if (p.stage === 'completed') return '<p class="warning">최종 대표 승인이 기록되었습니다. 게시 작업은 별도입니다.</p>';
   const attempt = p.flow.render_attempts.at(-1);
   const failed = attempt?.status === 'failed' ? `<p class="warning">최근 렌더 실패 · ${h(attempt.reason)}</p>` : '';
   if (attempt?.status === 'reserved') return '<p class="warning">로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단</p>';
-  if (['goal_submitted','plan_revision'].includes(p.stage)) return `<button class="button secondary" data-action="planning">${icon('folder')} 기획 작업 열기</button><p class="muted">내부 작업을 열고 보고서 제출을 기다립니다.</p>`;
+  if (p.stage==='goal_submitted') return `<button class="button secondary" data-action="mission">${icon('folder')} 미션 01 준비</button><p class="muted">기획 작업만 준비합니다. 외부 전송은 별도 승인 후 실행합니다.</p>`;
+  if (p.mission && p.stage==='plan_revision') return '<p class="warning">대표 수정 요청 저장 · 후속 실 AI 실행 범위 승인 대기</p>';
+  if (p.mission && p.stage==='production') return '<p class="warning">기획 승인 기록 완료 · 제작 사양 등록 대기</p>';
+  if (p.mission && p.stage==='research_planning') return '';
+  if (p.stage==='plan_revision') return `<button class="button secondary" data-action="planning">${icon('folder')} 기획 작업 열기</button><p class="muted">내부 작업을 열고 보고서 제출을 기다립니다.</p>`;
   if (['production','video_revision'].includes(p.stage)) return `${failed}<button class="button secondary" data-action="produce">${icon('film')} 로컬 기술 시안 제작</button><p class="muted">승인된 대본으로 로컬 렌더러를 실행합니다. 외부 API 비용은 발생하지 않습니다.</p>`;
   return '<p class="muted">기획·대본이나 영상 보고서를 확인해 주세요.</p>';
 }
@@ -185,12 +218,14 @@ function projectPage(p, chosen={}) {
   const stepIndex = p.stage==='research_planning' && !p.jobs.at(-1)?.assignments.length ? 0 : s[3];
   const prior=f.plan_versions.find(item=>item.version===plan?.version-1);
   return `<a class="back" href="#dashboard">${icon('back')} 대시보드</a>
-  <section class="detail-title"><div class="inline">${stateBadge(p.stage)} ${badge('실제 모델 미실행','alert','amber')}</div>
+  <section class="detail-title"><div class="inline">${stateBadge(p.stage)} ${plan?.provenance==='provider_model_claim' ? badge('실제 AI 결과','check','green') :
+      plan?.provenance==='offline_http_fixture' ? badge('오프라인 HTTP 검증','alert','amber') :
+      badge(p.mission?.attempts.length?'모델 작업 결과 확인 중':'실제 모델 미실행','alert','amber')}</div>
   <h1>${h(p.goal)}</h1><p class="muted">${h(s[1])} · ${h(time(p.updated_at))}</p></section>
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
   <div class="detail-grid"><div class="stack">${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
   <aside class="stack"><section class="panel"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['다음 행동',s[2]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
-  ${operations(p)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
+  ${operations(p)}${missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
   <section class="panel"><h2>${icon('clock')} 진행 타임라인</h2><ol class="timeline">${[...f.events].reverse().map(e=>`<li><strong>${h(statuses[e.stage]?.[0] || e.stage)}</strong><p class="muted">${h(time(e.at))}</p></li>`).join('')}</ol></section></aside></div>`;
 }
@@ -302,12 +337,13 @@ main.addEventListener('click',async event=>{
   } else if (button.dataset.action==='create') createProject();
   else if (button.dataset.review) review(...button.dataset.review.split(':'));
   else if (button.dataset.action==='produce') produce();
-  else if (button.dataset.action==='planning') {
+  else if (button.dataset.action==='refresh') await route();
+  else if (['planning','mission'].includes(button.dataset.action)) {
     button.disabled=true;
     try {
-      await api(detailApi(detail)+'/planning',{});
+      await api(detailApi(detail)+'/'+button.dataset.action,{});
       await route();
-      notice('기획 작업을 열었습니다. 내부 보고서 제출을 기다립니다.');
+      notice(button.dataset.action==='mission'?'기획 미션을 준비했습니다. 외부 AI 실행 권한을 기다립니다.':'기획 작업을 열었습니다.');
     } catch(error) {
       notice(error.message,true);
       button.disabled=false;

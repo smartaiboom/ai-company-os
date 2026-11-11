@@ -68,6 +68,7 @@ class RepresentativeVideoWorkflow:
             p = self.store.load(project_id)
             flow = p['representative']
             if flow['stage'] == 'research_planning':
+                require(bool(flow['planning_jobs']), 'mission_provider_result_required')
                 return flow['planning_jobs'][-1]
             require(flow['stage'] in ('goal_submitted', 'plan_revision'), 'representative_stage_mismatch')
             job = self.store.create(p['goal'], opt_in=True)
@@ -83,50 +84,97 @@ class RepresentativeVideoWorkflow:
             self._transition(p, 'research_planning')
             return job['id']
 
-    def report_plan(self, project_id, *, summary, sources, risks, changes, render_spec):
-        for value in (summary, risks, changes):
-            text(value, 3000)
-        require(isinstance(sources, list) and len(sources) <= 20, 'invalid_representative_sources')
-        for source in sources:
-            exact(source, ('url', 'observed_at', 'claim', 'rights'))
-            for value in source.values():
-                text(value, 1200)
-            parsed = urlsplit(source['url'])
-            require(parsed.scheme == 'https' and parsed.hostname and not parsed.username
-                    and not parsed.password, 'invalid_representative_source_url')
-        duration = validate(render_spec)
+    def stage_mission_one(self, project_id):
+        from video_mission_one import MAX_CALLS, SCOPE, MissionOneStore
         with self.store.lock(project_id):
             p = self.store.load(project_id)
             flow = p['representative']
+            if flow.get('mission_one_job') and flow['stage'] == 'research_planning':
+                return flow['mission_one_job']
+            require(flow['stage'] == 'goal_submitted' and not flow.get('mission_one_job'),
+                    'representative_stage_mismatch')
+            require(flow['constraints'].get('duration_seconds', 60) == 60, 'mission_duration_requires_60')
+            store = MissionOneStore(self.store.root/'mission_one_provider')
+            job = store.create(p['goal'], inputs=dict(domain='video', target_segment=flow['audience'],
+                answers=dict(audience=flow['audience'], representative_project=project_id),
+                constraints={**flow['constraints'], 'duration_seconds':60},
+                capabilities=dict(script_contract=SCRIPT_CONTRACT, mission=SCOPE),
+                experiences=[], feedback_text=''), max_calls=MAX_CALLS, max_total_revisions=1)
+            flow['mission_one_job'] = job['id']
+            self._transition(p, 'research_planning')
+            return job['id']
+
+    def report_plan(self, project_id, *, summary=None, sources=None, risks=None, changes=None,
+                    render_spec=None, provider_store=None, allow_fixture=False):
+        with self.store.lock(project_id):
+            p = self.store.load(project_id)
+            flow = p['representative']
+            mission = provider_store is not None
+            if mission:
+                from video_mission_one import MissionOneStore, checked_result, provider_view
+                require(type(provider_store) is MissionOneStore and
+                        provider_store.root == self.store.root/'mission_one_provider'
+                        and flow.get('mission_one_job'), 'mission_scope_mismatch')
+                job = provider_store.result(flow['mission_one_job'])
+                provider_store.check_scope(job)
+                require(job['goal'] == p['goal'] and job['quality_inputs']['answers']['representative_project'] == project_id,
+                        'mission_scope_mismatch')
+                require(render_spec is None, 'mission_media_out_of_scope')
+                research, provenance = checked_result(job, allow_fixture=allow_fixture)
+                if flow['plan_versions'] and flow['plan_versions'][-1]['internal_job'] == job['id']:
+                    return deepcopy(flow['plan_versions'][-1])
+                summary = job['final']['content']
+                sources = []
+                risks = research['uncertainty'] + ' · 최신 동향 및 시각 소스 권리 미검증.'
+                changes = '내부 검토 후 대표에게 제출한 첫 기획안.'
+                mission_details = dict(research=research, provider_run=provider_view(job),
+                                       manager_plan=job['plan'], final_review=job['final'],
+                                       task_history=[dict(role=t['role'], versions=t['versions'], reviews=t['reviews'])
+                                                     for t in job['assignments']])
+            else:
+                require(not flow.get('mission_one_job') and flow['planning_jobs'], 'mission_provider_result_required')
+                job = self.store.result(flow['planning_jobs'][-1])
+                require(job.get('reason_code') in ('manager_final_stopped', 'external_clip_pending', 'needs_user_review')
+                        and job['assignments'] and all(t['state'] == 'accepted_by_ai_manager' for t in job['assignments']),
+                        'representative_internal_review_incomplete')
+                provenance = 'offline_mock_staff'
+                mission_details = {}
             require(flow['stage'] == 'research_planning', 'representative_stage_mismatch')
-            job = self.store.result(flow['planning_jobs'][-1])
-            require(job.get('reason_code') in ('manager_final_stopped', 'external_clip_pending', 'needs_user_review'),
-                    'representative_internal_review_incomplete')
-            require(job['assignments'] and all(t['state'] == 'accepted_by_ai_manager' for t in job['assignments']),
-                    'representative_internal_review_incomplete')
+            for value in (summary, risks, changes):
+                text(value, 3000)
+            require(isinstance(sources, list) and len(sources) <= 20, 'invalid_representative_sources')
+            for source in sources:
+                exact(source, ('url', 'observed_at', 'claim', 'rights'))
+                for value in source.values():
+                    text(value, 1200)
+                parsed = urlsplit(source['url'])
+                require(parsed.scheme == 'https' and parsed.hostname and not parsed.username
+                        and not parsed.password, 'invalid_representative_source_url')
             writer = next(t for t in job['assignments'] if t['role'] == 'writer')
             editor = next(t for t in job['assignments'] if t['role'] == 'editor')
             writer_result = writer['versions'][-1]
             script = parse(writer_result['content'])
             editor_result = editor['versions'][-1]
             validate_script_editor(parse(editor_result['content']), [writer_result])
-            constraints = flow['constraints']
-            aspect = constraints.get('aspect', '16:9')
-            require(aspect == '16:9' and constraints.get('duration_seconds', duration) == duration
-                    and (constraints.get('audio_required') is not True or render_spec['audio_mode'] != 'none'),
-                    'representative_render_constraints_unsupported')
-            beats = script['narrative_beats']
-            scenes = render_spec['scenes']
-            require(duration == script['target_duration'] and len(beats) == len(scenes)
-                    and all(scene['narration'] == beat['narration'] and scene['subtitle'] == beat['caption']
-                            and scene['seconds'] == beat['end'] - beat['start'] for scene, beat in zip(scenes, beats)),
-                    'representative_render_script_mismatch')
+            if not mission:
+                duration = validate(render_spec)
+                constraints = flow['constraints']
+                aspect = constraints.get('aspect', '16:9')
+                require(aspect == '16:9' and constraints.get('duration_seconds', duration) == duration
+                        and (constraints.get('audio_required') is not True or render_spec['audio_mode'] != 'none'),
+                        'representative_render_constraints_unsupported')
+                beats = script['narrative_beats']
+                scenes = render_spec['scenes']
+                require(duration == script['target_duration'] and len(beats) == len(scenes)
+                        and all(scene['narration'] == beat['narration'] and scene['subtitle'] == beat['caption']
+                                and scene['seconds'] == beat['end'] - beat['start'] for scene, beat in zip(scenes, beats)),
+                        'representative_render_script_mismatch')
             report = _report(dict(summary=summary, sources=sources, risks=risks, changes=changes,
                 topic=script['topic']['title'], script=script, render_spec=render_spec, cost_limit_usd=0,
                 internal_job=job['id'], internal_state=job['reason_code'], writer_sha256=digest(writer_result),
                 editor_sha256=digest(editor_result), internal_reviews=writer['reviews'],
                 previous_plan_sha256=flow['plan_versions'][-1]['sha256'] if flow['plan_versions'] else None,
-                provenance='offline_mock_staff'), flow['plan_versions'])
+                provenance=provenance, **mission_details), flow['plan_versions'])
             flow['plan_versions'].append(report)
             self._transition(p, 'awaiting_plan_approval')
             return deepcopy(report)
@@ -183,6 +231,7 @@ class RepresentativeVideoWorkflow:
             plan = self._approved_plan(flow, version, sha256)
             require(not any(a['status'] == 'reserved' for a in flow['render_attempts']),
                     'representative_render_uncertain')
+            require(plan['render_spec'] is not None, 'representative_render_spec_pending')
             spec = deepcopy(plan['render_spec'])
             if palette is not None or cameras is not None:
                 require(flow['stage'] == 'video_revision', 'representative_unapproved_render_change')

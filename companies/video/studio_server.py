@@ -30,6 +30,9 @@ ERRORS = {
     'readonly_project': '기존 검증 사례는 읽기 전용입니다.',
     'invalid_request': '요청 형식이 올바르지 않습니다.',
     'invalid_creation_key': '프로젝트 생성 요청을 확인해 주세요.',
+    'mission_duration_requires_60': '미션 01은 60초 대본 범위입니다. 새 목표에서 길이를 60초로 설정해 주세요.',
+    'mission_provider_result_required': '실행 권한을 받은 미션의 내부 검토 결과가 필요합니다.',
+    'representative_render_spec_pending': '이 기획의 제작 사양은 아직 등록되지 않았습니다.',
     'local_tool_failed': '로컬 렌더 도구 실행에 실패했습니다. 제작 시도 기록을 확인해 주세요.',
 }
 
@@ -106,7 +109,12 @@ class Studio:
         flow.pop('final_video', None)
         store = self.stores[key]
         jobs = [store.load(job_id) for job_id in flow['planning_jobs']]
-        return {**self.card(key, p), 'flow': flow,
+        mission = None
+        if flow.get('mission_one_job'):
+            from video_mission_one import MissionOneStore, provider_view
+            provider_store = MissionOneStore(store.root/'mission_one_provider')
+            mission = provider_view(provider_store.load(flow['mission_one_job']))
+        return {**self.card(key, p), 'flow': flow, 'mission': mission,
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
                                            for t in j['assignments']]) for j in jobs]}
@@ -138,6 +146,9 @@ class Studio:
         if name == 'planning':
             exact(body, ())
             self.workflow.start_planning(pid)
+        elif name == 'mission':
+            exact(body, ())
+            self.workflow.stage_mission_one(pid)
         elif name == 'decide':
             exact(body, ('stage', 'version', 'sha256', 'action', 'feedback', 'changes_plan'))
             self.workflow.decide(pid, **body)
@@ -146,7 +157,7 @@ class Studio:
             require(body['camera'] in (None, 'hold', 'push_in', 'pan_right'), 'invalid_request')
             p = self.project(key, pid)
             current = p['representative']['plan_versions']
-            cameras = [body['camera']] * len(current[-1]['render_spec']['scenes']) if body['camera'] and current else None
+            cameras = [body['camera']] * len(current[-1]['render_spec']['scenes']) if body['camera'] and current and current[-1]['render_spec'] else None
             self.workflow.produce(pid, version=body['version'], sha256=body['sha256'],
                                   changes=body['changes'], cameras=cameras)
         else:
@@ -254,7 +265,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|decide|produce)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

@@ -142,8 +142,11 @@ class QualityProviderStore(Gemini35Store):
 class QualityProviderCompany(Gemini35Company):
     store_type=QualityProviderStore
 
+    def _quality_transport_allowed(self, p):
+        return QUALITY_TRANSPORT_ENABLED is True
+
     def _preflight(self,p):
-        require(QUALITY_TRANSPORT_ENABLED is True,'quality_transport_disabled')
+        require(self._quality_transport_allowed(p),'quality_transport_disabled')
         return super()._preflight(p)
 
     def _additional_context_fields(self,phase):

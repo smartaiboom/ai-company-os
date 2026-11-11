@@ -4,6 +4,7 @@ import hmac
 import json
 import os
 from pathlib import Path
+from copy import deepcopy
 
 from autonomous_company import CompanyError, Store, digest, exact, parse, require, text
 from autonomous_gemini35 import Gemini35Config, MODEL, ENDPOINT
@@ -58,16 +59,46 @@ class MissionOneStore(QualityProviderStore):
             web = None
         # These are owner attestations, never a provider billing lookup or a $0 guarantee.
         proof = dict(account_project=account_project, remaining_requests=quota_observation(remaining_requests), quota_note=quota_note,
-                     approved_max_calls=MAX_CALLS,
+                     approved_max_calls=p['limits']['max_calls'],
                      credential_binding=_binding(project_id, key), billing_disabled=True,
                      free_data_policy=DATA_POLICY)
-        self._check_mission_account(proof)
+        self._check_mission_account(proof, p['limits']['max_calls'])
         require(key not in json.dumps(proof, ensure_ascii=False), 'secret_in_state')
         body = self.prepare(project_id, valid_hours=1, confirm_free_account=True)
-        return {**body, 'mission_account': proof, **({'mission_web':web} if web else {})}
+        return {**body, 'mission_account': proof, **({'mission_web':web} if web else {}),
+                **({'mission_resume':deepcopy(p['mission_resume'])} if 'mission_resume' in p else {})}
 
-    @staticmethod
-    def check_scope(p):
+    def resume_reference(self, previous):
+        require('mission_resume' not in previous, 'mission_resume_not_eligible')
+        self.check_scope(previous)
+        attempts = previous['real_ai']['attempts']
+        require('mission_resume' not in previous and previous['goal'] == GAME_GOAL
+                and previous['status'] == 'stopped' and previous.get('reason_code') == 'free_request_failed'
+                and len(attempts) == 1 and not previous.get('employee_web')
+                and not previous['assignments'] and not previous.get('final'), 'mission_resume_not_eligible')
+        # Authenticate historical consent without treating its expired approval as new permission.
+        grant = parse(self._grant_path(previous['id']).read_text())
+        require(hmac.compare_digest(str(grant['signature']), self._sign(grant['record']))
+                and grant['record']['id'] == previous['real_ai']['consent'].get('operating_grant_id')
+                and grant['record']['revoked_at'] is None, 'invalid_consent_signature')
+        attempt = attempts[0]
+        require(attempt['status'] == 'failed' and attempt.get('phase') == 'plan'
+                and attempt.get('provider_error_diagnostics') == dict(category='dns_error',stage='transport_open')
+                and not attempt.get('http_status') and not attempt.get('response_received_at')
+                and previous['active_operation'] == attempt['id'], 'mission_resume_not_eligible')
+        return dict(previous_job=previous['id'], previous_state_hash=previous['storage_hash'],
+                    failed_attempt=attempt['id'], consumed_calls=1, total_max_calls=MAX_CALLS,
+                    new_max_calls=MAX_CALLS-1, provider_receipt='unknown')
+
+    def check_scope(self, p):
+        resume = p.get('mission_resume')
+        if resume is not None:
+            previous = self.load(resume['previous_job'])
+            require(digest(resume) == digest(self.resume_reference(previous))
+                    and p['goal'] == previous['goal']
+                    and p['quality_inputs'] == previous['quality_inputs'], 'mission_resume_history_changed')
+            studio = Store(self.root.parent).load(p['quality_inputs']['answers']['representative_project'])
+            require(studio['representative'].get('mission_one_job') == p['id'], 'mission_resume_detached')
         quality = p['quality_inputs']
         capabilities = {'script_contract': SCRIPT_CONTRACT, 'mission': SCOPE}
         if p['goal'] == GAME_GOAL:
@@ -80,17 +111,17 @@ class MissionOneStore(QualityProviderStore):
                             dict(aspect='9:16', language='한국어', platform='YouTube Shorts').items()),
                     'mission_game_scope_mismatch')
         require(quality['capabilities'] == capabilities
-                and p['limits'] == dict(max_calls=MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
+                and p['limits'] == dict(max_calls=MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
                 and not p.get('local_tools'), 'mission_scope_mismatch')
 
     @staticmethod
-    def _check_mission_account(value):
+    def _check_mission_account(value, max_calls=MAX_CALLS):
         exact(value, ('account_project', 'remaining_requests', 'quota_note', 'credential_binding',
                       'billing_disabled', 'free_data_policy', 'approved_max_calls'))
         text(value['account_project'], 200)
         text(value['quota_note'], 500)
         quota_observation(value['remaining_requests'])
-        require(type(value['approved_max_calls']) is int and value['approved_max_calls'] == MAX_CALLS
+        require(type(value['approved_max_calls']) is int and value['approved_max_calls'] == max_calls
                 and value['billing_disabled'] is True and value['free_data_policy'] == DATA_POLICY
                 and isinstance(value['credential_binding'], str) and len(value['credential_binding']) == 64,
                 'mission_free_account_unverified')
@@ -115,8 +146,9 @@ class MissionOneStore(QualityProviderStore):
                     'employee_web_scope_unverified')
         else:
             require('mission_web' not in body,'mission_scope_mismatch')
-        self._check_mission_account(body.get('mission_account'))
-        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web')})
+        require(body.get('mission_resume') == p.get('mission_resume'), 'mission_resume_consent_mismatch')
+        self._check_mission_account(body.get('mission_account'), p['limits']['max_calls'])
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume')})
 
 
 def validate_research(value):
@@ -300,7 +332,7 @@ def provider_view(job):
     reason = job.get('reason_code')
     if job['goal'] == GAME_GOAL:
         scope = job['quality_inputs']['capabilities'].get('editorial_scope')
-        if job.get('employee_web',{}).get('status') == 'failed_or_uncertain':
+        if (job.get('employee_web') or {}).get('status') == 'failed_or_uncertain':
             reason = 'employee_web_failed_no_retry'
         elif job['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL:
             reason = reason or ('employee_web_authorization_required' if not job['real_ai']['consent'] else None)
@@ -316,8 +348,9 @@ def main():
     from representative_workflow import RepresentativeVideoWorkflow
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
-    parser.add_argument('action', choices=('connect-web','prepare', 'approve', 'run'))
+    parser.add_argument('action', choices=('create-resume','connect-web','prepare', 'approve', 'run'))
     parser.add_argument('project')
+    parser.add_argument('--confirm-new-execution', action='store_true')
     parser.add_argument('--account-project')
     parser.add_argument('--remaining-requests', type=int, help='Observed provider balance; omit for unknown. Not the approved call cap.')
     parser.add_argument('--quota-note')
@@ -333,6 +366,9 @@ def main():
     workflow = RepresentativeVideoWorkflow(Store(args.root))
     store = MissionOneStore(workflow.store.root/'mission_one_provider')
     try:
+        if args.action=='create-resume':
+            print(workflow.stage_mission_resume(args.project, owner_confirmed=args.confirm_new_execution))
+            return
         if args.action=='connect-web':
             print(workflow.connect_employee_web(args.project))
             return

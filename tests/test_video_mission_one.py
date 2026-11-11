@@ -192,6 +192,15 @@ class MissionOneTests(unittest.TestCase):
         self.assertIn('total_duration', {d['issue'] for d in inspect_script(script, AUDIENCE, mock=True,
             target_duration=34)['defects']})
 
+    def test_dns_resume_stops_at_nine_new_calls(self):
+        self.resume_fixture = True
+        self.exhaust_resume_budget = True
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_dns_resume_preserves_history_and_hands_off_offline(self):
+        self.resume_fixture = True
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
     def test_employee_web_queries_to_manager_duration_and_representative(self):
         from datetime import datetime,timedelta,timezone
         from urllib.parse import parse_qs, urlsplit
@@ -218,6 +227,44 @@ class MissionOneTests(unittest.TestCase):
             with self.assertRaisesRegex(CompanyError, 'employee_web_scope_unverified'):
                 self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
         self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+        if getattr(self, 'resume_fixture', False):
+            from urllib.error import URLError
+            import socket
+            self.http.side_effect = URLError(socket.gaierror(-2, 'fixture DNS failure'))
+            failed = self.run_job()
+            self.assertEqual(failed['status'], 'stopped')
+            old = self.job
+            before = {p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and old in p.name}
+            with self.assertRaisesRegex(CompanyError, 'explicit_owner_confirmation_required'):
+                self.studio.workflow.stage_mission_resume(project)
+            self.job = self.studio.workflow.stage_mission_resume(project, owner_confirmed=True)
+            fresh = self.store.load(self.job)
+            self.assertEqual(fresh['limits']['max_calls'], 9)
+            self.assertFalse(fresh['real_ai']['consent'])
+            self.assertEqual(fresh['mission_resume']['failed_attempt'], failed['real_ai']['attempts'][0]['id'])
+            with self.assertRaisesRegex(CompanyError, 'mission_resume_already_created'):
+                self.studio.workflow.stage_mission_resume(project, owner_confirmed=True)
+            with self.assertRaisesRegex(CompanyError, 'operating_consent_required'):
+                self.run_job()
+            self.assertEqual(self.http.call_count, 1)
+            new_body = self.store.prepare_mission(self.job,key=self.key,account_project='fixture',quota_note='fixture',
+                youtube_key=youtube_key,youtube_project='fixture-youtube',confirm_youtube_policy=True)
+            self.assertEqual(new_body['mission_account']['approved_max_calls'], 9)
+            self.assertEqual(new_body['limits']['max_calls'], 9)
+            for field in ('mission_resume', 'mission_account', 'limits'):
+                bad = deepcopy(new_body)
+                if field == 'mission_resume':
+                    bad[field]['consumed_calls'] = 0
+                elif field == 'mission_account':
+                    bad[field]['approved_max_calls'] = 10
+                else:
+                    bad[field]['max_calls'] = 10
+                with self.assertRaises(CompanyError):
+                    self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+            with self.assertRaises(CompanyError):
+                self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+            self.store.approve(self.job,new_body,review_hash=digest(new_body),owner_confirmed=True)
+            self.http.reset_mock(side_effect=True)
         published=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat().replace('+00:00','Z')
         vid='abcdefghijk'
         urls=[]
@@ -241,7 +288,10 @@ class MissionOneTests(unittest.TestCase):
         script.update(target_duration=34)
         script['topic']['title']='가상 게임의 두 장면'
         script['provenance']=dict(author='fixture',model=MODEL,mock=False)
-        manager,employee=script_callbacks(script,script)
+        revised = deepcopy(script)
+        if getattr(self, 'exhaust_resume_budget', False):
+            revised['promise'] = '두 화면의 차이를 차례로 비교한다.'
+        manager,employee=script_callbacks(script,revised)
         queries=dict(tool=TOOL,queries=[dict(query='fixture employee game query',purpose='shorts_examples',
                                              lookback_days=7,order='relevance')])
         decision=dict(game='가상 게임',selected_topic=script['topic']['title'],duration_seconds=34,
@@ -265,6 +315,9 @@ class MissionOneTests(unittest.TestCase):
                 if phase=='review' and role=='research':
                     self.assertIn('EMPLOYEE_WEB_RECEIPT',context['result']['evidence'])
                     result['feedback']=json.dumps(decision)
+                if (getattr(self, 'exhaust_resume_budget', False) and phase == 'review'
+                        and role == 'writer' and len(self.store.load(self.job)['assignments'][1]['versions']) == 1):
+                    result.update(action='revise', feedback='missing_demo fixture: 대본을 다시 확인하세요')
                 if phase=='finalize':
                     result.update(action='deliver',content='가상 게임 기획',
                                   checks=[{**c,'status':'met'} for c in result['checks']])
@@ -274,6 +327,16 @@ class MissionOneTests(unittest.TestCase):
                 usageMetadata=dict(promptTokenCount=20,candidatesTokenCount=30,totalTokenCount=50))).encode())
         self.http.side_effect=ai_send
         result=self.run_job()
+        if getattr(self, 'exhaust_resume_budget', False):
+            self.assertNotEqual(result['status'], 'needs_user_review')
+            self.assertEqual(len(result['real_ai']['attempts']), 9, result.get('reason_code'))
+            self.assertEqual(self.http.call_count, 9)
+            self.assertEqual(result.get('reason_code'), 'optional_technical_cap_reached')
+            with self.assertRaises(CompanyError):
+                self.run_job()
+            for path, content in before.items():
+                self.assertEqual(path.read_bytes(), content)
+            return
         self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
         self.assertEqual(self.http.call_count,8)
         self.assertEqual(len(urls),2)
@@ -282,6 +345,19 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(report['research']['observations'][0]['shorts_classification'],'unverified')
         self.assertEqual(report['sources'][0]['url'],'https://www.youtube.com/watch?v='+vid)
         self.assertIsNone(report['render_spec'])
+        if getattr(self, 'resume_fixture', False):
+            self.assertEqual(report['provenance'], 'offline_http_fixture')
+            self.assertEqual(self.studio.detail('workspace',project)['stage'],'awaiting_plan_approval')
+            for path, content in before.items():
+                self.assertEqual(path.read_bytes(), content)
+            with self.assertRaises(CompanyError):
+                self.company.run(old,expected_state_hash=self.store.load(old)['storage_hash'])
+            self.assertEqual(self.http.call_count,8)
+            changed = self.store.load(old)
+            changed['events'].append(dict(event='fixture tamper'))
+            self.store.save(changed)
+            with self.assertRaisesRegex(CompanyError, 'mission_resume_history_changed'):
+                self.store.check_scope(self.store.load(self.job))
 
     def test_unknown_quota_and_signed_caps_cannot_be_increased(self):
         body = self.store.prepare_mission(self.job, key=self.key, account_project='fixture',

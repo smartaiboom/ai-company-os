@@ -53,7 +53,7 @@ class MissionOneStore(QualityProviderStore):
             web = dict(policy=WEB_POLICY, account_project=youtube_project,
                 search_remaining=quota_observation(search_remaining),
                 general_units_remaining=quota_observation(units_remaining),
-                approved_max_searches=4, approved_max_videos=4,
+                approved_max_searches=2 if p.get('mission_successor') else 4, approved_max_videos=2 if p.get('mission_successor') else 4,
                 credential_binding=_binding(project_id+':youtube',youtube_key), free_usage_verified=True,
                 policy_confirmed=True)
         else:
@@ -67,7 +67,8 @@ class MissionOneStore(QualityProviderStore):
         require(key not in json.dumps(proof, ensure_ascii=False), 'secret_in_state')
         body = self.prepare(project_id, valid_hours=1, confirm_free_account=True)
         return {**body, 'mission_account': proof, **({'mission_web':web, 'mission_research_review':research_review_policy()} if web else {}),
-                **({'mission_resume':deepcopy(p['mission_resume'])} if 'mission_resume' in p else {})}
+                **({'mission_resume':deepcopy(p['mission_resume'])} if 'mission_resume' in p else {}),
+                **({'mission_successor':deepcopy(p['mission_successor'])} if 'mission_successor' in p else {})}
 
     def resume_reference(self, previous):
         require('mission_resume' not in previous, 'mission_resume_not_eligible')
@@ -91,7 +92,64 @@ class MissionOneStore(QualityProviderStore):
                     failed_attempt=attempt['id'], consumed_calls=1, total_max_calls=MAX_CALLS,
                     new_max_calls=MAX_CALLS-1, provider_receipt='unknown')
 
+    def successor_reference(self, previous):
+        """Read-only proof for one review-failure successor; never relax DNS eligibility."""
+        require('mission_successor' not in previous and previous['goal'] == GAME_GOAL
+                and previous['status'] == 'stopped' and previous.get('reason_code') in
+                ('invalid_model_json', 'mission_research_review_structure_invalid'), 'mission_successor_not_eligible')
+        first = self.load(previous['mission_resume']['previous_job'])
+        require(digest(previous['mission_resume']) == digest(self.resume_reference(first))
+                and previous['quality_inputs'] == first['quality_inputs'], 'mission_successor_history_changed')
+        grant = parse(self._grant_path(previous['id']).read_text())
+        require(hmac.compare_digest(str(grant['signature']), self._sign(grant['record']))
+                and grant['record']['id'] == previous['real_ai']['consent'].get('operating_grant_id')
+                and grant['record']['revoked_at'] is None, 'invalid_consent_signature')
+        attempts = previous['real_ai']['attempts']
+        require(len(attempts) == 3 and [a['phase'] for a in attempts] == ['plan','execute','review']
+                and all(a['status']=='completed' and a.get('http_status')==200 and a['model']==MODEL
+                        and a.get('response_hash') and a.get('free_account_policy_verified') is True for a in attempts)
+                and all(a['role_result_status']=='validated' for a in attempts[:2])
+                and attempts[-1]['role_result_status']=='json_parsed'
+                and previous['active_operation']==attempts[-1]['id'], 'mission_successor_attempts_invalid')
+        tasks = previous['assignments']
+        require(len(tasks)==3 and [t['role'] for t in tasks]==list(ROLES)
+                and tasks[0]['state']=='awaiting_ai_review' and len(tasks[0]['versions'])==1
+                and not tasks[0]['reviews'] and all(t['state']=='pending' and not t['versions'] and not t['reviews']
+                                                  for t in tasks[1:]), 'mission_successor_research_invalid')
+        research = tasks[0]['versions'][0]
+        require(digest(research)==attempts[-1]['result_hash'] and not previous.get('final')
+                and research['source']==previous['plan']['source']
+                and research['source'] in ('provider_model_claim','offline_http_fixture'), 'mission_successor_provenance')
+        web = previous['employee_web']
+        usable_observations(web)
+        require(web['employee_task']==tasks[0]['id'] and web['input']==parse(research['content'])
+                and web['input_hash']==digest(web['input']) and web['provenance']==research['source']
+                and len(web['attempts'])==4 and all(a['status']=='completed' and a['http_status']==200 for a in web['attempts'])
+                and sum(a['quota_bucket']=='search' for a in web['attempts'])==2
+                and sum(a['quota_bucket']=='general' for a in web['attempts'])==2, 'mission_successor_web_invalid')
+        validate_queries(web['input'])
+        return dict(previous_job=previous['id'], previous_state_hash=previous['storage_hash'],
+            first_job=first['id'], first_state_hash=first['storage_hash'],
+            previous_attempt_ids=[a['id'] for a in first['real_ai']['attempts']+attempts],
+            consumed_calls=4, new_max_calls=6, total_max_calls=10,
+            consumed_searches=2, consumed_videos=2, new_max_searches=2, new_max_videos=2,
+            total_max_searches=4,total_max_videos=4, plan_hash=digest(previous['plan']),
+            research_hash=digest(research), receipt_hash=web['receipt_hash'],
+            reuse='prior_validated_plan_and_employee_research_pending_new_review')
+
     def check_scope(self, p):
+        successor = p.get('mission_successor')
+        if successor:
+            require(not p.get('mission_resume'), 'mission_successor_history_changed')
+            previous = self.load(successor['previous_job'])
+            require(digest(successor)==digest(self.successor_reference(previous))
+                    and p['goal']==previous['goal'] and p['quality_inputs']==previous['quality_inputs'],
+                    'mission_successor_history_changed')
+            studio = Store(self.root.parent).load(p['quality_inputs']['answers']['representative_project'])
+            require(studio['representative']['mission_one_job']==p['id'], 'mission_resume_detached')
+            require(p['plan']==previous['plan'] and p['employee_web']==previous['employee_web']
+                    and p['assignments'][0]['versions']==previous['assignments'][0]['versions'],
+                    'mission_successor_reuse_changed')
         resume = p.get('mission_resume')
         if resume is not None:
             previous = self.load(resume['previous_job'])
@@ -112,7 +170,7 @@ class MissionOneStore(QualityProviderStore):
                             dict(aspect='9:16', language='한국어', platform='YouTube Shorts').items()),
                     'mission_game_scope_mismatch')
         require(quality['capabilities'] == capabilities
-                and p['limits'] == dict(max_calls=MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
+                and p['limits'] == dict(max_calls=6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
                 and not p.get('local_tools'), 'mission_scope_mismatch')
 
     @staticmethod
@@ -142,15 +200,16 @@ class MissionOneStore(QualityProviderStore):
             quota_observation(web['general_units_remaining'])
             require(web['policy']==WEB_POLICY and web['free_usage_verified'] is True
                     and web['policy_confirmed'] is True
-                    and type(web['approved_max_searches']) is int and web['approved_max_searches'] == 4
-                    and type(web['approved_max_videos']) is int and web['approved_max_videos'] == 4
+                    and type(web['approved_max_searches']) is int and web['approved_max_searches'] == (2 if p.get('mission_successor') else 4)
+                    and type(web['approved_max_videos']) is int and web['approved_max_videos'] == (2 if p.get('mission_successor') else 4)
                     and isinstance(web['credential_binding'],str),
                     'employee_web_scope_unverified')
         else:
             require('mission_web' not in body,'mission_scope_mismatch')
+        require(body.get('mission_successor') == p.get('mission_successor'), 'mission_successor_consent_mismatch')
         require(body.get('mission_resume') == p.get('mission_resume'), 'mission_resume_consent_mismatch')
         self._check_mission_account(body.get('mission_account'), p['limits']['max_calls'])
-        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review')})
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor')})
 
 
 def validate_research(value):
@@ -243,6 +302,8 @@ class MissionOneCompany(VideoProviderQualityCompany):
 
     def _quality_transport_allowed(self, p):
         self.store.check_scope(p)
+        if p.get('mission_successor'):
+            require(p['plan']['source']==self.source, 'mission_successor_provenance')
         if p['goal'] == GAME_GOAL:
             require(p['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL, GAME_RESEARCH_BLOCKER)
             self._authorize_web(p)
@@ -284,6 +345,11 @@ class MissionOneCompany(VideoProviderQualityCompany):
 
     def _tool_notice(self, p):
         notice = super()._tool_notice(p)
+        if p.get('mission_successor'):
+            notice += (' The validated prior manager plan and employee research are reused with original timestamps '
+                       'and receipt evidence. Research is pending your NEW structured review, not approved. '
+                       'Do not claim new web observations or prior manager selection. No new research execution '
+                       'is available in this successor; if inadequate stop. Revisions consume the same six-call cap.')
         if p['goal'] == GAME_GOAL:
             return (notice.replace('60초','목표 길이').replace('target_duration=60','target_duration=quality.manager_selection.duration_seconds')+
                 ' Research employee constructs its OWN search queries from the representative goal. No game, '
@@ -326,6 +392,9 @@ class MissionOneCompany(VideoProviderQualityCompany):
             self._research_review_state = None
 
     def _mission_call(self, p, provider, phase, task_id, context):
+        if p.get('mission_successor'):
+            require(not (phase=='execute' and context['assignment']['role']=='research'),
+                    'mission_cached_research_revision_requires_new_approval')
         selection = self._manager_selection(p)
         if selection:
             context = {**context,'quality':{**context['quality'],'manager_selection':selection}}
@@ -367,7 +436,7 @@ def checked_result(job, *, allow_fixture=False):
         require(job['quality_inputs']['capabilities'].get('employee_web_research')==WEB_TOOL,GAME_RESEARCH_BLOCKER)
     attempts = job['real_ai']['attempts']
     require(job['status'] == job.get('reason_code') == 'needs_user_review' and job['final']
-            and not job['artifacts'] and not job['active_operation'] and 8 <= len(attempts) <= MAX_CALLS,
+            and not job['artifacts'] and not job['active_operation'] and (6 if job.get('mission_successor') else 8) <= len(attempts) <= job['limits']['max_calls'],
             'mission_internal_review_incomplete')
     require(all(a['status'] == 'completed' and a.get('http_status') == 200 and a['model'] == MODEL
                 and a['role_result_status'] == 'validated' and a.get('response_hash')
@@ -393,6 +462,10 @@ def checked_result(job, *, allow_fixture=False):
             observations=observations, tool_receipt_hash=job['employee_web']['receipt_hash'])
     else:
         research = validate_research(parse(tasks['research']['versions'][-1]['content']))
+    if job.get('mission_successor'):
+        research['reuse'] = dict(source_job=job['mission_successor']['previous_job'],
+            receipt_hash=job['mission_successor']['receipt_hash'], newly_observed=False,
+            plan_hash=job['mission_successor']['plan_hash'])
     script = parse(tasks['writer']['versions'][-1]['content'])
     inspection = inspect_script(script, job['quality_inputs']['target_segment'], mock=False,target_duration=duration)
     require(not inspection['defects'] and script['provenance']['model'] == MODEL
@@ -425,7 +498,7 @@ def main():
     from representative_workflow import RepresentativeVideoWorkflow
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
-    parser.add_argument('action', choices=('create-resume','connect-web','prepare', 'approve', 'run'))
+    parser.add_argument('action', choices=('create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
     parser.add_argument('project')
     parser.add_argument('--confirm-new-execution', action='store_true')
     parser.add_argument('--account-project')
@@ -443,6 +516,9 @@ def main():
     workflow = RepresentativeVideoWorkflow(Store(args.root))
     store = MissionOneStore(workflow.store.root/'mission_one_provider')
     try:
+        if args.action=='create-successor':
+            print(workflow.stage_mission_successor(args.project, owner_confirmed=args.confirm_new_execution))
+            return
         if args.action=='create-resume':
             print(workflow.stage_mission_resume(args.project, owner_confirmed=args.confirm_new_execution))
             return

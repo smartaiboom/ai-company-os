@@ -61,7 +61,9 @@ def collect(store, project, task_id, request, key, authorize, *, provenance=None
 
     def get(resource, params):
         authorize()
-        require(len(state['attempts']) < POLICY['max_requests'], 'employee_web_limit')
+        require(len(state['attempts']) < POLICY['max_requests']
+                and sum(a['quota_bucket'] == ('search' if resource == 'search' else 'general')
+                        for a in state['attempts']) < 4, 'employee_web_limit')
         url = ENDPOINT + resource + '?' + urlencode(params)
         require(key not in url, 'secret_in_web_request')
         entry = dict(method='GET', url=url, request_hash=digest(dict(resource=resource, params=params)),

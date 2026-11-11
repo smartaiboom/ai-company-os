@@ -41,3 +41,40 @@ class EmployeeWebTests(unittest.TestCase):
         state['receipt_hash']=digest(state['observations'])
         with self.assertRaisesRegex(CompanyError,'employee_web_evidence_expired_or_empty'):
             usable_observations(state)
+
+    def test_four_search_and_four_video_cap_and_timeout_no_retry(self):
+        from io import BytesIO
+        class Response(BytesIO):
+            status = 200
+        import json
+        with TemporaryDirectory() as root:
+            store = Store(root)
+            p = store.create('isolated caps', opt_in=True)
+            request = dict(tool=TOOL, queries=[dict(query='fixture '+str(i),
+                purpose='shorts_examples', lookback_days=7, order='date') for i in range(4)])
+            published = (datetime.now(timezone.utc)-timedelta(days=1)).isoformat()
+            def send(req, timeout):
+                data = dict(items=[dict(id=dict(videoId='abcdefghijk'))]) if '/search?' in req.full_url else dict(items=[dict(
+                    id='abcdefghijk', snippet=dict(title='fixture',categoryId='20',publishedAt=published),
+                    contentDetails=dict(duration='PT34S'),statistics=dict(viewCount='10'))])
+                return Response(json.dumps(data).encode())
+            with patch('employee_web_research.send_once', side_effect=send) as http:
+                state = collect(store,p,'research',request,'fixture-youtube-key',lambda:None)
+                self.assertEqual(http.call_count,8)
+                self.assertEqual(sum(a['quota_bucket']=='search' for a in state['attempts']),4)
+                self.assertEqual(sum(a['quota_bucket']=='general' for a in state['attempts']),4)
+                with self.assertRaisesRegex(CompanyError,'employee_web_already_consumed'):
+                    collect(store,p,'research',request,'fixture-youtube-key',lambda:None)
+                self.assertEqual(http.call_count,8)
+            p = store.create('isolated timeout', opt_in=True)
+            with patch('employee_web_research.send_once',side_effect=TimeoutError()) as http:
+                with self.assertRaisesRegex(CompanyError,'employee_web_failed_no_retry'):
+                    collect(store,p,'research',request,'fixture-youtube-key',lambda:None)
+                self.assertEqual(p['employee_web']['attempts'][0]['status'],'failed')
+                http.assert_called_once()
+            p = store.create('isolated excess', opt_in=True)
+            request['queries'].append(request['queries'][0])
+            with patch('employee_web_research.send_once') as http:
+                with self.assertRaisesRegex(CompanyError,'invalid_employee_search_request'):
+                    collect(store,p,'research',request,'fixture-youtube-key',lambda:None)
+                http.assert_not_called()

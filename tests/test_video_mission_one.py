@@ -52,7 +52,7 @@ class MissionOneTests(unittest.TestCase):
 
     def approve(self):
         body = self.store.prepare_mission(self.job, key=self.key, account_project='fixture project',
-            remaining_requests=10, quota_note='fixture RPM/TPM')
+            remaining_requests=None, quota_note='provider quota not verified; fixture')
         self.assertNotIn(self.key, json.dumps(body))
         self.store.approve(self.job, body, review_hash=digest(body), owner_confirmed=True)
 
@@ -206,10 +206,17 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(self.store.load(previous)['real_ai']['attempts'],[])
         youtube_key='fixture-youtube-key-secret'
         self.enterContext(patch.dict('os.environ',YOUTUBE_DATA_API_KEY=youtube_key))
-        body=self.store.prepare_mission(self.job,key=self.key,account_project='fixture',remaining_requests=10,
+        body=self.store.prepare_mission(self.job,key=self.key,account_project='fixture',remaining_requests=None,
             quota_note='fixture',youtube_key=youtube_key,youtube_project='fixture-youtube',
-            search_remaining=4,units_remaining=4,confirm_youtube_policy=True)
+            search_remaining=None,units_remaining=None,confirm_youtube_policy=True)
         self.assertNotIn(youtube_key,json.dumps(body))
+        self.assertEqual(body['mission_web']['search_remaining'], 'unknown')
+        self.assertEqual(body['mission_web']['general_units_remaining'], 'unknown')
+        for field in ('approved_max_searches', 'approved_max_videos'):
+            bad = deepcopy(body)
+            bad['mission_web'][field] = 5
+            with self.assertRaisesRegex(CompanyError, 'employee_web_scope_unverified'):
+                self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
         self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
         published=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat().replace('+00:00','Z')
         vid='abcdefghijk'
@@ -275,3 +282,40 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(report['research']['observations'][0]['shorts_classification'],'unverified')
         self.assertEqual(report['sources'][0]['url'],'https://www.youtube.com/watch?v='+vid)
         self.assertIsNone(report['render_spec'])
+
+    def test_unknown_quota_and_signed_caps_cannot_be_increased(self):
+        body = self.store.prepare_mission(self.job, key=self.key, account_project='fixture',
+            quota_note='unknown provider balance')
+        self.assertEqual(body['mission_account']['remaining_requests'], 'unknown')
+        self.assertEqual(body['mission_account']['approved_max_calls'], 10)
+        bad = deepcopy(body)
+        bad['mission_account']['approved_max_calls'] = 11
+        with self.assertRaisesRegex(CompanyError, 'mission_free_account_unverified'):
+            self.store.approve(self.job, bad, review_hash=digest(bad), owner_confirmed=True)
+        bad = deepcopy(body)
+        bad['mission_account']['billing_disabled'] = False
+        with self.assertRaisesRegex(CompanyError, 'mission_free_account_unverified'):
+            self.store.approve(self.job, bad, review_hash=digest(bad), owner_confirmed=True)
+        with self.assertRaisesRegex(CompanyError, 'consent_review_changed'):
+            self.store.approve(self.job, body, review_hash='wrong', owner_confirmed=True)
+        for value in (-1, True, '10', 1.5):
+            with self.assertRaisesRegex(CompanyError, 'invalid_quota_observation'):
+                self.store.prepare_mission(self.job, key=self.key, account_project='fixture',
+                    quota_note='unknown', remaining_requests=value)
+        self.http.assert_not_called()
+
+    def test_timeout_is_consumed_and_not_retried(self):
+        self.approve()
+        self.http.side_effect = TimeoutError('fixture timeout')
+        result = self.run_job()
+        self.assertEqual(len(result['real_ai']['attempts']), 1)
+        with self.assertRaisesRegex(CompanyError, 'mission_restart_forbidden'):
+            self.run_job()
+        self.http.assert_called_once()
+
+    def test_wrong_paid_endpoint_is_blocked_before_transport(self):
+        self.approve()
+        self.env['GEMINI35_ENDPOINT'] = 'https://paid.invalid/generate'
+        with self.assertRaisesRegex(CompanyError, 'gemini_provider_binding'):
+            self.run_job()
+        self.http.assert_not_called()

@@ -31,8 +31,15 @@ def _binding(project_id, key):
     return hmac.digest(key.encode(), (SCOPE + ':' + project_id).encode(), 'sha256').hex()
 
 
+def quota_observation(value):
+    # Provider availability is not the owner's authorization budget.
+    require(value is None or value == 'unknown' or type(value) is int and value >= 0,
+            'invalid_quota_observation')
+    return 'unknown' if value is None else value
+
+
 class MissionOneStore(QualityProviderStore):
-    def prepare_mission(self, project_id, *, key, account_project, remaining_requests, quota_note,
+    def prepare_mission(self, project_id, *, key, account_project, quota_note, remaining_requests=None,
                         youtube_key=None, youtube_project=None, search_remaining=None, units_remaining=None,
                         confirm_youtube_policy=False):
         p = self.load(project_id)
@@ -41,15 +48,17 @@ class MissionOneStore(QualityProviderStore):
             require(p['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL, GAME_RESEARCH_BLOCKER)
             require(confirm_youtube_policy is True, 'employee_web_policy_confirmation_required')
             text(youtube_project, 200)
-            require(type(search_remaining) is int and search_remaining >= 4 and
-                    type(units_remaining) is int and units_remaining >= 4, 'employee_web_quota_not_verified')
             web = dict(policy=WEB_POLICY, account_project=youtube_project,
-                search_remaining=search_remaining, general_units_remaining=units_remaining,
+                search_remaining=quota_observation(search_remaining),
+                general_units_remaining=quota_observation(units_remaining),
+                approved_max_searches=4, approved_max_videos=4,
                 credential_binding=_binding(project_id+':youtube',youtube_key), free_usage_verified=True,
                 policy_confirmed=True)
         else:
             web = None
-        proof = dict(account_project=account_project, remaining_requests=remaining_requests, quota_note=quota_note,
+        # These are owner attestations, never a provider billing lookup or a $0 guarantee.
+        proof = dict(account_project=account_project, remaining_requests=quota_observation(remaining_requests), quota_note=quota_note,
+                     approved_max_calls=MAX_CALLS,
                      credential_binding=_binding(project_id, key), billing_disabled=True,
                      free_data_policy=DATA_POLICY)
         self._check_mission_account(proof)
@@ -77,10 +86,11 @@ class MissionOneStore(QualityProviderStore):
     @staticmethod
     def _check_mission_account(value):
         exact(value, ('account_project', 'remaining_requests', 'quota_note', 'credential_binding',
-                      'billing_disabled', 'free_data_policy'))
+                      'billing_disabled', 'free_data_policy', 'approved_max_calls'))
         text(value['account_project'], 200)
         text(value['quota_note'], 500)
-        require(type(value['remaining_requests']) is int and value['remaining_requests'] >= MAX_CALLS
+        quota_observation(value['remaining_requests'])
+        require(type(value['approved_max_calls']) is int and value['approved_max_calls'] == MAX_CALLS
                 and value['billing_disabled'] is True and value['free_data_policy'] == DATA_POLICY
                 and isinstance(value['credential_binding'], str) and len(value['credential_binding']) == 64,
                 'mission_free_account_unverified')
@@ -92,12 +102,16 @@ class MissionOneStore(QualityProviderStore):
             require(p['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL, GAME_RESEARCH_BLOCKER)
             web = body.get('mission_web')
             exact(web, ('policy','account_project','search_remaining','general_units_remaining',
-                        'credential_binding','free_usage_verified','policy_confirmed'))
+                        'credential_binding','free_usage_verified','policy_confirmed',
+                        'approved_max_searches','approved_max_videos'))
             text(web['account_project'],200)
+            quota_observation(web['search_remaining'])
+            quota_observation(web['general_units_remaining'])
             require(web['policy']==WEB_POLICY and web['free_usage_verified'] is True
-                    and web['policy_confirmed'] is True and type(web['search_remaining']) is int
-                    and web['search_remaining'] >= 4 and type(web['general_units_remaining']) is int
-                    and web['general_units_remaining'] >= 4 and isinstance(web['credential_binding'],str),
+                    and web['policy_confirmed'] is True
+                    and type(web['approved_max_searches']) is int and web['approved_max_searches'] == 4
+                    and type(web['approved_max_videos']) is int and web['approved_max_videos'] == 4
+                    and isinstance(web['credential_binding'],str),
                     'employee_web_scope_unverified')
         else:
             require('mission_web' not in body,'mission_scope_mismatch')
@@ -305,11 +319,11 @@ def main():
     parser.add_argument('action', choices=('connect-web','prepare', 'approve', 'run'))
     parser.add_argument('project')
     parser.add_argument('--account-project')
-    parser.add_argument('--remaining-requests', type=int)
+    parser.add_argument('--remaining-requests', type=int, help='Observed provider balance; omit for unknown. Not the approved call cap.')
     parser.add_argument('--quota-note')
     parser.add_argument('--youtube-project')
-    parser.add_argument('--youtube-searches-remaining',type=int)
-    parser.add_argument('--youtube-units-remaining',type=int)
+    parser.add_argument('--youtube-searches-remaining',type=int, help='Observed balance; omit for unknown.')
+    parser.add_argument('--youtube-units-remaining',type=int, help='Observed balance; omit for unknown.')
     parser.add_argument('--confirm-youtube-policy',action='store_true')
     parser.add_argument('--proposal', type=Path)
     parser.add_argument('--review-hash')

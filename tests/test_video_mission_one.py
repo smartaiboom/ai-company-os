@@ -253,6 +253,19 @@ class MissionOneTests(unittest.TestCase):
         self.review_error = 'inner_json'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_fixed_provenance_prompt_and_25_second_inferred_audience_handoff(self):
+        self.provenance_case='correct'
+        self.audience_case='inferred'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_mock_provenance_conflict_stops_with_safe_diagnostics(self):
+        self.provenance_case='mock_conflict'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_other_model_provenance_stops_with_safe_diagnostics(self):
+        self.provenance_case='other_model'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
     def test_writer_stage_resume_preserves_selection_and_hands_off_with_four_calls(self):
         self.writer_fixture=True
         self.successor_fixture=True
@@ -339,6 +352,7 @@ class MissionOneTests(unittest.TestCase):
                 self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
             self.store.approve(self.job,new_body,review_hash=digest(new_body),owner_confirmed=True)
             self.http.reset_mock(side_effect=True)
+        duration=25 if getattr(self,'provenance_case',None) else 34
         published=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat().replace('+00:00','Z')
         vid='abcdefghijk'
         urls=[]
@@ -352,14 +366,14 @@ class MissionOneTests(unittest.TestCase):
                 response=dict(items=[dict(id=dict(videoId=vid))])
             else:
                 response=dict(items=[dict(id=vid,snippet=dict(title='가상 게임 예시',categoryId='20',publishedAt=published),
-                    contentDetails=dict(duration='PT34S'),statistics=dict(viewCount='1234'))])
+                    contentDetails=dict(duration=f'PT{duration}S'),statistics=dict(viewCount='1234'))])
             return FixtureResponse(json.dumps(response).encode())
         self.enterContext(patch('employee_web_research.send_once',side_effect=web_send))
         def beat(a,b,line,shot):
             return dict(start=a,end=b,narration=line,caption='가상 예시',screen='가상 비교',
                 shot_type=shot,source_ref='미확보',source_status='pending',fact_status='illustrative')
-        script=script_from_beats([beat(0,3,'왜 달라졌을까요?','card'),beat(3,34,'두 화면을 비교해 보세요.','demo')])
-        script.update(target_duration=34)
+        script=script_from_beats([beat(0,3,'왜 달라졌을까요?','card'),beat(3,duration,'두 화면을 비교해 보세요.','demo')])
+        script.update(target_duration=duration)
         if getattr(self,'audience_case',None):
             script['target_audience']='합성 예시 게임의 짧은 시연을 보고 싶은 시청자'
             if self.audience_case == 'inferred':
@@ -374,10 +388,15 @@ class MissionOneTests(unittest.TestCase):
                                              lookback_days=7,order='relevance')])
         if getattr(self, 'successor_fixture', False):
             queries['queries'].append(dict(query='fixture second query',purpose='game_interest',lookback_days=7,order='relevance'))
-        decision=dict(game='가상 게임',selected_topic=script['topic']['title'],duration_seconds=34,
+        decision=dict(game='가상 게임',selected_topic=script['topic']['title'],duration_seconds=duration,
             duration_reason='관측 예시와 설명 분량',selection_reason='두 장면 비교',other_candidates_reason='다른 예시는 복잡',
             evidence_ids=['q0:'+vid],shorts_status='unverified',rights_plan='직접 녹화 권리 확인 대기')
         def ai_send(request,timeout):
+            wire=json.loads(request.data)
+            notice=wire['systemInstruction']['parts'][0]['text']
+            self.assertIn('provenance.mock=false',notice)
+            self.assertIn('provenance.model='+MODEL,notice)
+            self.assertIn('provenance.author is your claimed creative role',notice)
             message=json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
             phase,context=message['phase'],message['data']
             role=context.get('assignment',{}).get('role')
@@ -390,6 +409,11 @@ class MissionOneTests(unittest.TestCase):
             elif phase=='execute':
                 self.assertEqual(context['quality']['manager_selection'],decision)
                 result=json.loads(employee(phase,context))
+                if role=='writer' and getattr(self,'provenance_case',None) in ('mock_conflict','other_model'):
+                    content=json.loads(result['content'])
+                    if self.provenance_case=='mock_conflict': content['provenance']['mock']=True
+                    else: content['provenance']['model']='synthetic-wrong-model'
+                    result['content']=json.dumps(content,ensure_ascii=False)
                 if (role=='writer' and getattr(self,'writer_fixture',False)
                         and not self.store.load(self.job).get('mission_writer_resume')):
                     content=json.loads(result['content'])
@@ -472,6 +496,24 @@ class MissionOneTests(unittest.TestCase):
             result=self.run_job()
         else:
             result=self.run_job()
+        if getattr(self,'provenance_case',None) in ('mock_conflict','other_model'):
+            self.assertEqual(result['reason_code'],'script_provenance_mismatch')
+            self.assertEqual(self.http.call_count,4)
+            entry=result['real_ai']['attempts'][-1]
+            self.assertEqual(entry['status'],'completed')
+            self.assertEqual(entry['role_result_status'],'json_parsed')
+            diag=entry['script_provenance_diagnostics']
+            self.assertEqual(diag,dict(stage='writer_script_validation',category='script_provenance_mismatch',
+                model_matches=self.provenance_case!='other_model',mock_matches=self.provenance_case!='mock_conflict',
+                ledger_model_matches=True,response_hash=entry['response_hash']))
+            self.assertNotIn('synthetic-wrong-model',json.dumps(diag))
+            self.assertNotIn(self.key,json.dumps(diag))
+            original={p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and self.job in p.name}
+            with self.assertRaises(CompanyError):self.run_job()
+            self.assertEqual(self.http.call_count,4)
+            for path,data in original.items():self.assertEqual(path.read_bytes(),data)
+            self.assertEqual(result['assignments'][1]['versions'],[])
+            return
         if getattr(self,'writer_fixture',False):
             self.assertEqual(result['reason_code'],'script_audience_inference_required')
             self.assertEqual(self.http.call_count,2)
@@ -612,7 +654,7 @@ class MissionOneTests(unittest.TestCase):
             self.assertEqual(report['script']['target_audience'],script['target_audience'])
             self.assertIn('AI 추론(사용자 미확정):',report['script']['unknowns'][-1])
             self.assertEqual(report['provenance'],'offline_http_fixture')
-        self.assertEqual(report['script']['target_duration'],34)
+        self.assertEqual(report['script']['target_duration'],duration)
         self.assertEqual(report['research']['observations'][0]['shorts_classification'],'unverified')
         self.assertEqual(report['sources'][0]['url'],'https://www.youtube.com/watch?v='+vid)
         self.assertIsNone(report['render_spec'])

@@ -1,7 +1,7 @@
 """Video quality planning adapter. Text plans are not rendered or publishable videos."""
 from copy import deepcopy
 import math
-from autonomous_company import Company, require, exact, parse, digest, validate_plan, now, text
+from autonomous_company import Company, CompanyError, require, exact, parse, digest, validate_plan, now, text
 from quality_feedback import ROLE_CONTRACTS
 from video_production_company import offline_clip_decision_context
 from topic_research import compare_topics, writer_topic_handoff
@@ -296,6 +296,12 @@ class VideoProviderQualityCompany(QualityProviderCompany):
         script = (' '+SCRIPT_INSTRUCTIONS+' Include each deterministic issue id in revision feedback. '
                   'Use the short script contract for writer and editor instead of legacy segments and shots. '
                   if p['quality_inputs']['capabilities'].get('script_contract') == SCRIPT_CONTRACT else '')
+        if script:
+            script += (' Server-configured invocation facts: provenance.mock=false; provenance.model='+self.bound_model+
+                '. Copy these exact values; do not infer them from examples or author identity. '
+                'provenance.author is your claimed creative role, not verified identity. '
+                'Model/mock claims are checked against the server configuration and transport ledger; '
+                'echoing them is not proof of a real invocation. Offline fixture provenance stays offline.')
         return (super()._tool_notice(p)+' Video roles: '+__import__('json').dumps(VIDEO_ROLES,ensure_ascii=False)+
                 ' Choose necessary roles writer/editor/voice/qa/feedback and dependencies; no fixed pipeline required. '
                 'Writer/editor/voice content must be a JSON string matching quality.capabilities.artifact_contract. '
@@ -334,8 +340,20 @@ class VideoProviderQualityCompany(QualityProviderCompany):
         if phase=='execute' and task:
             content=parse(result['content'])
             if script is not None and task['role'] == 'writer':
-                inspect_script(content, quality['target_segment'], mock=False, target_duration=duration)
-                require(content['provenance']['model'] == self.bound_model, 'script_provenance_mismatch')
+                try:
+                    inspect_script(content, quality['target_segment'], mock=False, target_duration=duration)
+                    require(content['provenance']['model'] == self.bound_model, 'script_provenance_mismatch')
+                except CompanyError as exc:
+                    if exc.code=='script_provenance_mismatch':
+                        entry=p['real_ai']['attempts'][-1]
+                        proof=content.get('provenance',{})
+                        entry['script_provenance_diagnostics']=dict(stage='writer_script_validation',
+                            category=exc.code,model_matches=proof.get('model')==self.bound_model,
+                            mock_matches=proof.get('mock') is False,
+                            ledger_model_matches=entry.get('model')==self.bound_model,
+                            response_hash=entry.get('response_hash'))
+                        self.store.save(p)
+                    raise
             elif script is not None:
                 validate_script_editor(content, context['previous_results'])
             elif task['role'] in ('writer','editor','voice'):validate_artifact(task['role'],content)

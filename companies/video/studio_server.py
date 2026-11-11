@@ -3,13 +3,14 @@ import argparse
 from copy import deepcopy
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
+import os
 from pathlib import Path
 import re
 import secrets
 import threading
 from urllib.parse import urlsplit
 
-from autonomous_company import CompanyError, Store, exact, require
+from autonomous_company import CompanyError, Store, exact, require, digest, now
 from representative_workflow import RepresentativeVideoWorkflow, _file_hash
 
 ASSETS = Path(__file__).with_name('studio')
@@ -18,6 +19,10 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 ERRORS = {
+    'budget_local_account_required': '서버의 계정 프로젝트 ID·무료 조건 확인 설정이 필요합니다. 키를 화면에 입력하지 마세요.',
+    'budget_new_project_only': '미운영 새 프로젝트만 등록할 수 있습니다. 기존 프로젝트를 변환하지 않습니다.',
+    'budget_sixty_second_path_only': '현재 예산 모드는 길이를 60초로 지정한 새 대본 프로젝트에만 연결됩니다.',
+    'budget_setup_already_decided': '이미 준비·결정된 등록입니다. 최신 상태를 확인해 주세요.',
     'budget_approval_required': 'AI 사용 예산이 부족합니다. 예산 요청을 검토해 주세요.',
     'budget_continue_forbidden': '실패·미확정 작업은 자동 재개할 수 없습니다.',
     'budget_review_changed': '검토한 예산 요청이 변경됐습니다. 새로고침 후 확인해 주세요.',
@@ -110,6 +115,7 @@ class Studio:
         flow = deepcopy(p['representative'])
         flow.pop('scoped_experiences', None)
         flow.pop('creation_key', None)
+        flow.pop('budget_setup', None)
         for video in flow['video_versions']:
             prefix = f'/media/{key}/{pid}/{video["version"]}'
             video.update(url=prefix+'/video', thumbnail=prefix+'/thumbnail')
@@ -122,7 +128,7 @@ class Studio:
             from video_mission_one import MissionOneStore, provider_view
             provider_store = MissionOneStore(store.root/'mission_one_provider')
             mission = provider_view(provider_store.load(flow['mission_one_job']))
-        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p),
+        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p),
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
                                            for t in j['assignments']]) for j in jobs]}
@@ -140,17 +146,120 @@ class Studio:
         store = self.stores['workspace']
         with store.lock(pid):
             p = self.project('workspace',pid)
-            flow = p['representative']
-            require(flow['stage']=='goal_submitted' and not flow.get('mission_one_job')
-                    and not flow['planning_jobs'] and not flow['plan_versions'] and not flow.get('budget_job'),
-                    'budget_new_project_only')
-            provider = self.budget_store()
-            job = provider.load(provider_job)
-            require(job['goal']==p['goal'] and job['quality_inputs']['answers']['representative_project']==pid
-                    and job['status']=='ready' and not job['real_ai']['attempts'], 'budget_project_mismatch')
-            self.budget_ledger().create(provider_job,scope=provider.budget_scope(job))
-            flow['budget_job']=provider_job
-            self.workflow._transition(p,'research_planning')
+            self._enable_budget_locked(p,provider_job)
+
+    @staticmethod
+    def _new_budget_project(p):
+        flow=p['representative']
+        require(flow['stage']=='goal_submitted' and not flow.get('mission_one_job')
+                and not flow['planning_jobs'] and not flow['plan_versions'] and not flow['video_versions']
+                and not flow['render_attempts'] and not flow.get('budget_job')
+                and not p['attempts'] and not p['assignments'] and not p['artifacts'], 'budget_new_project_only')
+        require(flow['constraints'].get('duration_seconds')==60,'budget_sixty_second_path_only')
+
+    def _enable_budget_locked(self,p,provider_job):
+        self._new_budget_project(p)
+        provider=self.budget_store()
+        job=provider.load(provider_job)
+        require(job['goal']==p['goal'] and job['quality_inputs']['answers']['representative_project']==p['id']
+                and job['status']=='ready' and not job['real_ai']['attempts'],'budget_project_mismatch')
+        ledger=self.budget_ledger()
+        scope=provider.budget_scope(job)
+        if ledger._path(provider_job).exists():
+            existing=ledger._load(provider_job)
+            require(digest(existing['scope'])==digest(scope) and not existing['approvals'] and not existing['attempts'],'budget_project_mismatch')
+        else:
+            ledger.create(provider_job,scope=scope)
+        p['representative']['budget_job']=provider_job
+        self.workflow._transition(p,'research_planning')
+
+    @staticmethod
+    def _budget_project_binding(p):
+        return digest(dict(goal=p['goal'],audience=p['representative']['audience'],
+                           constraints=p['representative']['constraints']))
+
+    @staticmethod
+    def _budget_environment(account):
+        from autonomous_gemini35 import MODEL,ENDPOINT
+        require(bool(os.getenv('BUDGET_GEMINI_ACCOUNT_PROJECT'))
+                and account==os.getenv('BUDGET_GEMINI_ACCOUNT_PROJECT')
+                and os.getenv('BUDGET_GEMINI_FREE_ACCOUNT_CONFIRMED')=='1','budget_local_account_required')
+        require(os.getenv('GEMINI35_MODEL')==MODEL and os.getenv('GEMINI35_ENDPOINT')==ENDPOINT,
+                'budget_provider_scope_invalid')
+        from budget_video_provider import _binding
+        key=os.getenv('GEMINI_API_KEY','')
+        _binding('local-configuration-check',key)  # Validate before creating any pending provider job.
+        return key
+
+    def budget_setup_view(self,key,p):
+        if key!='workspace':
+            return None
+        setup=p['representative'].get('budget_setup')
+        if not setup:
+            try:
+                self._new_budget_project(p)
+            except CompanyError:
+                return None
+            return dict(status='available',local_setup='서버 로컬 환경의 기존 GEMINI_API_KEY와 고정 모델/엔드포인트를 사용합니다. 키를 화면에 입력하지 마세요. 소유자가 계정 ID를 BUDGET_GEMINI_ACCOUNT_PROJECT에, 결제 미연결·무료 확인을 BUDGET_GEMINI_FREE_ACCOUNT_CONFIRMED=1로 설정한 뒤 다시 준비하세요. 이 설정은 독립 공급자 검증이 아닙니다.')
+        body=setup['proposal']
+        return dict(status=setup['status'],provider_job=setup['job'],review_hash=digest(body),
+            model=body['model'],endpoint=body['endpoint'],goal=p['goal'],
+            account_project=body['budget_binding']['account_project'],free_only=body['free_only'],
+            data_policy=body['budget_binding']['data_policy'],data_scopes=body['scopes'],
+            inputs=body['quality_contract']['inputs'],expires_at=body['expires_at'],
+            responsibility='사용자가 키 소속 프로젝트와 결제 미연결·무료 조건을 확인합니다. 예산 승인은 별도이며 모델·계정·데이터 변경에는 새 동의가 필요합니다.')
+
+    def budget_prepare(self,pid,body):
+        exact(body,('account_project','confirm_free_account'))
+        require(body['confirm_free_account'] is True,'explicit_provider_confirmation_required')
+        key=self._budget_environment(body['account_project'])
+        from script_quality import SCRIPT_CONTRACT
+        with self.stores['workspace'].lock(pid):
+            p=self.project('workspace',pid)
+            self._new_budget_project(p)
+            previous=p['representative'].get('budget_setup')
+            if previous:
+                require(previous['status']=='pending' and previous['proposal']['budget_binding']['account_project']==body['account_project'],
+                        'budget_setup_already_decided')
+                return  # Identical preparation is persistently idempotent, never refreshes expiry.
+            flow=p['representative']
+            provider=self.budget_store()
+            job=provider.create(p['goal'],inputs=dict(domain='video',target_segment=flow['audience'],
+                answers=dict(audience=flow['audience'],representative_project=pid),constraints=deepcopy(flow['constraints']),
+                capabilities=dict(script_contract=SCRIPT_CONTRACT),experiences=[],feedback_text=''))
+            proposal=provider.prepare_budget(job['id'],key=key,account_project=body['account_project'])
+            flow['budget_setup']=dict(status='pending',job=job['id'],proposal=proposal,
+                                     project_binding=self._budget_project_binding(p))
+            self.stores['workspace'].save(p)
+
+    def budget_consent(self,pid,body):
+        exact(body,('review_hash','action'))
+        require(body['action'] in ('approve','reject'),'invalid_request')
+        with self.stores['workspace'].lock(pid):
+            p=self.project('workspace',pid)
+            self._new_budget_project(p)
+            setup=p['representative'].get('budget_setup')
+            require(setup is not None and setup['status']=='pending','budget_setup_already_decided')
+            require(body['review_hash']==digest(setup['proposal']) and setup['project_binding']==self._budget_project_binding(p),
+                    'budget_review_changed')
+            provider=self.budget_store()
+            if body['action']=='reject':
+                setup.update(status='rejected',decided_at=now())
+                self.stores['workspace'].save(p)
+                return
+            from budget_video_provider import _binding
+            proof=setup['proposal']['budget_binding']
+            key=self._budget_environment(proof['account_project'])
+            require(secrets.compare_digest(proof['credential_binding'],_binding(setup['job'],key)),
+                    'budget_provider_key_mismatch')
+            job=provider.load(setup['job'])
+            provider._check_contract(job,setup['proposal'])  # Includes existing KST expiry and exact inputs.
+            if provider._grant_path(setup['job']).exists():
+                require(digest(provider.grant(job)['body'])==body['review_hash'],'budget_review_changed')
+            else:
+                provider.approve(setup['job'],setup['proposal'],review_hash=body['review_hash'],owner_confirmed=True)
+            setup.update(status='approved',decided_at=now())
+            self._enable_budget_locked(p,setup['job'])
 
     def propose_budget(self, pid, amounts, **estimate):
         """Internal manager estimate input, never a public representative approval endpoint."""
@@ -167,7 +276,12 @@ class Studio:
         ledger = self.budget_ledger()
         from project_budget import digest
         result = ledger.view(job_id)
-        result.update(scope=ledger._load(job_id)['scope'], provider_status=job['status'], reason=job.get('reason_code'))
+        try:
+            provider.grant(job)
+            consent_state='valid'
+        except CompanyError as exc:
+            consent_state=exc.code
+        result.update(scope=ledger._load(job_id)['scope'], provider_status=job['status'], reason=job.get('reason_code'), consent_state=consent_state)
         for request in result['requests']:
             request['review_hash']=digest(request)
         return result
@@ -196,7 +310,16 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
-        if name in ('budget-decide','budget-run'):
+        if name=='budget-prepare':
+            self.budget_prepare(pid,body)
+        elif name=='budget-consent':
+            self.budget_consent(pid,body)
+        elif name=='budget-revoke':
+            exact(body,())
+            job=self.project(key,pid)['representative'].get('budget_job')
+            require(bool(job),'budget_not_enabled')
+            self.budget_store().revoke(job,owner_confirmed=True)
+        elif name in ('budget-decide','budget-run'):
             job_id = self.project(key,pid)['representative'].get('budget_job')
             require(bool(job_id), 'budget_not_enabled')
             if name=='budget-decide':
@@ -335,7 +458,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-consent|budget-revoke)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

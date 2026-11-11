@@ -215,13 +215,27 @@ function operations(p) {
   if (['production','video_revision'].includes(p.stage)) return `${failed}<button class="button secondary" data-action="produce">${icon('film')} 로컬 기술 시안 제작</button><p class="muted">승인된 대본으로 로컬 렌더러를 실행합니다. 외부 API 비용은 발생하지 않습니다.</p>`;
   return '<p class="muted">기획·대본이나 영상 보고서를 확인해 주세요.</p>';
 }
+function budgetSetupPanel(p) {
+  const setup=p.budget_setup;
+  if (!setup||p.readonly) return '';
+  if (setup.status==='available') return `<section class="panel"><h2>프로젝트별 예산 모드</h2>
+    <p>60초 대본 경로 · 초기 예산 0 · 외부 데이터 전송 동의와 예산 승인을 따로 검토합니다.</p>
+    <p class="muted">${h(setup.local_setup)}</p><button class="button secondary" data-action="budget-prepare">예산 모드 등록 준비</button></section>`;
+  return `<section class="panel"><h2>공급자 데이터 전송 동의 · ${h(setup.status)}</h2>
+    ${facts([['프로젝트',p.id],['목표',setup.goal],['모델/API',setup.model+' / '+setup.endpoint],['계정 프로젝트',setup.account_project],['무료 전용',setup.free_only?'예':'아니요'],['동의 만료',time(setup.expires_at)]])}
+    <p>${h(setup.data_policy)}</p><p>전송 범위: ${h(setup.data_scopes.join(', '))}</p>
+    <p>입력 대상: ${h(setup.inputs.target_segment)} · ${h(JSON.stringify(setup.inputs.constraints))}</p>
+    <p class="muted">${h(setup.responsibility)} · 예산 승인은 별도이며 등록만으로 전송하지 않습니다.</p>
+    <details><summary>검토할 제안 해시</summary><p class="mono">${h(setup.review_hash)}</p></details>
+    ${setup.status==='pending'?'<button class="button" data-consent="approve">데이터 전송 동의·등록</button><button class="button ghost" data-consent="reject">동의 거절·미등록</button>':''}</section>`;
+}
 function budgetPanel(p) {
   const b=p.budget;
   if (!b) return '';
   return `<section class="panel" id="budget-panel"><h2>AI 사용 예산</h2>
     <p class="muted">무료 서비스 · 예산 승인과 외부 전송 동의는 별개입니다. 승인 후 실행은 아래 버튼으로 시작합니다.</p>
     ${facts(Object.entries(b.resources).map(([key,v])=>[key,`승인 ${v.approved} · 소모 ${v.consumed} · 잔여 ${v.remaining} · 불명 ${v.unresolved} (${v.unit})`]))}
-    <p>${h(b.scope.purpose)}</p><p>${h(b.scope.data_policy)}</p>
+    <p>${h(b.scope.purpose)}</p><p>${h(b.scope.data_policy)}</p><p>공급자 동의: ${h(b.consent_state)}</p>
     ${facts([['프로젝트',p.id],['모델/계정',Object.values(b.scope.services).map(v=>v.model+' / '+v.account_project).join(', ')],['동의 만료',time(b.scope.consent_expires_at)],['실제 비용','미확인']])}
     ${b.requests.map(r=>`<article class="subpanel"><h3>${r.status==='pending'?'대표 예산 검토 대기':h(r.status)}</h3>
       <p>추가 수량: ${h(JSON.stringify(r.amounts))}</p><p>${h(r.reason)}</p><p>완료한 일: ${h(r.progress)}</p>
@@ -229,7 +243,7 @@ function budgetPanel(p) {
       <details><summary>검토 해시·만료</summary><p class="mono">${h(r.review_hash)}</p><p>${h(time(r.expires_at))}</p></details>
       ${r.status==='pending'&&!p.readonly?`<button class="button" data-budget-decision="approve" data-request="${h(r.id)}">예산 승인</button>
       <button class="button ghost" data-budget-decision="reject" data-request="${h(r.id)}">예산 거절</button>`:''}</article>`).join('')}
-    ${!p.readonly?'<button class="button secondary" data-action="budget-run">승인된 예산으로 작업 시작·계속</button>':''}
+    ${!p.readonly&&b.consent_state==='valid'?'<button class="button secondary" data-action="budget-run">승인된 예산으로 작업 시작·계속</button><button class="button ghost" data-action="budget-revoke">공급자 동의 철회</button>':''}
     <p class="muted">${h(b.provider_status)} · ${h(b.reason||'')}</p></section>`;
 }
 function projectPage(p, chosen={}) {
@@ -245,7 +259,7 @@ function projectPage(p, chosen={}) {
       badge(p.mission?.attempts.length?'모델 작업 결과 확인 중':'실제 모델 미실행','alert','amber')}</div>
   <h1>${h(p.goal)}</h1><p class="muted">${h(s[1])} · ${h(time(p.updated_at))}</p></section>
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
-  <div class="detail-grid"><div class="stack">${budgetPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
+  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
   <aside class="stack"><section class="panel"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['다음 행동',s[2]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
   ${operations(p)}${missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
@@ -357,6 +371,24 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action==='budget-prepare') {
+    const project=detail;
+    modal('예산 모드 등록 준비',`<p>서버 로컬에 연결된 키를 사용합니다. 키를 입력하지 마세요. 초기 예산은 0이며 실행은 별도입니다.</p>
+      <label>확인한 Google 계정 프로젝트 ID<input name="account_project" required maxlength="200"></label>
+      <label class="check"><input name="confirm_free_account" type="checkbox" required>해당 키의 소속 프로젝트와 결제 미연결·무료 조건을 확인했습니다.</label>`,
+      '동의 제안 준비',async data=>{
+        await api(detailApi(project)+'/budget-prepare',{account_project:data.get('account_project'),confirm_free_account:data.has('confirm_free_account')});
+        return {message:'제안을 준비했습니다. 별도 데이터 전송 동의를 검토해 주세요.'};
+      });
+  }
+  else if (button.dataset.consent||button.dataset.action==='budget-revoke') {
+    button.disabled=true;
+    try {
+      if (button.dataset.consent) await api(detailApi(detail)+'/budget-consent',{review_hash:detail.budget_setup.review_hash,action:button.dataset.consent});
+      else await api(detailApi(detail)+'/budget-revoke',{});
+      await route();notice('공급자 동의 상태를 저장했습니다. 예산 승인은 별도입니다.');
+    } catch(error) { notice(error.message,true);button.disabled=false; }
+  }
   else if (button.dataset.budgetDecision || button.dataset.action==='budget-run') {
     button.disabled=true;
     try {

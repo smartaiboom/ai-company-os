@@ -1,6 +1,7 @@
 """Explicit new-project budget mode using the existing signed Gemini/video engine."""
 from copy import deepcopy
 import hmac
+import os
 
 from autonomous_company import Store, require, exact, text, digest, now
 from autonomous_free import FreeStore
@@ -70,6 +71,8 @@ class BudgetVideoCompany(VideoProviderQualityCompany):
 
     def _quality_transport_allowed(self, p):
         proof = self.store.grant(p)['body']['budget_binding']
+        require(os.getenv('BUDGET_GEMINI_ACCOUNT_PROJECT')==proof['account_project']
+                and os.getenv('BUDGET_GEMINI_FREE_ACCOUNT_CONFIRMED')=='1','budget_provider_scope_invalid')
         cutroom = Store(self.store.root.parent).load(proof['cutroom'])
         require(cutroom['representative'].get('budget_job')==p['id'] and cutroom['goal']==p['goal'], 'budget_cutroom_binding_changed')
         require(hmac.compare_digest(proof['credential_binding'],_binding(p['id'],self.config.api_key)),

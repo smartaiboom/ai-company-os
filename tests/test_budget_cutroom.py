@@ -16,7 +16,6 @@ from autonomous_company import digest, CompanyError
 from autonomous_gemini35 import Gemini35Config, MODEL, ENDPOINT
 from autonomous_live import LiveManagerProvider, LiveEmployeeProvider
 from budget_video_provider import BudgetVideoCompany
-from script_quality import SCRIPT_CONTRACT
 from studio_server import Studio, make_server
 from tests.test_script_quality import script_from_beats, script_callbacks
 from voice_quality import AUDIENCE
@@ -48,7 +47,8 @@ class BudgetCutroomTests(unittest.TestCase):
         self.enterContext(patch('socket.getaddrinfo',dns))
         self.key='synthetic-budget-cutroom-api-key'
         self.enterContext(patch.dict('os.environ',GEMINI_API_KEY=self.key,GEMINI35_MODEL=MODEL,
-            GEMINI35_ENDPOINT=ENDPOINT,GEMINI35_AUTONOMOUS_FREE_ENABLED='1'))
+            GEMINI35_ENDPOINT=ENDPOINT,GEMINI35_AUTONOMOUS_FREE_ENABLED='1',
+            BUDGET_GEMINI_ACCOUNT_PROJECT='synthetic-account',BUDGET_GEMINI_FREE_ACCOUNT_CONFIRMED='1'))
         ticks=count()
         self.enterContext(patch('autonomous_free.pacing_now',side_effect=lambda:
             (datetime(2026,1,1,tzinfo=timezone(timedelta(hours=9)))+timedelta(seconds=3*next(ticks))).isoformat()))
@@ -56,12 +56,7 @@ class BudgetCutroomTests(unittest.TestCase):
         self.pid=self.studio.create(dict(goal='합성 영상 예산 경로',audience=AUDIENCE,language='한국어',
             platform='YouTube',duration=60,notes='오프라인만',key='00000000-0000-4000-8000-000000000081'))['id']
         self.store=self.studio.budget_store()
-        self.job=self.store.create('합성 영상 예산 경로',inputs=dict(domain='video',target_segment=AUDIENCE,
-            answers=dict(audience=AUDIENCE,representative_project=self.pid),constraints=dict(language='한국어'),
-            capabilities=dict(script_contract=SCRIPT_CONTRACT),experiences=[],feedback_text=''))['id']
-        body=self.store.prepare_budget(self.job,key=self.key,account_project='synthetic-account')
-        self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
-        self.studio.enable_budget(self.pid,self.job)
+        self.job=None
         self.studio.budget_company_factory=lambda store:FixtureCompany(store,LiveManagerProvider('fixture-manager'),
             LiveEmployeeProvider('fixture-staff'),Gemini35Config(self.key))
         def beat(a,b,line,shot):
@@ -92,6 +87,15 @@ class BudgetCutroomTests(unittest.TestCase):
         self.addCleanup(self.close_server)
         self.base=f'http://127.0.0.1:{self.server.server_port}'
         self.path=f'/api/project/workspace/{self.pid}'
+        status,detail=self.request(self.path+'/budget-prepare',dict(account_project='synthetic-account',confirm_free_account=True))
+        self.assertEqual(status,200)
+        self.job=detail['budget_setup']['provider_job']
+        review=detail['budget_setup']['review_hash']
+        self.assertNotIn(self.key,json.dumps(detail))
+        self.assertNotIn('credential_binding',json.dumps(detail))
+        self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=review,action='approve'))[0],200)
+        self.assertEqual(self.studio.budget_ledger().view(self.job)['resources']['text']['approved'],0)
+        self.assertEqual(self.http.call_count,0)
 
     def close_server(self):
         self.server.shutdown();self.server.server_close();self.thread.join(5)
@@ -156,6 +160,78 @@ class BudgetCutroomTests(unittest.TestCase):
         self.assertEqual(self.request(self.path+'/budget-run',{})[0],409)
         self.assertEqual(self.http.call_count,1)
 
+    def fresh_project(self):
+        import uuid
+        status,value=self.request('/api/project',dict(goal='추가 합성 새 프로젝트',audience=AUDIENCE,
+            language='한국어',platform='YouTube',duration=60,notes='합성 fixture',key=str(uuid.uuid4())))
+        self.assertEqual(status,201)
+        self.pid=value['id'];self.path=f'/api/project/workspace/{self.pid}'
+
+    def prepare_new(self,token=True,account='synthetic-account'):
+        return self.request(self.path+'/budget-prepare',dict(account_project=account,confirm_free_account=True),token=token)
+
+    def test_provisioning_auth_account_free_condition_and_idempotent_refresh(self):
+        self.fresh_project()
+        self.assertEqual(self.prepare_new(token=False)[0],403)
+        self.assertEqual(self.prepare_new(account='unauthorized-account')[0],409)
+        with patch.dict('os.environ',BUDGET_GEMINI_FREE_ACCOUNT_CONFIRMED='0'):
+            self.assertEqual(self.prepare_new()[0],409)
+        self.assertEqual(self.request(self.path)[1]['budget_setup']['status'],'available')
+        prepared=self.prepare_new()[1]['budget_setup']
+        self.assertEqual(prepared,self.prepare_new()[1]['budget_setup'])
+        self.assertEqual(prepared,self.request(self.path)[1]['budget_setup'])
+        self.assertFalse(self.store._grant_path(prepared['provider_job']).exists())
+        rejected=self.request(self.path+'/budget-consent',dict(review_hash=prepared['review_hash'],action='reject'))
+        self.assertEqual(rejected[0],200)
+        self.assertIsNone(rejected[1]['budget'])
+        self.assertEqual(rejected[1]['budget_setup']['status'],'rejected')
+        self.assertEqual(self.prepare_new()[0],409)
+        self.assertFalse(self.store._grant_path(prepared['provider_job']).exists())
+        self.assertEqual(self.http.call_count,0)
+
+    def test_registered_provider_signature_and_grant_expiry_block_without_sending(self):
+        later=(datetime.now(timezone(timedelta(hours=9)))+timedelta(hours=2)).isoformat()
+        with patch('autonomous_free.now',return_value=later):
+            self.assertEqual(self.request(self.path+'/budget-run',{})[0],409)
+        grant_path=self.store._grant_path(self.job)
+        record=json.loads(grant_path.read_text())
+        record['signature']='synthetic tampered signature'
+        grant_path.write_text(json.dumps(record))
+        self.assertEqual(self.request(self.path+'/budget-run',{})[0],409)
+        self.assertEqual(self.http.call_count,0)
+
+    def test_provider_consent_hash_expiry_project_binding_and_changed_key(self):
+        old_hash=self.request(self.path)[1]['budget_setup']['review_hash']
+        self.fresh_project()
+        prepared=self.prepare_new()[1]['budget_setup']
+        for bad_hash in ('forged',old_hash):
+            self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=bad_hash,action='approve'))[0],409)
+        with patch.dict('os.environ',GEMINI_API_KEY='different-synthetic-secret'):
+            self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=prepared['review_hash'],action='approve'))[0],409)
+        later=(datetime.now(timezone(timedelta(hours=9)))+timedelta(hours=2)).isoformat()
+        with patch('autonomous_free.now',return_value=later):
+            self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=prepared['review_hash'],action='approve'))[0],409)
+        self.assertFalse(self.store._grant_path(prepared['provider_job']).exists())
+        self.assertEqual(self.http.call_count,0)
+
+    def test_concurrent_prepare_then_approval_duplicate_and_existing_project_block(self):
+        self.fresh_project()
+        results=[]
+        threads=[threading.Thread(target=lambda:results.append(self.prepare_new())) for _ in range(2)]
+        for thread in threads:thread.start()
+        for thread in threads:thread.join(5)
+        prepared=[r[1]['budget_setup'] for r in results if r[0]==200]
+        self.assertTrue(prepared)
+        self.assertEqual(len({p['provider_job'] for p in prepared}),1)
+        approved=self.request(self.path+'/budget-consent',dict(review_hash=prepared[0]['review_hash'],action='approve'))
+        self.assertEqual(approved[0],200)
+        self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=prepared[0]['review_hash'],action='approve'))[0],409)
+        self.assertEqual(self.prepare_new()[0],409)
+        self.fresh_project()
+        self.studio.action('workspace',self.pid,'mission',{})
+        self.assertEqual(self.prepare_new()[0],409)
+        self.assertEqual(self.http.call_count,0)
+
     def test_cutroom_provider_link_change_cannot_send(self):
         self.assertEqual(self.decide(self.estimate(1))[0],200)
         project=self.studio.project('workspace',self.pid)
@@ -194,6 +270,7 @@ class BudgetCutroomTests(unittest.TestCase):
         self.assertEqual(self.http.call_count,0)
         pending=self.studio.budget_ledger().view(self.job)['requests'][-1]
         self.assertEqual(self.decide(pending)[0],200)
-        self.store.revoke(self.job,owner_confirmed=True)
+        self.assertEqual(self.request(self.path+'/budget-revoke',{})[0],200)
+        self.assertEqual(self.request(self.path)[1]['budget']['consent_state'],'consent_revoked')
         self.assertEqual(self.request(self.path+'/budget-run',{})[0],409)
         self.assertEqual(self.http.call_count,0)

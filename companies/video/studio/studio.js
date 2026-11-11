@@ -227,6 +227,8 @@ function budgetSetupPanel(p) {
     <p>입력 대상: ${h(setup.inputs.target_segment)} · ${h(JSON.stringify(setup.inputs.constraints))}</p>
     <p class="muted">${h(setup.responsibility)} · 예산 승인은 별도이며 등록만으로 전송하지 않습니다.</p>
     <details><summary>검토할 제안 해시</summary><p class="mono">${h(setup.review_hash)}</p></details>
+    ${['expired','rejected'].includes(setup.status)?'<button class="button secondary" data-action="budget-reprepare">이전 제안을 보존하고 새 제안 준비</button>':''}
+    <p>이전 기록 ${h(setup.history_count)}건 · 저장된 상태 ${h(setup.previous_status)} · 현재 상태 ${h(setup.status)}</p>
     ${setup.status==='pending'?'<button class="button" data-consent="approve">데이터 전송 동의·등록</button><button class="button ghost" data-consent="reject">동의 거절·미등록</button>':''}</section>`;
 }
 function budgetPanel(p) {
@@ -371,13 +373,14 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
-  else if (button.dataset.action==='budget-prepare') {
+  else if (['budget-prepare','budget-reprepare'].includes(button.dataset.action)) {
     const project=detail;
+    const renew=button.dataset.action==='budget-reprepare';
     modal('예산 모드 등록 준비',`<p>서버 로컬에 연결된 키를 사용합니다. 키를 입력하지 마세요. 초기 예산은 0이며 실행은 별도입니다.</p>
       <label>확인한 Google 계정 프로젝트 ID<input name="account_project" required maxlength="200"></label>
       <label class="check"><input name="confirm_free_account" type="checkbox" required>해당 키의 소속 프로젝트와 결제 미연결·무료 조건을 확인했습니다.</label>`,
       '동의 제안 준비',async data=>{
-        await api(detailApi(project)+'/budget-prepare',{account_project:data.get('account_project'),confirm_free_account:data.has('confirm_free_account')});
+        await api(detailApi(project)+(renew?'/budget-reprepare':'/budget-prepare'),{account_project:data.get('account_project'),confirm_free_account:data.has('confirm_free_account'),...(renew?{review_hash:project.budget_setup.review_hash}:{})});
         return {message:'제안을 준비했습니다. 별도 데이터 전송 동의를 검토해 주세요.'};
       });
   }

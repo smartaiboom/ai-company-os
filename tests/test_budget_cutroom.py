@@ -100,8 +100,9 @@ class BudgetCutroomTests(unittest.TestCase):
     def close_server(self):
         self.server.shutdown();self.server.server_close();self.thread.join(5)
 
-    def request(self,path,body=None,token=True):
+    def request(self,path,body=None,token=True,cross_site=False):
         headers={}
+        if cross_site: headers['Sec-Fetch-Site']='cross-site'
         if body is not None:
             headers['Content-Type']='application/json'
             if token: headers['X-Studio-Token']=self.studio.token
@@ -188,6 +189,75 @@ class BudgetCutroomTests(unittest.TestCase):
         self.assertEqual(self.prepare_new()[0],409)
         self.assertFalse(self.store._grant_path(prepared['provider_job']).exists())
         self.assertEqual(self.http.call_count,0)
+
+    def reprepare(self,old,**kwargs):
+        return self.request(self.path+'/budget-reprepare',dict(account_project='synthetic-account',
+            confirm_free_account=True,review_hash=old['review_hash']),**kwargs)
+
+    def test_explicit_reprepare_rejected_proposal_preserves_history_and_requires_new_hash(self):
+        self.fresh_project()
+        old=self.prepare_new()[1]['budget_setup']
+        old_job=self.store.path(old['provider_job']).read_bytes()
+        self.assertEqual(self.reprepare(old)[0],409)
+        self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=old['review_hash'],action='reject'))[0],200)
+        previous=self.studio.project('workspace',self.pid)['representative']['budget_setup']
+        self.assertEqual(self.reprepare(old,token=False)[0],403)
+        self.assertEqual(self.reprepare(old,cross_site=True)[0],403)
+        with patch.dict('os.environ',BUDGET_GEMINI_FREE_ACCOUNT_CONFIRMED='0'):
+            self.assertEqual(self.reprepare(old)[0],409)
+        self.assertEqual(self.reprepare(dict(review_hash='forged'))[0],409)
+        status,detail=self.reprepare(old)
+        self.assertEqual(status,200)
+        new=detail['budget_setup']
+        self.assertNotEqual(old['provider_job'],new['provider_job'])
+        self.assertNotEqual(old['review_hash'],new['review_hash'])
+        self.assertEqual(self.prepare_new()[1]['budget_setup'],new)
+        self.assertEqual(self.reprepare(old)[0],409)
+        history=self.studio.project('workspace',self.pid)['representative']['budget_setup_history']
+        self.assertEqual({k:history[0][k] for k in previous},previous)
+        self.assertEqual(history[0]['closed_state'],'rejected')
+        self.assertEqual(self.store.path(old['provider_job']).read_bytes(),old_job)
+        self.assertFalse(self.store._grant_path(old['provider_job']).exists())
+        self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=old['review_hash'],action='approve'))[0],409)
+        with patch.dict('os.environ',GEMINI_API_KEY='changed-synthetic-reprepare-key'):
+            self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=new['review_hash'],action='approve'))[0],409)
+        self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=new['review_hash'],action='approve'))[0],200)
+        self.assertEqual(self.studio.budget_ledger().view(new['provider_job'])['resources']['text']['approved'],0)
+        self.assertEqual(self.http.call_count,0)
+
+    def test_expired_reprepare_concurrent_requests_create_only_one_new_proposal(self):
+        self.fresh_project()
+        old=self.prepare_new()[1]['budget_setup']
+        later=(datetime.now(timezone(timedelta(hours=9)))+timedelta(hours=2)).isoformat()
+        with patch('project_budget_ledger.now',return_value=later), patch('autonomous_free.now',return_value=later):
+            self.assertEqual(self.request(self.path)[1]['budget_setup']['status'],'expired')
+            self.assertEqual(self.prepare_new()[1]['budget_setup']['review_hash'],old['review_hash'])
+            results=[]
+            threads=[threading.Thread(target=lambda:results.append(self.reprepare(old))) for _ in range(2)]
+            for t in threads:t.start()
+            for t in threads:t.join(5)
+            self.assertEqual(sorted(r[0] for r in results),[200,409])
+            new=next(r[1]['budget_setup'] for r in results if r[0]==200)
+            self.assertGreater(new['expires_at'],old['expires_at'])
+            self.assertEqual(self.request(self.path+'/budget-consent',dict(review_hash=new['review_hash'],action='approve'))[0],200)
+        self.assertEqual(len(self.studio.project('workspace',self.pid)['representative']['budget_setup_history']),1)
+        self.assertEqual(self.http.call_count,0)
+
+    def test_registered_reprepare_forbidden_preserves_ledger_grant_and_attempts(self):
+        old=self.request(self.path)[1]['budget_setup']
+        self.assertEqual(self.decide(self.estimate(1))[0],200)
+        self.http.side_effect=TimeoutError('synthetic timeout')
+        self.assertEqual(self.request(self.path+'/budget-run',{})[0],200)
+        self.assertEqual(self.request(self.path+'/budget-revoke',{})[0],200)
+        ledger=self.studio.budget_ledger()._path(self.job).read_bytes()
+        grant=self.store._grant_path(self.job).read_bytes()
+        job=self.store.path(self.job).read_bytes()
+        self.assertEqual(self.reprepare(old)[0],409)
+        self.assertEqual(self.request(self.path+'/budget-run',{})[0],409)
+        self.assertEqual(self.studio.budget_ledger()._path(self.job).read_bytes(),ledger)
+        self.assertEqual(self.store._grant_path(self.job).read_bytes(),grant)
+        self.assertEqual(self.store.path(self.job).read_bytes(),job)
+        self.assertEqual(self.http.call_count,1)
 
     def test_registered_provider_signature_and_grant_expiry_block_without_sending(self):
         later=(datetime.now(timezone(timedelta(hours=9)))+timedelta(hours=2)).isoformat()

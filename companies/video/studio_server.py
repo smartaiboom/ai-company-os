@@ -202,15 +202,26 @@ class Studio:
                 return None
             return dict(status='available',local_setup='서버 로컬 환경의 기존 GEMINI_API_KEY와 고정 모델/엔드포인트를 사용합니다. 키를 화면에 입력하지 마세요. 소유자가 계정 ID를 BUDGET_GEMINI_ACCOUNT_PROJECT에, 결제 미연결·무료 확인을 BUDGET_GEMINI_FREE_ACCOUNT_CONFIRMED=1로 설정한 뒤 다시 준비하세요. 이 설정은 독립 공급자 검증이 아닙니다.')
         body=setup['proposal']
-        return dict(status=setup['status'],provider_job=setup['job'],review_hash=digest(body),
+        status=self._budget_setup_state(setup)
+        return dict(status=status,previous_status=setup['status'],history_count=len(p['representative'].get('budget_setup_history',[])),provider_job=setup['job'],review_hash=digest(body),
             model=body['model'],endpoint=body['endpoint'],goal=p['goal'],
             account_project=body['budget_binding']['account_project'],free_only=body['free_only'],
             data_policy=body['budget_binding']['data_policy'],data_scopes=body['scopes'],
             inputs=body['quality_contract']['inputs'],expires_at=body['expires_at'],
             responsibility='사용자가 키 소속 프로젝트와 결제 미연결·무료 조건을 확인합니다. 예산 승인은 별도이며 모델·계정·데이터 변경에는 새 동의가 필요합니다.')
 
-    def budget_prepare(self,pid,body):
-        exact(body,('account_project','confirm_free_account'))
+    @staticmethod
+    def _budget_setup_state(setup):
+        if setup['status']=='pending':
+            from project_budget_ledger import ProjectBudgetLedger
+            try:
+                ProjectBudgetLedger._future(setup['proposal']['expires_at'])
+            except CompanyError:
+                return 'expired'
+        return setup['status']
+
+    def budget_prepare(self,pid,body,*,renew=False):
+        exact(body,('account_project','confirm_free_account','review_hash') if renew else ('account_project','confirm_free_account'))
         require(body['confirm_free_account'] is True,'explicit_provider_confirmation_required')
         key=self._budget_environment(body['account_project'])
         from script_quality import SCRIPT_CONTRACT
@@ -218,7 +229,13 @@ class Studio:
             p=self.project('workspace',pid)
             self._new_budget_project(p)
             previous=p['representative'].get('budget_setup')
-            if previous:
+            if renew:
+                require(previous is not None and self._budget_setup_state(previous) in ('expired','rejected'),
+                        'budget_reprepare_forbidden')
+                require(body['review_hash']==digest(previous['proposal']) and
+                        previous['project_binding']==self._budget_project_binding(p), 'budget_review_changed')
+                require(not self.budget_store()._grant_path(previous['job']).exists(), 'budget_reprepare_forbidden')
+            elif previous:
                 require(previous['status']=='pending' and previous['proposal']['budget_binding']['account_project']==body['account_project'],
                         'budget_setup_already_decided')
                 return  # Identical preparation is persistently idempotent, never refreshes expiry.
@@ -228,6 +245,10 @@ class Studio:
                 answers=dict(audience=flow['audience'],representative_project=pid),constraints=deepcopy(flow['constraints']),
                 capabilities=dict(script_contract=SCRIPT_CONTRACT),experiences=[],feedback_text=''))
             proposal=provider.prepare_budget(job['id'],key=key,account_project=body['account_project'])
+            if renew:
+                archived=deepcopy(previous)
+                archived.update(closed_state=self._budget_setup_state(previous),superseded_at=now())
+                flow.setdefault('budget_setup_history',[]).append(archived)
             flow['budget_setup']=dict(status='pending',job=job['id'],proposal=proposal,
                                      project_binding=self._budget_project_binding(p))
             self.stores['workspace'].save(p)
@@ -312,6 +333,8 @@ class Studio:
         require(key == 'workspace', 'readonly_project')
         if name=='budget-prepare':
             self.budget_prepare(pid,body)
+        elif name=='budget-reprepare':
+            self.budget_prepare(pid,body,renew=True)
         elif name=='budget-consent':
             self.budget_consent(pid,body)
         elif name=='budget-revoke':
@@ -458,7 +481,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-consent|budget-revoke)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

@@ -192,6 +192,40 @@ class MissionOneTests(unittest.TestCase):
         self.assertIn('total_duration', {d['issue'] for d in inspect_script(script, AUDIENCE, mock=True,
             target_duration=34)['defects']})
 
+    # Synthetic cases only: the original failed live review was not retained.
+    def test_research_plain_feedback_without_selection_rejected(self):
+        self.review_error = 'plain'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_research_malformed_feedback_without_selection_rejected(self):
+        self.review_error = 'inner_json'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_research_nonaccept_uses_prose_and_null_selection(self):
+        self.company._research_review_state = {'employee_web':None}
+        value = dict(action='revise', rationale='합성 예제', evidence='fixture', uncertainty='미확인',
+                     checks=[], feedback='조사 근거를 다시 확인하세요', operation=None, selection=None)
+        result = self.company._parse_role_content(json.dumps({'result':value}), 'review')
+        self.assertEqual(result['feedback'], value['feedback'])
+        self.assertNotIn('selection',result)
+        self.http.assert_not_called()
+
+    def test_research_missing_selection_field_rejected(self):
+        self.review_error = 'missing_field'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_research_invalid_selection_field_rejected(self):
+        self.review_error = 'field'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_research_invalid_evidence_rejected(self):
+        self.review_error = 'evidence'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_research_outer_json_failure_classified(self):
+        self.review_error = 'outer_json'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
     def test_dns_resume_stops_at_nine_new_calls(self):
         self.resume_fixture = True
         self.exhaust_resume_budget = True
@@ -226,6 +260,10 @@ class MissionOneTests(unittest.TestCase):
             bad['mission_web'][field] = 5
             with self.assertRaisesRegex(CompanyError, 'employee_web_scope_unverified'):
                 self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+        bad = deepcopy(body)
+        bad.pop('mission_research_review')
+        with self.assertRaisesRegex(CompanyError, 'mission_research_review_consent'):
+            self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
         self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
         if getattr(self, 'resume_fixture', False):
             from urllib.error import URLError
@@ -301,6 +339,10 @@ class MissionOneTests(unittest.TestCase):
             message=json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
             phase,context=message['phase'],message['data']
             role=context.get('assignment',{}).get('role')
+            if not (phase == 'review' and role == 'research'):
+                from role_json_schema import response_format
+                self.assertEqual(json.loads(request.data)['generationConfig']['responseJsonSchema'],
+                                 response_format(phase)['json_schema']['schema'])
             if phase=='execute' and role=='research':
                 result=dict(content=json.dumps(queries),evidence='fixture query builder',uncertainty='unverified')
             elif phase=='execute':
@@ -314,7 +356,21 @@ class MissionOneTests(unittest.TestCase):
                         criteria_ids=['facts'],instructions='직원 직접 질의'))
                 if phase=='review' and role=='research':
                     self.assertIn('EMPLOYEE_WEB_RECEIPT',context['result']['evidence'])
-                    result['feedback']=json.dumps(decision)
+                    from video_mission_one import research_review_schema
+                    wire = json.loads(request.data)
+                    self.assertEqual(wire['generationConfig']['responseJsonSchema'], research_review_schema())
+                    result['feedback']='합성 검토: 관측 근거를 선정 객체에 기록했다.'
+                    result['selection']=deepcopy(decision)
+                    error = getattr(self, 'review_error', None)
+                    if error in ('plain','inner_json'):
+                        result.pop('selection')
+                        result['feedback'] = '일반 검토 문장' if error == 'plain' else '{bad json'
+                    elif error == 'missing_field':
+                        result['selection'].pop('game')
+                    elif error == 'field':
+                        result['selection']['duration_seconds'] = 0
+                    elif error == 'evidence':
+                        result['selection']['evidence_ids'] = ['invented-id']
                 if (getattr(self, 'exhaust_resume_budget', False) and phase == 'review'
                         and role == 'writer' and len(self.store.load(self.job)['assignments'][1]['versions']) == 1):
                     result.update(action='revise', feedback='missing_demo fixture: 대본을 다시 확인하세요')
@@ -322,11 +378,31 @@ class MissionOneTests(unittest.TestCase):
                     result.update(action='deliver',content='가상 게임 기획',
                                   checks=[{**c,'status':'met'} for c in result['checks']])
                 result.pop('task_refs',None)
+            response_text = json.dumps(dict(result=result),ensure_ascii=False)
+            if phase == 'review' and role == 'research' and getattr(self,'review_error',None) == 'outer_json':
+                response_text = '{synthetic invalid JSON'
             return FixtureResponse(json.dumps(dict(candidates=[dict(finishReason='STOP',content=dict(role='model',
-                parts=[dict(text=json.dumps(dict(result=result),ensure_ascii=False))]))],
+                parts=[dict(text=response_text)]))],
                 usageMetadata=dict(promptTokenCount=20,candidatesTokenCount=30,totalTokenCount=50))).encode())
         self.http.side_effect=ai_send
         result=self.run_job()
+        if getattr(self, 'review_error', None):
+            error = self.review_error
+            expected = ('mission_research_review_json_invalid' if error == 'outer_json' else
+                        'mission_research_review_structure_invalid' if error in ('plain','inner_json','missing_field') else
+                        'mission_research_selection_invalid')
+            self.assertEqual(result['reason_code'], expected)
+            self.assertEqual(self.http.call_count,3)
+            self.assertEqual(len(urls),2)
+            diagnostic = result['real_ai']['attempts'][-1]['mission_review_diagnostics']
+            self.assertEqual(set(diagnostic), {'stage','category','content_bytes','content_hash'})
+            self.assertEqual(diagnostic['stage'], 'research_review_json' if error == 'outer_json' else
+                             'research_review_structure' if error in ('plain','inner_json','missing_field') else 'research_selection_validation')
+            self.assertEqual(result['assignments'][0]['reviews'],[])
+            with self.assertRaises(CompanyError):
+                self.run_job()
+            self.assertEqual(self.http.call_count,3)
+            return
         if getattr(self, 'exhaust_resume_budget', False):
             self.assertNotEqual(result['status'], 'needs_user_review')
             self.assertEqual(len(result['real_ai']['attempts']), 9, result.get('reason_code'))

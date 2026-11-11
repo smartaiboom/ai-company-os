@@ -12,6 +12,7 @@ from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
 from goal_dialogue_live import send_once
 from employee_web_research import (TOOL as WEB_TOOL, POLICY as WEB_POLICY, collect,
     validate_queries, validate_selection, usable_observations)
+from role_json_schema import response_format, matches, obj, arr, S
 from quality_provider import QualityProviderStore
 from quality_workflow import VideoProviderQualityCompany
 from script_quality import SCRIPT_CONTRACT, inspect_script
@@ -65,7 +66,7 @@ class MissionOneStore(QualityProviderStore):
         self._check_mission_account(proof, p['limits']['max_calls'])
         require(key not in json.dumps(proof, ensure_ascii=False), 'secret_in_state')
         body = self.prepare(project_id, valid_hours=1, confirm_free_account=True)
-        return {**body, 'mission_account': proof, **({'mission_web':web} if web else {}),
+        return {**body, 'mission_account': proof, **({'mission_web':web, 'mission_research_review':research_review_policy()} if web else {}),
                 **({'mission_resume':deepcopy(p['mission_resume'])} if 'mission_resume' in p else {})}
 
     def resume_reference(self, previous):
@@ -131,6 +132,7 @@ class MissionOneStore(QualityProviderStore):
         self.check_scope(p)
         if p['goal'] == GAME_GOAL:
             require(p['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL, GAME_RESEARCH_BLOCKER)
+            require(body.get('mission_research_review') == research_review_policy(), 'mission_research_review_consent')
             web = body.get('mission_web')
             exact(web, ('policy','account_project','search_remaining','general_units_remaining',
                         'credential_binding','free_usage_verified','policy_confirmed',
@@ -148,7 +150,7 @@ class MissionOneStore(QualityProviderStore):
             require('mission_web' not in body,'mission_scope_mismatch')
         require(body.get('mission_resume') == p.get('mission_resume'), 'mission_resume_consent_mismatch')
         self._check_mission_account(body.get('mission_account'), p['limits']['max_calls'])
-        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume')})
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review')})
 
 
 def validate_research(value):
@@ -168,9 +170,76 @@ def validate_research(value):
     return value
 
 
+def research_review_schema():
+    """Mission-only wire contract; feedback stays prose, selection is an object."""
+    schema = deepcopy(response_format('review')['json_schema']['schema'])
+    selection = obj(game=S, selected_topic=S, duration_seconds={'type':'integer'},
+                    duration_reason=S, selection_reason=S, other_candidates_reason=S,
+                    evidence_ids=arr(S), shorts_status=S, rights_plan=S)
+    review = schema['properties']['result']
+    review['properties']['selection'] = {'anyOf':[selection, {'type':'null'}]}
+    review['required'].append('selection')
+    return schema
+
+
+def research_review_policy():
+    return dict(version=1, schema_hash=digest(research_review_schema()),
+                storage='validated_selection_json_in_feedback', automatic_repair=False)
+
+
 class MissionOneCompany(VideoProviderQualityCompany):
     store_type = MissionOneStore
     allowed_video_roles = ('research', 'writer', 'editor')
+
+    def _prepare_payload(self, payload):
+        wire = super()._prepare_payload(payload)
+        if getattr(self, '_research_review_state', None) is not None:
+            wire['generationConfig']['responseJsonSchema'] = research_review_schema()
+            message = parse(wire['contents'][0]['parts'][0]['text'])
+            message['output_contract'] = research_review_schema()
+            wire['contents'][0]['parts'][0]['text'] = json.dumps(message, ensure_ascii=False)
+        return wire
+
+    def _validate_payload(self, payload):
+        if getattr(self, '_research_review_state', None) is not None:
+            require(digest(payload['generationConfig']['responseJsonSchema']) == digest(research_review_schema()),
+                    'mission_research_payload_contract')
+            payload = deepcopy(payload)
+            payload['generationConfig']['responseJsonSchema'] = response_format('review')['json_schema']['schema']
+        return super()._validate_payload(payload)
+
+    def _research_error(self, raw, stage, code):
+        p = self._research_review_state
+        entry = p['real_ai']['attempts'][-1]
+        entry['mission_review_diagnostics'] = dict(stage=stage, category=code,
+            content_bytes=len(raw.encode()), content_hash=digest(raw))
+        self.store.save(p)
+
+    def _parse_role_content(self, raw, phase):
+        if getattr(self, '_research_review_state', None) is None:
+            return super()._parse_role_content(raw, phase)
+        try:
+            value = parse(raw)
+        except CompanyError as exc:
+            self._research_error(raw, 'research_review_json', exc.code)
+            raise CompanyError('mission_research_review_json_invalid') from None
+        if not matches(value, research_review_schema()):
+            self._research_error(raw, 'research_review_structure', 'invalid_role_schema')
+            raise CompanyError('mission_research_review_structure_invalid')
+        result = value['result']
+        selection = result.pop('selection')
+        if result['action'] == 'accept':
+            try:
+                validate_selection(selection, self._research_review_state.get('employee_web'))
+            except CompanyError as exc:
+                self._research_error(raw, 'research_selection_validation', exc.code)
+                raise CompanyError('mission_research_selection_invalid') from None
+            # Explicit validated-object serialization for the existing engine's text review storage.
+            result['feedback'] = json.dumps(selection, ensure_ascii=False, sort_keys=True)
+        elif selection is not None:
+            self._research_error(raw, 'research_selection_validation', 'selection_requires_accept')
+            raise CompanyError('mission_research_selection_invalid')
+        return result
 
     def _quality_transport_allowed(self, p):
         self.store.check_scope(p)
@@ -224,9 +293,9 @@ class MissionOneCompany(VideoProviderQualityCompany):
                 'order relevance|date|viewCount. System uses YouTube public API top 5 gaming results per query '
                 'in KR with Korean relevance. No arbitrary URL fetch or media download. This tool is available '
                 'only once for research; failures stop, never repeat the batch. Tool receipt will be in evidence. '
-                'Manager reviews observed metadata and evidence limits. On accepting research return feedback as '
-                'JSON {game,selected_topic,duration_seconds,duration_reason,selection_reason,other_candidates_reason,'
-                'evidence_ids,shorts_status:"unverified",rights_plan}. Choose duration from observed lengths and '
+                'Manager reviews observed metadata and evidence limits. For research review keep feedback as prose and '
+                'return selection as a JSON OBJECT {game,selected_topic,duration_seconds,duration_reason,selection_reason,other_candidates_reason,'
+                'evidence_ids,shorts_status:"unverified",rights_plan} on accept; selection must be null otherwise. Never encode selection in feedback. Choose duration from observed lengths and '
                 'story needs, not a preset. Technical validation supports 4–180 seconds, no recommended duration. '
                 'Public API does not confirm vertical aspect or Shorts classification. Its short filter includes '
                 'non-Shorts; preserve uncertainty and never equate queried views with global game popularity or '
@@ -249,6 +318,14 @@ class MissionOneCompany(VideoProviderQualityCompany):
             'The application stops delivery at human review; do not claim approval or generate media.')
 
     def _call(self, p, provider, phase, task_id, context):
+        self._research_review_state = (p if p['goal'] == GAME_GOAL and phase == 'review'
+            and context['assignment']['role'] == 'research' else None)
+        try:
+            return self._mission_call(p, provider, phase, task_id, context)
+        finally:
+            self._research_review_state = None
+
+    def _mission_call(self, p, provider, phase, task_id, context):
         selection = self._manager_selection(p)
         if selection:
             context = {**context,'quality':{**context['quality'],'manager_selection':selection}}

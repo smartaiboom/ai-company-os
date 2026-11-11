@@ -1,5 +1,7 @@
 # 현재 진행 현황 — 2026-11-11 KST
 
+**Stage B 대표 웹 UI를 연결하고 Chromium에서 검증했다.** 대시보드, 실제 키프레임, 기획·대본 승인·반려, 영상 재생·수정·최종 승인과 이력을 기존 프로젝트 상태에서 확인할 수 있다. Codespaces 비공개 포트 8000에서 실행한다. [대표 웹 UI 결과](VIDEO_REPRESENTATIVE_UI_RESULT.md).
+
 **대표 협업 A단계의 로컬 업무 흐름을 연결했다.** 기획과 영상의 버전·SHA 승인, 피드백 반려와 재보고, 대본 변경 시 기획 재승인, 최종 MP4 검증·완료를 가상 사례에서 실행했다. [대표 승인 흐름 결과](VIDEO_REPRESENTATIVE_APPROVAL_FLOW_RESULT.md).
 
 이전 쇼츠 후보 3개는 참고자료로 보존했고 주제 선정은 보류했다. 대표 승인과 대본·제작 권한은 모두 미부여다. [주제 조사 결과](VIDEO_TREND_TOPIC_SELECTION_RESULT.md).

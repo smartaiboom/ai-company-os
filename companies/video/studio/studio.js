@@ -1,0 +1,329 @@
+'use strict';
+const icons = {
+  clapper:'<path d="m3 10 17-4-1-4L2 6zM3 10v10h18V10zM7 5l4 4m2-5 4 3"/><path d="m10 13 5 2.5-5 2.5z"/>',
+  studio:'<path d="M3 6h14v12H3zM17 10l4-3v10l-4-3M7 10h6m-6 4h4"/>',
+  grid:'<path d="M3 3h7v7H3zM14 3h7v7h-7zM3 14h7v7H3zM14 14h7v7h-7z"/>',
+  folder:'<path d="M3 6h7l2 2h9v11H3z"/>', bookmark:'<path d="M6 3h12v18l-6-4-6 4z"/>',
+  shield:'<path d="M12 22s7-4 7-11V5l-7-3-7 3v6c0 7 7 11 7 11z"/><path d="m9 11 2 2 4-4"/>',
+  check:'<path d="m5 12 4 4L19 6"/>', plus:'<path d="M12 5v14M5 12h14"/>',
+  clock:'<circle cx="12" cy="12" r="9"/><path d="M12 7v6l4 2"/>',
+  film:'<rect x="3" y="4" width="18" height="16" rx="2"/><path d="M7 4v16m10-16v16M3 9h4m-4 6h4m10-6h4m-4 6h4"/>',
+  revision:'<path d="M5 8a8 8 0 1 1-1 7m1-7V3m0 5h5"/>',
+  arrow:'<path d="M5 12h14m-6-6 6 6-6 6"/>', back:'<path d="M19 12H5m6-6-6 6 6 6"/>',
+  search:'<circle cx="10" cy="10" r="6"/><path d="m15 15 5 5"/>',
+  script:'<path d="M5 3h9l5 5v13H5zM14 3v6h5M8 13h8m-8 4h8"/>',
+  user:'<circle cx="12" cy="8" r="4"/><path d="M4 21v-2a8 8 0 0 1 16 0v2"/>',
+  mic:'<rect x="9" y="2" width="6" height="13" rx="3"/><path d="M5 11a7 7 0 0 0 14 0m-7 7v4m-4 0h8"/>',
+  alert:'<path d="m12 3 10 17H2zM12 9v4m0 3v.1"/>',
+};
+const icon = (key) => `<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round" aria-hidden="true">${icons[key] || icons.folder}</svg>`;
+document.querySelectorAll('[data-icon]').forEach((item) => { item.innerHTML = icon(item.dataset.icon); });
+const main = document.querySelector('#main');
+const dialog = document.querySelector('#dialog');
+const crumb = document.querySelector('#crumb');
+const h = (value) => String(value ?? '').replace(/[&<>"']/g, (char) => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[char]));
+const time = (value) => value ? value.slice(0, 16).replace('T', ' ') + ' KST' : '—';
+const statuses = {
+  goal_submitted:['목표 접수','AI 관리자','기획 작업 열기',0,'clock',''],
+  research_planning:['조사·기획','조사·대본 직원','내부 검토 보고 대기',1,'search',''],
+  awaiting_plan_approval:['기획 승인 대기','대표','기획·대본 검토',2,'shield','amber'],
+  plan_revision:['기획 수정 요청','AI 관리자·대본 직원','재작업 대기',1,'revision','rose'],
+  production:['제작 중','영상·음성 직원','로컬 제작 확인',3,'film',''],
+  awaiting_video_approval:['영상 승인 대기','대표','영상 재생·검토',4,'shield','amber'],
+  video_revision:['영상 수정 요청','영상·음성 직원','재작업 대기',3,'revision','rose'],
+  completed:['완료','QA','최종 영상 보기',5,'check','green'],
+};
+const metrics = [
+  ['review','대표 승인 대기','shield','amber',p=>p.stage.startsWith('awaiting_')],
+  ['production','진행 중 제작','film','',p=>p.stage==='production'],
+  ['revision','수정 요청','revision','rose',p=>p.stage.endsWith('_revision')],
+  ['completed','완료','check','green',p=>p.stage==='completed'],
+];
+const eventRoles = {writer:'대본 직원', editor:'편집 직원', voice:'음성 직원', qa:'QA 직원', research:'조사 직원'};
+let studio = {projects:[], deferred:[]};
+let filter = null;
+let detail;
+let routeVersion = 0;
+let noticeTimer;
+
+async function api(path, body) {
+  const response = await fetch(path, body === undefined ? {} : {
+    method:'POST', headers:{'Content-Type':'application/json','X-Studio-Token':studio.token},
+    body:JSON.stringify(body)
+  });
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.error);
+  return value;
+}
+function notice(message, error=false) {
+  const node = document.querySelector('#notice');
+  node.textContent = message;
+  node.className = error ? 'notice error' : 'notice';
+  node.hidden = false;
+  clearTimeout(noticeTimer);
+  noticeTimer = setTimeout(() => { node.hidden = true; }, 4500);
+}
+function badge(label, symbol, tone='') {
+  return `<span class="badge ${tone}">${icon(symbol)}${h(label)}</span>`;
+}
+const stateBadge = (stage) => {const s = statuses[stage]; return badge(s[0], s[4], s[5]);};
+const projectHref = (p) => `#project/${encodeURIComponent(p.store)}/${encodeURIComponent(p.id)}`;
+const detailApi = (p) => `/api/project/${encodeURIComponent(p.store)}/${encodeURIComponent(p.id)}`;
+const blank = (text) => `<div class="empty">${icon('folder')} <p>${h(text)}</p></div>`;
+
+function references() {
+  const candidates = {'source-check':'AI 답변 출처·날짜 확인','csv-total':'가상 지출 CSV 검산',
+    'same-prompt':'ChatGPT·Gemini 동일 요청 비교'};
+  return `<section class="references" aria-labelledby="reference-heading">
+    <div class="section-heading"><h2 id="reference-heading">참고자료</h2></div>
+    ${studio.deferred.length ? `<div class="reference">
+      ${badge('대표 선택 보류 · 승인 없음', 'bookmark', 'amber')}
+      <ol>${studio.deferred[0].candidate_ids.map(id=>`<li>${h(candidates[id] || id)}</li>`).join('')}</ol>
+      <p class="muted">대본·제작 권한 미부여 · ${h(time(studio.deferred[0].recorded_at))}</p>
+      <details><summary>원본 결정 SHA-256</summary><p class="mono">${h(studio.deferred[0].source_decision_sha256)}</p></details>
+    </div>` : blank('저장된 참고자료가 없습니다.')}
+  </section>`;
+}
+function card(p) {
+  const s = statuses[p.stage];
+  return `<a class="project-card" href="${projectHref(p)}">
+    <div class="thumbnail"><span class="placeholder">${icon('film')}영상 미리보기 없음</span>
+    ${p.thumbnail ? `<img src="${h(p.thumbnail)}" alt="저장된 영상 키프레임">` : ''}</div>
+    <div class="card-body"><div class="inline">${stateBadge(p.stage)}
+      ${p.readonly ? badge('검증 사례','shield') : ''}</div><h3>${h(p.goal)}</h3>
+      <p class="muted">${icon('user')} ${h(s[1])} · ${h(time(p.updated_at))}</p>
+      <div class="card-footer"><span>기획 ${p.plans} · 영상 ${p.videos}</span><span class="next">${h(s[2])} ${icon('arrow')}</span></div>
+    </div></a>`;
+}
+function dashboard(route) {
+  const group = metrics.find(([key]) => key === filter);
+  const list = group ? studio.projects.filter(group[4]) : studio.projects;
+  if (route === 'references') return references();
+  return `${route === 'dashboard' ? `<section class="hero"><div><div class="eyebrow">${icon('clapper')} 대표 워크스페이스</div>
+    <h1>영상 제작 스튜디오</h1><p>기획·대본부터 최종 영상까지, 프로젝트의 진행 상태와 대표 결정을 한곳에서 확인하세요.</p></div>
+    <button class="button light" data-action="create">${icon('plus')} 새 프로젝트</button></section>
+    <section class="metrics" aria-label="업무 상태 필터">${metrics.map(([key, name, symbol, tone, predicate]) =>
+      `<button class="metric" data-filter="${key}" aria-pressed="${filter === key}"><span class="chip-icon ${tone}">${icon(symbol)}</span>
+      <span><strong>${studio.projects.filter(predicate).length}</strong><small>${name}</small></span></button>`).join('')}</section>` : ''}
+    <section aria-labelledby="projects-heading"><div class="section-heading"><div><h2 id="projects-heading">${group ? h(group[1]) : '프로젝트'}</h2>
+    <p>${list.length}개 프로젝트</p></div>
+    ${group ? '<button class="button ghost" data-action="clear">전체 보기</button>' : ''}
+    ${route === 'projects' ? `<button class="button" data-action="create">${icon('plus')} 새 프로젝트</button>` : ''}</div>
+    ${list.length ? `<div class="cards">${list.map(card).join('')}</div>` : blank('이 상태에 해당하는 프로젝트가 없습니다.')}</section>
+    ${route === 'dashboard' ? references() : ''}`;
+}
+const steps = [['조사·주제','search'],['기획·대본','script'],['대표 1차 검토','shield'],
+  ['제작·음성','mic'],['대표 2차 검토','film'],['완료·QA','check']];
+function facts(rows) {
+  return `<dl class="facts">${rows.map(([label, value]) => `<dt>${h(label)}</dt><dd>${h(value)}</dd>`).join('')}</dl>`;
+}
+function sourceLink(url) {
+  return /^https:\/\//i.test(url) ? `<a href="${h(url)}" target="_blank" rel="noopener noreferrer">출처 열기 ↗</a>` : '';
+}
+function planPanel(p, plan, previous) {
+  if (!plan) return `<section class="panel"><h2>기획·대본</h2><p class="muted">검토할 보고서가 없습니다. 조사·기획 작업에서 보고서를 제출하면 여기에 표시됩니다.</p></section>`;
+  const script = plan.script;
+  return `<section class="panel" id="plan-panel">
+    <div class="panel-heading"><h2>${icon('script')} 기획·대본</h2>${versionSelect('plan',p.flow.plan_versions,plan)}</div>
+    <h3>${h(plan.topic)}</h3><p>${h(plan.summary)}</p>${facts([['첫 3초 후크',script.hook_0_3s],['시청자 문제',script.viewer_problem],['전달할 효용',script.payoff],['작성 출처','오프라인 모의 검증'],['비용 한도',`$${plan.cost_limit_usd}`],['보고 시각',time(plan.reported_at)]])}
+    <details class="subpanel" open><summary>대본 전문</summary><p class="script">${h(script.transcript)}</p></details>
+    <details class="subpanel" open><summary>장면 스토리보드</summary><div class="beats">${script.narrative_beats.map(beat => `<article class="beat">
+      ${badge(`${beat.start}–${beat.end}초`,beat.shot_type==='demo'?'film':'script')}<h3>${h(beat.caption)}</h3>
+      <p>${h(beat.screen)}</p><p class="muted">${h(beat.source_ref)} · ${beat.source_status==='pending'?'소스 미확보':'로컬 예시'}</p></article>`).join('')}</div></details>
+    <details class="subpanel" open><summary>조사 출처·권리·미확인 항목</summary>
+      ${plan.sources.length ? plan.sources.map(s=>`<p>${h(s.claim)} · ${h(s.observed_at)} · ${h(s.rights)} ${sourceLink(s.url)}</p>`).join('') : '<p class="muted">이 보고서에 등록된 외부 조사 출처가 없습니다.</p>'}
+      <p>${h(plan.risks)}</p>${script.unknowns.map(u=>`<p class="muted">${h(u)}</p>`).join('')}</details>
+    <details class="subpanel"><summary>변경사항·보고서 해시</summary><p>${h(plan.changes)}</p><p class="mono">${h(plan.sha256)}</p>
+      ${previous ? `<p class="muted">이전 기획 v${previous.version} 대본</p><p class="script">${h(previous.script.transcript)}</p>` : ''}
+      <p class="muted">내부 검토 ${plan.internal_reviews.length}건 · ${h(plan.internal_reviews.map(r=>r.action==='accept'?'수락':r.action==='revise'?'수정':'보류').join(' → '))}</p></details>
+    ${reviewActions(p,'plan',plan)}
+  </section>`;
+}
+function versionSelect(kind, versions, chosen) {
+  const label = kind === 'plan' ? '기획 버전' : '영상 버전';
+  return `<label>${label}<select aria-label="${label}" data-version="${kind}">${[...versions].reverse().map(item =>
+    `<option value="${item.version}" ${item.version===chosen.version?'selected':''}>v${item.version}</option>`).join('')}</select></label>`;
+}
+function reviewActions(p, kind, report) {
+  if (p.readonly || p.stage !== `awaiting_${kind}_approval` || p.flow[`${kind}_versions`].at(-1)?.version !== report.version) return '';
+  const label = kind==='plan' ? '기획·대본 승인' : '최종 영상 승인';
+  return `<div class="actions subpanel"><button class="button" data-review="${kind}:approve">${icon('check')}${label}</button>
+    <button class="button secondary" data-review="${kind}:request_revision">${icon('revision')} 수정 요청</button></div>`;
+}
+function videoPanel(p, video) {
+  if (!video) return '';
+  const r=video.render_receipt;
+  return `<section class="panel" id="video-panel"><div class="panel-heading"><h2>${icon('film')} 영상 검토</h2>${versionSelect('video',p.flow.video_versions,video)}</div>
+    <video class="player" controls playsinline preload="metadata" poster="${h(video.thumbnail)}" src="${h(video.url)}" aria-label="영상 버전 ${video.version}"></video>
+    <div class="inline">${badge('전체 디코딩 통과','check','green')}${badge('기술 검증용','alert','amber')}</div>
+    ${facts([['제작 입력',`승인 기획 v${video.plan_version}`],['영상',`${r.width}×${r.height} · ${Number(r.duration_seconds).toFixed(3)}초`],
+    ['음성',r.audio_mode==='espeak_reference'?'eSpeak 로컬 참조 음성':r.audio?'로컬 음성':'없음'],['자막','장면 단위'],
+    ['QA','기술 검사 완료 · 시청·청취 품질 미평가'],['비용',`$${video.cost_usd}`]])}
+    <details class="subpanel"><summary>변경사항·파일 및 기획 SHA-256</summary><p>${h(video.changes)}</p>
+    <p class="muted">영상 파일</p><p class="mono">${h(video.artifact_sha256)}</p>
+    <p class="muted">승인 기획</p><p class="mono">${h(video.plan_sha256)}</p></details>
+    <details class="subpanel"><summary>시각 소스·사용 권리</summary>
+    ${r.source_licenses.map(item=>`<p>${h(item.file)} · ${h(item.creator)} · ${h(item.license)}</p>`).join('')}
+    <p class="muted">글꼴 · ${h(r.font_license)}</p></details>
+    ${reviewActions(p,'video',video)}</section>`;
+}
+function operations(p) {
+  if (p.readonly) return '<p class="warning">기존 검증 사례 · 읽기 전용</p>';
+  if (p.stage === 'completed') return '<p class="warning">최종 대표 승인이 기록되었습니다. 게시 작업은 별도입니다.</p>';
+  const attempt = p.flow.render_attempts.at(-1);
+  const failed = attempt?.status === 'failed' ? `<p class="warning">최근 렌더 실패 · ${h(attempt.reason)}</p>` : '';
+  if (attempt?.status === 'reserved') return '<p class="warning">로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단</p>';
+  if (['goal_submitted','plan_revision'].includes(p.stage)) return `<button class="button secondary" data-action="planning">${icon('folder')} 기획 작업 열기</button><p class="muted">내부 작업을 열고 보고서 제출을 기다립니다.</p>`;
+  if (['production','video_revision'].includes(p.stage)) return `${failed}<button class="button secondary" data-action="produce">${icon('film')} 로컬 기술 시안 제작</button><p class="muted">승인된 대본으로 로컬 렌더러를 실행합니다. 외부 API 비용은 발생하지 않습니다.</p>`;
+  return '<p class="muted">기획·대본이나 영상 보고서를 확인해 주세요.</p>';
+}
+function projectPage(p, chosen={}) {
+  const f=p.flow;
+  const plan=f.plan_versions.find(item=>item.version===chosen.plan) || f.plan_versions.at(-1);
+  const video=f.video_versions.find(item=>item.version===chosen.video) || f.video_versions.at(-1);
+  const s=statuses[p.stage];
+  const stepIndex = p.stage==='research_planning' && !p.jobs.at(-1)?.assignments.length ? 0 : s[3];
+  const prior=f.plan_versions.find(item=>item.version===plan?.version-1);
+  return `<a class="back" href="#dashboard">${icon('back')} 대시보드</a>
+  <section class="detail-title"><div class="inline">${stateBadge(p.stage)} ${badge('실제 모델 미실행','alert','amber')}</div>
+  <h1>${h(p.goal)}</h1><p class="muted">${h(s[1])} · ${h(time(p.updated_at))}</p></section>
+  <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
+  <div class="detail-grid"><div class="stack">${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
+  <aside class="stack"><section class="panel"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['다음 행동',s[2]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
+  ${operations(p)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
+  <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
+  <section class="panel"><h2>${icon('clock')} 진행 타임라인</h2><ol class="timeline">${[...f.events].reverse().map(e=>`<li><strong>${h(statuses[e.stage]?.[0] || e.stage)}</strong><p class="muted">${h(time(e.at))}</p></li>`).join('')}</ol></section></aside></div>`;
+}
+let selectedVersions = {};
+function showDetail() { main.innerHTML = projectPage(detail, selectedVersions); }
+async function route({focus=false}={}) {
+  const current = ++routeVersion;
+  const [name, store, pid] = location.hash.slice(1).split('/');
+  const view = ['projects','references','project'].includes(name) ? name : 'dashboard';
+  crumb.textContent = {dashboard:'대시보드',projects:'프로젝트',references:'참고자료',project:'프로젝트 상세'}[view];
+  document.querySelectorAll('[data-nav]').forEach(a => {
+    if (a.dataset.nav === (view==='project'?'projects':view)) a.setAttribute('aria-current','page');
+    else a.removeAttribute('aria-current');
+  });
+  main.setAttribute('aria-busy','true');
+  try {
+    const dashboardData = await api('/api/studio');
+    const projectData = view==='project' ? await api(detailApi({store,id:pid})) : null;
+    if (current!==routeVersion) return;
+    studio=dashboardData; detail=projectData; selectedVersions={};
+    if (detail) showDetail(); else main.innerHTML=dashboard(view);
+    if (focus) { main.focus({preventScroll:true}); window.scrollTo(0,0); }
+  } catch (error) {
+    if (current===routeVersion) main.innerHTML=blank(error.message || '화면을 불러오지 못했습니다.');
+  } finally {
+    if (current===routeVersion) main.setAttribute('aria-busy','false');
+  }
+}
+
+function modal(title, fields, submit, handler) {
+  dialog.innerHTML=`<form><h2 id="dialog-title">${h(title)}</h2>${fields}<p class="form-error" role="alert" hidden></p>
+    <div class="actions dialog-actions"><button class="button ghost" type="button" data-cancel>취소</button><button class="button" type="submit">${h(submit)}</button></div></form>`;
+  const form=dialog.querySelector('form');
+  const cancel=form.querySelector('[data-cancel]');
+  const button=form.querySelector('[type=submit]');
+  cancel.onclick=()=>dialog.close();
+  form.onsubmit=async event=>{
+    event.preventDefault();
+    if (button.disabled) return;
+    const data=new FormData(form);
+    button.disabled=true; cancel.disabled=true;
+    const errorNode=form.querySelector('.form-error');
+    errorNode.hidden=true;
+    try {
+      const result=await handler(data);
+      dialog.close();
+      if (result?.navigate) location.hash=result.navigate;
+      else await route();
+      notice(result?.message || '저장했습니다.');
+    } catch(error) {
+      errorNode.textContent=error.message || '요청을 완료할 수 없습니다.';
+      errorNode.hidden=false;
+    } finally { button.disabled=false; cancel.disabled=false; }
+  };
+  dialog.showModal();
+}
+dialog.addEventListener('cancel', event => {
+  if (dialog.querySelector('[type=submit]')?.disabled) event.preventDefault();
+});
+
+function createProject() {
+  const key=crypto.randomUUID();
+  modal('새 프로젝트',`<label>영상 제작 목표<textarea name="goal" required maxlength="4000" rows="3" placeholder="예: 이번 주 스포츠 뉴스를 한 편으로 정리해 줘"></textarea></label>
+    <div class="form-grid"><label>시청자 <small>선택</small><input name="audience" maxlength="300"></label>
+    <label>언어 <small>선택</small><input name="language" maxlength="300" placeholder="예: 한국어"></label>
+    <label>플랫폼 <small>선택</small><input name="platform" maxlength="300" placeholder="예: YouTube"></label>
+    <label>길이(초) <small>선택</small><input name="duration" type="number" min="1" max="120"></label></div>
+    <label>제작 제약 <small>선택</small><textarea name="notes" maxlength="2000" rows="2"></textarea></label>`,
+    '프로젝트 만들기',async data=>{
+      const body=Object.fromEntries(data);
+      body.duration=body.duration ? Number(body.duration) : null;
+      const result=await api('/api/project',{...body,key});
+      return {navigate:projectHref({store:'workspace',id:result.id}),message:'프로젝트를 만들었습니다.'};
+    });
+}
+function review(kind, action) {
+  const project=detail;
+  const report=project.flow[`${kind}_versions`].at(-1);
+  const revise=action==='request_revision';
+  const title=revise?'수정 요청':kind==='plan'?'기획·대본 승인':'최종 영상 승인';
+  modal(title,`<p class="muted">${kind==='plan'?'기획':'영상'} v${report.version} · SHA-256</p><p class="mono">${h(report.sha256)}</p>
+    ${revise ? '<label>수정 피드백<textarea required name="feedback" maxlength="2000" rows="4"></textarea></label>' :
+      '<label>승인 메모 (선택)<textarea name="feedback" maxlength="2000" rows="2"></textarea></label>'}
+    ${revise && kind==='video' ? '<label class="check"><input type="checkbox" name="changes_plan"> 대본·기획 변경이 필요합니다. 새 기획의 대표 승인 후 제작합니다.</label>' : ''}
+    <p class="muted">이 결정은 외부 API 사용·결제·게시 권한을 부여하지 않습니다.</p>`,title,async data=>{
+      await api(detailApi(project)+'/decide',{stage:kind,version:report.version,sha256:report.sha256,
+        action,feedback:data.get('feedback'),changes_plan:data.has('changes_plan')});
+      return {message:revise?'수정 요청을 저장했습니다.':'승인을 기록했습니다.'};
+    });
+}
+function produce() {
+  const project=detail;
+  const plan=project.flow.plan_versions.at(-1);
+  modal('로컬 기술 시안 제작',`<p>승인 기획 v${plan.version}으로 16:9 로컬 기술 시안을 렌더링합니다.</p>
+    <label>작업 메모<textarea name="changes" rows="2" required maxlength="2000"></textarea></label>
+    ${project.stage==='video_revision'?'<label>카메라<select name="camera"><option value="">기획안 유지</option><option value="push_in">천천히 확대</option><option value="pan_right">오른쪽 이동</option><option value="hold">고정</option></select></label>':''}`,
+    '로컬 렌더 시작',async data=>{
+      await api(detailApi(project)+'/produce',{version:plan.version,sha256:plan.sha256,changes:data.get('changes'),camera:data.get('camera')||null});
+      return {message:'로컬 영상이 보고되었습니다.'};
+    });
+}
+main.addEventListener('click',async event=>{
+  const button=event.target.closest('button');
+  if (!button) return;
+  if (button.dataset.filter || button.dataset.action==='clear') {
+    filter=filter===button.dataset.filter ? null : (button.dataset.filter||null);
+    main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
+    if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
+  } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.review) review(...button.dataset.review.split(':'));
+  else if (button.dataset.action==='produce') produce();
+  else if (button.dataset.action==='planning') {
+    button.disabled=true;
+    try {
+      await api(detailApi(detail)+'/planning',{});
+      await route();
+      notice('기획 작업을 열었습니다. 내부 보고서 제출을 기다립니다.');
+    } catch(error) {
+      notice(error.message,true);
+      button.disabled=false;
+    }
+  }
+});
+main.addEventListener('change',event=>{
+  if (!event.target.dataset.version) return;
+  const kind=event.target.dataset.version;
+  selectedVersions[kind]=Number(event.target.value);
+  showDetail();
+  main.querySelector(`[data-version="${kind}"]`)?.focus({preventScroll:true});
+});
+main.addEventListener('error',event=>{
+  if (event.target.matches('.thumbnail img')) event.target.hidden=true;
+  if (event.target.matches('video')) notice('브라우저에서 이 영상 파일을 재생할 수 없습니다.',true);
+},true);
+window.addEventListener('hashchange',()=>{filter=null;route({focus:true});});
+route();

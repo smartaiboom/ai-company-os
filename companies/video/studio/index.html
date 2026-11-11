@@ -1,0 +1,28 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>컷룸 · AI 영상 제작 스튜디오</title>
+<link rel="stylesheet" href="/studio.css">
+<script src="/studio.js" defer></script>
+</head>
+<body>
+<div class="shell">
+  <aside class="sidebar">
+    <a class="brand" href="#dashboard"><span class="brand-icon" data-icon="clapper"></span><span>컷룸<small>AI VIDEO STUDIO</small></span></a>
+    <nav aria-label="스튜디오 메뉴">
+      <a href="#dashboard" data-nav="dashboard"><span data-icon="grid"></span>대시보드</a>
+      <a href="#projects" data-nav="projects"><span data-icon="folder"></span>프로젝트</a>
+      <a href="#references" data-nav="references"><span data-icon="bookmark"></span>참고자료</a>
+    </nav>
+    <div class="sidebar-foot"><span class="connection"></span><span>로컬 작업 공간<small>외부 모델 미연결</small></span></div>
+  </aside>
+  <div class="workspace">
+    <header class="topbar"><span><span data-icon="studio"></span> 제작 스튜디오 <b>/</b> <strong id="crumb">대시보드</strong></span><span class="role"><span data-icon="shield"></span> 대표 워크스페이스</span></header>
+    <main id="main" tabindex="-1" aria-busy="true"></main>
+  </div>
+</div>
+<dialog id="dialog" aria-labelledby="dialog-title"></dialog>
+<div id="notice" class="notice" role="status" aria-live="polite" hidden></div>
+</body>
+</html>

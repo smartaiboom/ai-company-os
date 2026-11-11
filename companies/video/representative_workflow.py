@@ -38,7 +38,7 @@ class RepresentativeVideoWorkflow:
         require(type(store) is Store, 'representative_local_store_required')
         self.store = store
 
-    def create(self, goal, *, audience='미정', constraints=None, experiences=()):
+    def create(self, goal, *, audience='미정', constraints=None, experiences=(), creation_key=None):
         constraints = {} if constraints is None else constraints
         text(audience, 300)
         require(isinstance(constraints, dict), 'invalid_representative_constraints')
@@ -51,6 +51,8 @@ class RepresentativeVideoWorkflow:
                 constraints=deepcopy(constraints), plan_versions=[], video_versions=[],
                 decisions=[], planning_jobs=[], render_attempts=[], events=[], experiences=[],
                 scoped_experiences=select_experiences(experiences, domain='video', target_segment=audience))
+            if creation_key is not None:
+                project['representative']['creation_key'] = creation_key
             self._transition(project, 'goal_submitted')
         return project['id']
 

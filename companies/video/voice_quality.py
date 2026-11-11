@@ -21,17 +21,50 @@ CANDIDATE = dict(provider='gemini_developer', model='gemini-3.8-flash-tts', voic
 
 def record_user_evaluation(root, *, A, B, transcript):
     """Dedicated journal, immutable artifact, and evaluation-SHA idempotence under lock."""
-    root = Path(root).absolute()
-    require(not any(p.is_symlink() for p in (root, *root.parents)), 'voice_feedback_symlink')
-    root.mkdir(parents=True, exist_ok=True, mode=0o700)
-    require(root.stat().st_mode & 0o077 == 0, 'voice_feedback_private_root')
-    paths = dict(A=Path(A), B=Path(B), transcript=Path(transcript))
-    for name, path in paths.items():
-        require(not path.is_symlink() and path.is_file() and sha(path.read_bytes()) == BINDINGS[name], 'voice_evidence_changed')
     core = dict(original_text=ORIGINAL, bindings=deepcopy(BINDINGS), candidate=deepcopy(CANDIDATE),
         domain='video', target_segment=AUDIENCE, provenance='user_structured', preferred='B',
         naturalness_score=7, score_max=10, verified_scope='actual_user_preference_and_score_only',
         future_quality='hypothesis', publish_ready=False)
+    return _record_listening(root, dict(A=Path(A), B=Path(B), transcript=Path(transcript)), core,
+        dict(project='gemini_tts_single_free_trial_v1', domain='video',
+                target_segment=AUDIENCE, issue='실제 B 자연스러움7/10; 게시 여부 미결정. 구체적 결함은 미지정.',
+                positive_preference='동일60자 A/B에서 Gemini/Puck B가 Melo A보다 훨씬 자연스럽다는 사용자 평가',
+                proposed_correction='같은 대상의 추천 후보 B 우선; 다음20초 샘플8/10 목표는 hypothesis, 새 승인/생성/청취 필요', source='actual_user_listening_ab_20261110', confidence=1, verification='verified'),
+        ('A', 'B'))
+
+
+LISTENING_148_SOURCE = 'actual_user_listening_148_20261111'
+LISTENING_148_TEXT = ('새로 생성한 148자 Gemini/Puck 21.52초 음성을 실제 청취했어. 전체 자연스러움 7/10점, '
+    '목소리·억양 좋음, 속도·쉼 적절함. 의견: 좋아 음성은 전체적으로 상당히 괜찮아! '
+    '이제 대본,영상,음성 중 음성은 충분하고 대본 생성 능력 향상에 힘쓰자.')
+
+
+def record_148_user_evaluation(root, *, audio, transcript):
+    bindings = dict(sample='6ef2673b6f977981a789d27b132c8233090e049e299cda6f11e946936ccb149f',
+        transcript='dee1aef757a0c7edac0a6314fef7559591bab1e506ab59066dbb62a5fe3d243b')
+    core = dict(original_text=LISTENING_148_TEXT, bindings=bindings, candidate=deepcopy(CANDIDATE),
+        domain='video', target_segment=AUDIENCE, provenance='user_structured', source=LISTENING_148_SOURCE,
+        overall_naturalness=7, score_max=10, voice_and_intonation='좋음', pace_and_pauses='적절함',
+        user_says_voice_sufficient=True, next_priority='script_quality', transcript_characters=148,
+        audio_seconds=21.52, listened_at=None, verified_scope='actual_user_sample_opinion_only',
+        publish_ready=False)
+    return _record_listening(root, dict(sample=Path(audio), transcript=Path(transcript)), core,
+        dict(project='gemini_tts_148_20261111', domain='video', target_segment=AUDIENCE,
+            issue='148자·21.52초 샘플 자연스러움 7/10. 개별 발음 결함은 미지정.',
+            positive_preference='목소리·억양 좋음, 속도·쉼 적절함, 현 단계 음성 충분',
+            proposed_correction='대본 품질을 우선 개선. 음성 추가 생성·실험은 보류.',
+            source=LISTENING_148_SOURCE, confidence=1, verification='verified'), ('sample',))
+
+
+def _record_listening(root, paths, core, fields, media_names):
+    bindings = core['bindings']
+    original = core['original_text']
+    root = Path(root).absolute()
+    require(not any(p.is_symlink() for p in (root, *root.parents)), 'voice_feedback_symlink')
+    root.mkdir(parents=True, exist_ok=True, mode=0o700)
+    require(root.stat().st_mode & 0o077 == 0, 'voice_feedback_private_root')
+    for name, path in paths.items():
+        require(not path.is_symlink() and path.is_file() and sha(path.read_bytes()) == bindings[name], 'voice_evidence_changed')
     evaluation_sha = digest(core)
     lock = os.open(root/'.feedback.lock', os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
@@ -44,14 +77,17 @@ def record_user_evaluation(root, *, A, B, transcript):
                     'voice_evaluation_changed')
         else:
             media = {}
-            for name in ('A', 'B'):
+            for name in media_names:
                 probe = json.loads(run_command(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json', str(paths[name])], stage='ffprobe_audio'))
                 run_command(['ffmpeg', '-v', 'error', '-xerror', '-i', str(paths[name]), '-f', 'null', '-'], stage='ffmpeg_decode')
                 stream = probe['streams'][0]
                 require(len(probe['streams']) == 1 and stream['codec_name'] == 'pcm_s16le' and stream['channels'] == 1, 'voice_evidence_format')
-                media[name] = dict(sha256=BINDINGS[name], bytes=paths[name].stat().st_size,
+                media[name] = dict(sha256=bindings[name], bytes=paths[name].stat().st_size,
                     seconds=float(probe['format']['duration']), codec=stream['codec_name'],
                     sample_rate=int(stream['sample_rate']), channels=1, decoded=True)
+            if 'audio_seconds' in core:
+                require(media['sample']['seconds'] == core['audio_seconds'] and
+                        len(paths['transcript'].read_text()) == core['transcript_characters'], 'voice_sample_mismatch')
             evidence = dict(evaluation_sha256=evaluation_sha, recorded_at=now(), evaluation=core, media=media)
             private_write(artifact, canonical_bytes(evidence)); artifact.chmod(0o400)
         journal = ExperienceJournal(root/'journal'); reference = root/'journal_ref.json'
@@ -65,17 +101,19 @@ def record_user_evaluation(root, *, A, B, transcript):
         require(len(matches) <= 1, 'voice_duplicate_evaluation')
         if matches:
             entry = matches[0]
-            require(entry['original_text'] == ORIGINAL and entry['extraction_source'] == 'user_structured'
-                    and entry['verification'] == 'verified'
+            require(entry['original_text'] == original and entry['extraction_source'] == 'user_structured'
+                    and entry['verification'] == 'verified' and entry['source'] == fields['source']
+                    and entry['target_segment'] == fields['target_segment']
                     and json.loads(entry['evidence'])['artifact_sha256'] == sha(artifact.read_bytes()), 'voice_journal_changed')
         else:
-            entry = journal.record(jid, ORIGINAL, dict(project='gemini_tts_single_free_trial_v1', domain='video',
-                target_segment=AUDIENCE, issue='실제 B 자연스러움7/10; 게시 여부 미결정. 구체적 결함은 미지정.',
-                positive_preference='동일60자 A/B에서 Gemini/Puck B가 Melo A보다 훨씬 자연스럽다는 사용자 평가',
-                proposed_correction='같은 대상의 추천 후보 B 우선; 다음20초 샘플8/10 목표는 hypothesis, 새 승인/생성/청취 필요',
+            claims = (dict(preferred=core['preferred'], naturalness_score=core['naturalness_score'])
+                      if 'preferred' in core else {key: core[key] for key in
+                          ('overall_naturalness', 'voice_and_intonation', 'pace_and_pauses',
+                           'user_says_voice_sufficient', 'next_priority', 'audio_seconds', 'listened_at')})
+            entry = journal.record(jid, original, dict(**fields,
                 evidence=json.dumps(dict(evaluation_sha256=evaluation_sha, artifact_sha256=sha(artifact.read_bytes()),
-                    bindings=BINDINGS, preferred='B', naturalness_score=7, score_max=10), ensure_ascii=False),
-                source='actual_user_listening_ab_20261110', confidence=1, verification='verified'), provenance='user_structured')
+                    bindings=bindings, **claims, score_max=core['score_max']), ensure_ascii=False)),
+                provenance='user_structured')
         selection = journal.select(jid, domain='video', target_segment=AUDIENCE)
         return dict(journal_id=jid, entry=entry, evaluation_sha256=evaluation_sha,
             artifact=str(artifact), artifact_sha256=sha(artifact.read_bytes()), selection=selection)

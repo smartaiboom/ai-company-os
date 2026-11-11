@@ -203,3 +203,42 @@ class ProviderReadinessTests(unittest.TestCase):
             validate_qa_claim(dict(assessments=[dict(criterion_id='voice',status='met',source='model_claim',evidence='heard it')],
                                    defects=[],sensory_quality='unassessed'))
         self.http.assert_not_called()
+
+    def test_script_revision_and_editor_handoff_on_mocked_provider_wire(self):
+        from script_quality import SCRIPT_CONTRACT
+        from tests.test_script_quality import script_callbacks, script_from_beats
+        from voice_quality import AUDIENCE
+
+        self.inputs.update(target_segment=AUDIENCE, answers={'audience': AUDIENCE})
+        self.inputs['capabilities']['script_contract'] = SCRIPT_CONTRACT
+
+        def beat(start, end, text, shot_type):
+            return dict(start=start, end=end, narration=text, caption='약속 안내', screen='예시 화면',
+                shot_type=shot_type, source_ref='가상 문자 예시', source_status='pending', fact_status='illustrative')
+        draft = script_from_beats([beat(0, 3, '약속은 몇 시죠?', 'card'), beat(3, 60, '약속 조건을 써요.', 'card')])
+        revised = deepcopy(draft)
+        revised['narrative_beats'][1]['shot_type'] = 'demo'
+        for value in (draft, revised):
+            value['provenance'] = dict(author='fixture employee response', model=MODEL, mock=False)
+        manager, employee = script_callbacks(draft, revised)
+        self.create(max_calls=8)
+        self.approve()
+
+        def send(request, timeout):
+            wire = json.loads(request.data)
+            message = parse(wire['contents'][0]['parts'][0]['text'])
+            phase, context = message['phase'], message['data']
+            callback = employee if phase == 'execute' else manager
+            response = json.loads(callback(phase, context))
+            if phase == 'review' and context['assignment']['role'] == 'editor':
+                self.assertEqual(context['plan_inspection']['source'], 'deterministic_script_editor_check')
+                self.assertEqual(context['previous_results'][0]['revision'], 2)
+            response.pop('task_refs', None)
+            return self.envelope(response)
+
+        self.http.side_effect = send
+        with patch('quality_provider.QUALITY_TRANSPORT_ENABLED', True):
+            result = self.run_company()
+        self.assertEqual(result['reason_code'], 'manager_final_stopped')
+        self.assertEqual(self.http.call_count, 8)
+        self.assertEqual(result['assignments'][0]['plan_inspections'][1]['resolved_issue_types'], ['missing_demo'])

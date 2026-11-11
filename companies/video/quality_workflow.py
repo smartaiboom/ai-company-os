@@ -1,9 +1,10 @@
 """Video quality planning adapter. Text plans are not rendered or publishable videos."""
 from copy import deepcopy
 import math
-from autonomous_company import Company, require, exact, parse, digest
+from autonomous_company import Company, require, exact, parse, digest, validate_plan
 from quality_feedback import ROLE_CONTRACTS
 from video_production_company import offline_clip_decision_context
+from script_quality import CRITERIA, SCRIPT_CONTRACT, SCRIPT_INSTRUCTIONS, inspect_script, validate_script_editor
 
 RUBRIC = (
     ('hook', '대본/기획', '초반 3초 관심 유도'),
@@ -92,12 +93,59 @@ def checklist():
                 reason='계획만 검사함. 실제 시청·청취·사실 검증 및 사용자 평가 필요')
 
 
+def _validate_script_plan(value):
+    if 'tasks' not in value:
+        return
+    validate_plan(value)
+    writers = [task for task in value['tasks'] if task['role'] == 'writer']
+    editors = [task for task in value['tasks'] if task['role'] == 'editor']
+    require(len(writers) == 1 and len(editors) == 1
+            and set(writers[0]['criteria_ids']) == set(CRITERIA)
+            and writers[0]['id'] in editors[0]['depends_on'], 'script_plan_handoff_required')
+
+
+def _script_context(quality, task, phase, context, *, mock):
+    if quality['capabilities'].get('script_contract') != SCRIPT_CONTRACT or task['role'] not in ('writer', 'editor'):
+        return None
+    audience = quality['answers'].get('audience') if mock else quality['target_segment']
+    context = {**context, 'version_history': deepcopy(task['versions'])}
+    if phase == 'review':
+        if task['role'] == 'writer':
+            context['plan_inspection'] = _script_review(task, audience, mock=mock)
+        else:
+            value = parse(context['result']['content'])
+            validate_script_editor(value, context['previous_results'])
+            context['plan_inspection'] = dict(source='deterministic_script_editor_check',
+                artifact_hash=digest(value), defects=[], sensory_quality='unassessed')
+    return context
+
+
+def _script_review(task, audience, *, mock):
+    current = inspect_script(parse(task['versions'][-1]['content']), audience, mock=mock)
+    if len(task['versions']) > 1:
+        previous = inspect_script(parse(task['versions'][-2]['content']), audience, mock=mock)
+        current['previous_artifact_hash'] = previous['artifact_hash']
+        remaining = {d['issue'] for d in current['defects']}
+        current['resolved_issue_types'] = sorted({d['issue'] for d in previous['defects']} - remaining)
+    return current
+
+
+def _validate_script_review(task, review, audience, *, mock):
+    inspection = _script_review(task, audience, mock=mock)
+    require(review['action'] != 'accept' or not inspection['defects'], 'known_script_defects')
+    if review['action'] == 'revise' and inspection['defects']:
+        require(all(d['issue'] in review['feedback'] for d in inspection['defects']), 'script_feedback_missing_defect')
+    task.setdefault('plan_inspections', []).append(inspection)
+
+
 class VideoQualityCompany(Company):
     """Opt-in mock adapter over existing orchestration. Live providers remain rejected."""
     def _workflow_context(self, p):
         require('quality_context' in p, 'quality_context_required')
         from voice_quality import voice_policy_for_brief
         quality = p['quality_context']
+        if quality['capabilities'].get('script_contract') == SCRIPT_CONTRACT:
+            quality = {**quality, 'capabilities': {**quality['capabilities'], 'script_instructions': SCRIPT_INSTRUCTIONS}}
         return dict(quality=deepcopy(quality), role_contracts=deepcopy(ROLE_CONTRACTS),
                     video_roles=deepcopy(VIDEO_ROLES), voice_policy=voice_policy_for_brief(
                         quality['experiences'], quality['answers'].get('audience'),quality['answers'].get('video_voice_brief')))
@@ -110,6 +158,18 @@ class VideoQualityCompany(Company):
                                      for r in context['previous_results']]
         voice_mode = p['quality_context']['capabilities'].get('voice_quality_contract_v1') is True
         role=next((t['role'] for t in p['assignments'] if t['id']==task_id),None)
+        task = next((t for t in p['assignments'] if t['id'] == task_id), None)
+        quality = p['quality_context']
+        script = _script_context(quality, task, phase, context, mock=True) if task else None
+        if script is not None:
+            result = super()._call(p, provider, phase, task_id, script)
+            if phase == 'execute':
+                value = parse(result['content'])
+                if role == 'writer':
+                    inspect_script(value, quality['answers'].get('audience'), mock=True)
+                else:
+                    validate_script_editor(value, context['previous_results'])
+            return result
         if phase == 'review':
             if voice_mode:
                 from voice_quality import inspect_voice_stage
@@ -120,10 +180,17 @@ class VideoQualityCompany(Company):
         if voice_mode and phase == 'execute':
             from voice_quality import inspect_voice_stage
             inspect_voice_stage(role,parse(result['content']),context['previous_results'],context['voice_policy'])
+        if phase == 'plan' and quality['capabilities'].get('script_contract') == SCRIPT_CONTRACT:
+            _validate_script_plan(result)
         return result
 
     def _validate_review_decision(self,p,task,review):
-        if p['quality_context']['capabilities'].get('voice_quality_contract_v1') is True:
+        quality = p['quality_context']
+        if quality['capabilities'].get('script_contract') == SCRIPT_CONTRACT and task['role'] in ('writer', 'editor'):
+            if task['role'] == 'writer':
+                _validate_script_review(task, review, quality['answers'].get('audience'), mock=True)
+            return
+        if quality['capabilities'].get('voice_quality_contract_v1') is True:
             from voice_quality import inspect_voice_stage, voice_policy_for_brief
             quality=p['quality_context']
             previous=[next(t for t in p['assignments'] if t['id']==dep)['versions'][-1] for dep in task['depends_on']]
@@ -173,6 +240,9 @@ class VideoProviderQualityCompany(QualityProviderCompany):
         return super()._additional_context_fields(phase) | {'plan_evidence'} | ({'plan_inspection'} if phase=='review' else set())
 
     def _tool_notice(self,p):
+        script = (' '+SCRIPT_INSTRUCTIONS+' Include each deterministic issue id in revision feedback. '
+                  'Use the short script contract for writer and editor instead of legacy segments and shots. '
+                  if p['quality_inputs']['capabilities'].get('script_contract') == SCRIPT_CONTRACT else '')
         return (super()._tool_notice(p)+' Video roles: '+__import__('json').dumps(VIDEO_ROLES,ensure_ascii=False)+
                 ' Choose necessary roles writer/editor/voice/qa/feedback and dependencies; no fixed pipeline required. '
                 'Writer/editor/voice content must be a JSON string matching quality.capabilities.artifact_contract. '
@@ -181,13 +251,17 @@ class VideoProviderQualityCompany(QualityProviderCompany):
                 'assessment source=model_claim, status=met|unmet|unassessed, criterion_id uses rubric ids. '
                 'composition/voice/sync/publish must be unassessed. No numeric sensory score. '
                 'Separate plan_inspection deterministic counts from semantic judgments. '
-                'Read actual predecessor content/hash and previous versions; explain each revision and remaining blockers.')
+                'Read actual predecessor content/hash and previous versions; explain each revision and remaining blockers.' + script)
 
     def _call(self,p,provider,phase,task_id,context):
         task=next((t for t in p['assignments'] if t['id']==task_id),None)
+        quality = p['quality_inputs']
+        script_mode = quality['capabilities'].get('script_contract') == SCRIPT_CONTRACT
+        script = _script_context(quality, task, phase, context, mock=False) if task else None
+        context = script if script is not None else context
         context={**context,'plan_evidence':[dict(task_id=r['task_id'],**inspect_plan(r['role'],parse(r['content'])))
-                  for r in context.get('previous_results',[]) if r['role'] in ('writer','editor','voice')]}
-        if phase=='review':
+                  for r in context.get('previous_results',[]) if r['role'] in (('voice',) if script_mode else ('writer','editor','voice'))]}
+        if phase=='review' and script is None:
             if task['role'] in ('writer','editor','voice'):
                 inspection=inspect_plan(task['role'],parse(context['result']['content']))
             else:
@@ -195,16 +269,28 @@ class VideoProviderQualityCompany(QualityProviderCompany):
             context={**context,'plan_inspection':inspection}
         result=super()._call(p,provider,phase,task_id,context)
         if phase=='plan' and 'tasks' in result:
+            if script_mode:
+                _validate_script_plan(result)
             require(all(t.get('role') in ('writer','editor','voice','qa','feedback') for t in result['tasks']),
                     'unsupported_quality_role')
         if phase=='execute' and task:
             content=parse(result['content'])
-            if task['role'] in ('writer','editor','voice'):validate_artifact(task['role'],content)
+            if script is not None and task['role'] == 'writer':
+                inspect_script(content, quality['target_segment'], mock=False)
+                require(content['provenance']['model'] == self.bound_model, 'script_provenance_mismatch')
+            elif script is not None:
+                validate_script_editor(content, context['previous_results'])
+            elif task['role'] in ('writer','editor','voice'):validate_artifact(task['role'],content)
             elif task['role']=='qa':validate_qa_claim(content)
         return result
 
     def _validate_review_decision(self,p,task,review):
         super()._validate_review_decision(p,task,review)
+        quality = p['quality_inputs']
+        if quality['capabilities'].get('script_contract') == SCRIPT_CONTRACT and task['role'] in ('writer','editor'):
+            if task['role'] == 'writer':
+                _validate_script_review(task, review, quality['target_segment'], mock=False)
+            return
         if task['role'] in ('writer','editor','voice'):
             inspection=inspect_plan(task['role'],parse(task['versions'][-1]['content']))
             require(review['action']!='accept' or not inspection['defects'],'known_plan_defects')

@@ -53,7 +53,7 @@ class MissionOneStore(QualityProviderStore):
             web = dict(policy=WEB_POLICY, account_project=youtube_project,
                 search_remaining=quota_observation(search_remaining),
                 general_units_remaining=quota_observation(units_remaining),
-                approved_max_searches=2 if p.get('mission_successor') else 4, approved_max_videos=2 if p.get('mission_successor') else 4,
+                approved_max_searches=2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4, approved_max_videos=2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4,
                 credential_binding=_binding(project_id+':youtube',youtube_key), free_usage_verified=True,
                 policy_confirmed=True)
         else:
@@ -68,7 +68,8 @@ class MissionOneStore(QualityProviderStore):
         body = self.prepare(project_id, valid_hours=1, confirm_free_account=True)
         return {**body, 'mission_account': proof, **({'mission_web':web, 'mission_research_review':research_review_policy()} if web else {}),
                 **({'mission_resume':deepcopy(p['mission_resume'])} if 'mission_resume' in p else {}),
-                **({'mission_successor':deepcopy(p['mission_successor'])} if 'mission_successor' in p else {})}
+                **({'mission_successor':deepcopy(p['mission_successor'])} if 'mission_successor' in p else {}),
+                **({'mission_writer_resume':deepcopy(p['mission_writer_resume'])} if 'mission_writer_resume' in p else {})}
 
     def resume_reference(self, previous):
         require('mission_resume' not in previous, 'mission_resume_not_eligible')
@@ -137,7 +138,62 @@ class MissionOneStore(QualityProviderStore):
             research_hash=digest(research), receipt_hash=web['receipt_hash'],
             reuse='prior_validated_plan_and_employee_research_pending_new_review')
 
+    def writer_reference(self, previous):
+        """Authenticate the stopped writer chain; old grants prove history only."""
+        require(previous.get('mission_successor') and not previous.get('mission_writer_resume')
+                and previous['status']=='stopped' and previous.get('reason_code') in
+                ('script_audience_mismatch','script_audience_inference_required'), 'mission_writer_not_eligible')
+        second=self.load(previous['mission_successor']['previous_job'])
+        require(digest(previous['mission_successor'])==digest(self.successor_reference(second))
+                and previous['goal']==second['goal'] and previous['quality_inputs']==second['quality_inputs']
+                and previous['plan']==second['plan'] and previous['employee_web']==second['employee_web']
+                and previous['limits']==dict(max_calls=6,max_revisions_per_task=1,max_total_revisions=1),
+                'mission_writer_history_changed')
+        grant=parse(self._grant_path(previous['id']).read_text())
+        require(hmac.compare_digest(str(grant['signature']),self._sign(grant['record']))
+                and grant['record']['id']==previous['real_ai']['consent'].get('operating_grant_id')
+                and grant['record']['revoked_at'] is None, 'invalid_consent_signature')
+        attempts=previous['real_ai']['attempts']
+        tasks=previous['assignments']
+        require(len(attempts)==2 and [a['phase'] for a in attempts]==['review','execute']
+                and all(a['status']=='completed' and a.get('http_status')==200 and a['model']==MODEL
+                        and a.get('response_hash') and a.get('free_account_policy_verified') is True for a in attempts)
+                and [a['role_result_status'] for a in attempts]==['validated','json_parsed']
+                and previous['active_operation']==attempts[-1]['id'] and not previous.get('final'),
+                'mission_writer_attempts_invalid')
+        require(len(tasks)==3 and [t['role'] for t in tasks]==list(ROLES)
+                and tasks[0]['state']=='accepted_by_ai_manager' and len(tasks[0]['reviews'])==1
+                and tasks[0]['reviews'][0]['action']=='accept'
+                and tasks[0]['versions']==second['assignments'][0]['versions']
+                and all(t['state']=='pending' and not t['versions'] and not t['reviews'] for t in tasks[1:]),
+                'mission_writer_reuse_invalid')
+        selection=validate_selection(parse(tasks[0]['reviews'][0]['feedback']),previous['employee_web'])
+        require(attempts[0]['task_id']==tasks[0]['id'] and attempts[1]['task_id']==tasks[1]['id'],
+                'mission_writer_attempts_invalid')
+        return dict(previous_job=previous['id'],previous_state_hash=previous['storage_hash'],
+            history=deepcopy(previous['mission_successor']),
+            previous_attempt_ids=previous['mission_successor']['previous_attempt_ids']+[a['id'] for a in attempts],
+            consumed_calls=6,new_max_calls=4,total_max_calls=10,
+            consumed_searches=2,consumed_videos=2,new_max_searches=2,new_max_videos=2,
+            total_max_searches=4,total_max_videos=4,plan_hash=digest(previous['plan']),
+            research_hash=digest(tasks[0]),selection_hash=digest(selection),
+            receipt_hash=previous['employee_web']['receipt_hash'],
+            handoff='accepted_task_reviews_local_assembly_no_new_ai_final_evaluation')
+
     def check_scope(self, p):
+        writer = p.get('mission_writer_resume')
+        if writer:
+            require(not p.get('mission_successor') and not p.get('mission_resume'), 'mission_writer_history_changed')
+            previous=self.load(writer['previous_job'])
+            require(digest(writer)==digest(self.writer_reference(previous))
+                    and p['goal']==previous['goal'] and p['quality_inputs']==previous['quality_inputs']
+                    and p['plan']==previous['plan'] and p['employee_web']==previous['employee_web']
+                    and p['assignments'][0]==previous['assignments'][0], 'mission_writer_history_changed')
+            require(len(p['assignments'])==3 and all(
+                all(t[k]==original[k] for k in ('id','role','title','depends_on','criteria_ids','instructions'))
+                for t,original in zip(p['assignments'],previous['assignments'])), 'mission_writer_history_changed')
+            studio=Store(self.root.parent).load(p['quality_inputs']['answers']['representative_project'])
+            require(studio['representative']['mission_one_job']==p['id'], 'mission_resume_detached')
         successor = p.get('mission_successor')
         if successor:
             require(not p.get('mission_resume'), 'mission_successor_history_changed')
@@ -170,7 +226,7 @@ class MissionOneStore(QualityProviderStore):
                             dict(aspect='9:16', language='한국어', platform='YouTube Shorts').items()),
                     'mission_game_scope_mismatch')
         require(quality['capabilities'] == capabilities
-                and p['limits'] == dict(max_calls=6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
+                and p['limits'] == dict(max_calls=4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
                 and not p.get('local_tools'), 'mission_scope_mismatch')
 
     @staticmethod
@@ -200,16 +256,22 @@ class MissionOneStore(QualityProviderStore):
             quota_observation(web['general_units_remaining'])
             require(web['policy']==WEB_POLICY and web['free_usage_verified'] is True
                     and web['policy_confirmed'] is True
-                    and type(web['approved_max_searches']) is int and web['approved_max_searches'] == (2 if p.get('mission_successor') else 4)
-                    and type(web['approved_max_videos']) is int and web['approved_max_videos'] == (2 if p.get('mission_successor') else 4)
+                    and type(web['approved_max_searches']) is int and web['approved_max_searches'] == (2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4)
+                    and type(web['approved_max_videos']) is int and web['approved_max_videos'] == (2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4)
                     and isinstance(web['credential_binding'],str),
                     'employee_web_scope_unverified')
         else:
             require('mission_web' not in body,'mission_scope_mismatch')
         require(body.get('mission_successor') == p.get('mission_successor'), 'mission_successor_consent_mismatch')
         require(body.get('mission_resume') == p.get('mission_resume'), 'mission_resume_consent_mismatch')
+        require(body.get('mission_writer_resume')==p.get('mission_writer_resume'), 'mission_writer_consent_mismatch')
+        if p.get('mission_writer_resume'):
+            old=parse(self._grant_path(p['mission_writer_resume']['previous_job']).read_text())['record']['body']
+            require(body['mission_account']['account_project']==old['mission_account']['account_project']
+                    and body['mission_web']['account_project']==old['mission_web']['account_project'],
+                    'mission_writer_account_changed')
         self._check_mission_account(body.get('mission_account'), p['limits']['max_calls'])
-        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor')})
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume')})
 
 
 def validate_research(value):
@@ -302,11 +364,17 @@ class MissionOneCompany(VideoProviderQualityCompany):
 
     def _quality_transport_allowed(self, p):
         self.store.check_scope(p)
-        if p.get('mission_successor'):
+        if p.get('mission_successor') or p.get('mission_writer_resume'):
             require(p['plan']['source']==self.source, 'mission_successor_provenance')
         if p['goal'] == GAME_GOAL:
             require(p['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL, GAME_RESEARCH_BLOCKER)
             self._authorize_web(p)
+        if p.get('mission_writer_resume'):
+            old_id=p['mission_writer_resume']['previous_job']
+            old=parse(self.store._grant_path(old_id).read_text())['record']['body']
+            require(hmac.compare_digest(old['mission_account']['credential_binding'],_binding(old_id,self.config.api_key))
+                    and hmac.compare_digest(old['mission_web']['credential_binding'],
+                        _binding(old_id+':youtube',os.getenv('YOUTUBE_DATA_API_KEY',''))), 'mission_key_binding_mismatch')
         account = self.store.grant(p)['body']['mission_account']
         require(hmac.compare_digest(account['credential_binding'], _binding(p['id'], self.config.api_key)),
                 'mission_key_binding_mismatch')
@@ -345,6 +413,14 @@ class MissionOneCompany(VideoProviderQualityCompany):
 
     def _tool_notice(self, p):
         notice = super()._tool_notice(p) + AUDIENCE_INSTRUCTIONS
+        if p.get('mission_writer_resume'):
+            return (notice.replace('60초','목표 길이').replace('target_duration=60','target_duration=quality.manager_selection.duration_seconds')+
+                ' Writer-stage successor: reuse the authenticated original plan, research and manager_selection '
+                'with original evidence IDs, topic, game and duration. Do not select a new topic, game or duration. '
+                'Start at writer; no research or new web batch is allowed. Korean narration/captions and '
+                'pending visual sources are required. Writer and editor each receive manager review. '
+                'After acceptance the system assembles a human-review handoff, not a new AI final evaluation. '
+                'Four new Gemini calls maximum, no retries, media or representative approval.')
         if p.get('mission_successor'):
             notice += (' The validated prior manager plan and employee research are reused with original timestamps '
                        'and receipt evidence. Research is pending your NEW structured review, not approved. '
@@ -384,6 +460,20 @@ class MissionOneCompany(VideoProviderQualityCompany):
             'The application stops delivery at human review; do not claim approval or generate media.')
 
     def _call(self, p, provider, phase, task_id, context):
+        if p.get('mission_writer_resume') and phase=='finalize':
+            self.store.grant(p)
+            require(all(t['state']=='accepted_by_ai_manager' and t['reviews'][-1]['action']=='accept'
+                        for t in p['assignments']), 'mission_internal_review_incomplete')
+            checks=[]
+            for criterion in p['plan']['criteria']:
+                claims=[c for t in p['assignments'] for c in t['reviews'][-1]['checks']
+                        if c['criterion_id']==criterion['id']]
+                require(claims and all(c['status']=='met' for c in claims), 'final_quality_unverified')
+                checks.append(deepcopy(claims[-1]))
+            return dict(action='deliver',content='수락된 조사·대본·편집 결과를 대표 검토용으로 묶었습니다. 새 AI 최종 평가는 수행하지 않았습니다.',
+                rationale='기존 관리자 선정 및 각 업무의 관리자 수락 기록 참조',
+                uncertainty='대상 시청자 제안·Shorts 형식·영상 사용권·성과는 사용자 확인 필요',checks=checks,
+                task_refs=[dict(task_id=r['task_id'],revision=r['revision'],result_hash=digest(r)) for r in context['results']])
         self._research_review_state = (p if p['goal'] == GAME_GOAL and phase == 'review'
             and context['assignment']['role'] == 'research' else None)
         try:
@@ -404,7 +494,7 @@ class MissionOneCompany(VideoProviderQualityCompany):
             self._research_review_state = None
 
     def _mission_call(self, p, provider, phase, task_id, context):
-        if p.get('mission_successor'):
+        if p.get('mission_successor') or p.get('mission_writer_resume'):
             require(not (phase=='execute' and context['assignment']['role']=='research'),
                     'mission_cached_research_revision_requires_new_approval')
         selection = self._manager_selection(p)
@@ -440,6 +530,9 @@ class MissionOneCompany(VideoProviderQualityCompany):
         return result
 
     def _delivery_blockers(self, p):
+        if p.get('mission_writer_resume'):
+            p['final'].update(provider='system',source='accepted_review_handoff')
+            p['events'][-1].update(event='system_review_handoff',actor='system')
         return ['needs_user_review']
 
 
@@ -448,7 +541,7 @@ def checked_result(job, *, allow_fixture=False):
         require(job['quality_inputs']['capabilities'].get('employee_web_research')==WEB_TOOL,GAME_RESEARCH_BLOCKER)
     attempts = job['real_ai']['attempts']
     require(job['status'] == job.get('reason_code') == 'needs_user_review' and job['final']
-            and not job['artifacts'] and not job['active_operation'] and (6 if job.get('mission_successor') else 8) <= len(attempts) <= job['limits']['max_calls'],
+            and not job['artifacts'] and not job['active_operation'] and (4 if job.get('mission_writer_resume') else 6 if job.get('mission_successor') else 8) <= len(attempts) <= job['limits']['max_calls'],
             'mission_internal_review_incomplete')
     require(all(a['status'] == 'completed' and a.get('http_status') == 200 and a['model'] == MODEL
                 and a['role_result_status'] == 'validated' and a.get('response_hash')
@@ -459,6 +552,9 @@ def checked_result(job, *, allow_fixture=False):
             and all(t['state'] == 'accepted_by_ai_manager' and t['versions'] and t['reviews'][-1]['action'] == 'accept'
                     for t in tasks.values()), 'mission_internal_review_incomplete')
     source = job['final']['source']
+    if job.get('mission_writer_resume'):
+        require(source=='accepted_review_handoff' and job['final']['provider']=='system', 'mission_provider_evidence_incomplete')
+        source=job['plan']['source']
     require(source == 'provider_model_claim' or allow_fixture and source == 'offline_http_fixture',
             'mission_provider_evidence_incomplete')
     require(all(v['source'] == source for task in tasks.values() for v in task['versions']),
@@ -474,6 +570,11 @@ def checked_result(job, *, allow_fixture=False):
             observations=observations, tool_receipt_hash=job['employee_web']['receipt_hash'])
     else:
         research = validate_research(parse(tasks['research']['versions'][-1]['content']))
+    if job.get('mission_writer_resume'):
+        research['reuse']=dict(source_job=job['mission_writer_resume']['previous_job'],
+            receipt_hash=job['mission_writer_resume']['receipt_hash'],newly_observed=False,
+            plan_hash=job['mission_writer_resume']['plan_hash'],
+            selection_hash=job['mission_writer_resume']['selection_hash'],final_evaluation='not_performed_local_handoff')
     if job.get('mission_successor'):
         research['reuse'] = dict(source_job=job['mission_successor']['previous_job'],
             receipt_hash=job['mission_successor']['receipt_hash'], newly_observed=False,
@@ -510,7 +611,7 @@ def main():
     from representative_workflow import RepresentativeVideoWorkflow
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
-    parser.add_argument('action', choices=('create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
+    parser.add_argument('action', choices=('create-writer-resume','create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
     parser.add_argument('project')
     parser.add_argument('--confirm-new-execution', action='store_true')
     parser.add_argument('--account-project')
@@ -528,6 +629,9 @@ def main():
     workflow = RepresentativeVideoWorkflow(Store(args.root))
     store = MissionOneStore(workflow.store.root/'mission_one_provider')
     try:
+        if args.action=='create-writer-resume':
+            print(workflow.stage_mission_writer_resume(args.project,owner_confirmed=args.confirm_new_execution))
+            return
         if args.action=='create-successor':
             print(workflow.stage_mission_successor(args.project, owner_confirmed=args.confirm_new_execution))
             return

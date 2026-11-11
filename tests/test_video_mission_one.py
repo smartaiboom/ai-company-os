@@ -253,6 +253,14 @@ class MissionOneTests(unittest.TestCase):
         self.review_error = 'inner_json'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_writer_stage_resume_preserves_selection_and_hands_off_with_four_calls(self):
+        self.writer_fixture=True
+        self.successor_fixture=True
+        self.resume_fixture=True
+        self.review_error='inner_json'
+        self.audience_case='inferred'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
     def test_dns_resume_stops_at_nine_new_calls(self):
         self.resume_fixture = True
         self.exhaust_resume_budget = True
@@ -382,6 +390,11 @@ class MissionOneTests(unittest.TestCase):
             elif phase=='execute':
                 self.assertEqual(context['quality']['manager_selection'],decision)
                 result=json.loads(employee(phase,context))
+                if (role=='writer' and getattr(self,'writer_fixture',False)
+                        and not self.store.load(self.job).get('mission_writer_resume')):
+                    content=json.loads(result['content'])
+                    content['target_audience']='미정'
+                    result['content']=json.dumps(content,ensure_ascii=False)
                 if role=='writer' and getattr(self,'script_topic_tamper',False):
                     content=json.loads(result['content'])
                     content['topic']['title']='관리자가 선정하지 않은 합성 주제'
@@ -459,6 +472,89 @@ class MissionOneTests(unittest.TestCase):
             result=self.run_job()
         else:
             result=self.run_job()
+        if getattr(self,'writer_fixture',False):
+            self.assertEqual(result['reason_code'],'script_audience_inference_required')
+            self.assertEqual(self.http.call_count,2)
+            third=self.job
+            before.update({p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and third in p.name})
+            reference=self.store.writer_reference(result)
+            self.assertEqual(reference['consumed_calls'],6)
+            self.assertEqual(len(reference['previous_attempt_ids']),6)
+            self.assertEqual(reference['selection_hash'],digest(decision))
+            with self.assertRaises(CompanyError): self.store.resume_reference(result)
+            with self.assertRaises(CompanyError): self.store.successor_reference(result)
+            with self.assertRaisesRegex(CompanyError,'explicit_owner_confirmation_required'):
+                self.studio.workflow.stage_mission_writer_resume(project)
+            self.job=self.studio.workflow.stage_mission_writer_resume(project,owner_confirmed=True)
+            fresh=self.store.load(self.job)
+            self.assertEqual(fresh['phase'],'work')
+            self.assertEqual(fresh['limits']['max_calls'],4)
+            self.assertEqual(fresh['assignments'][0],result['assignments'][0])
+            self.assertFalse(fresh['sessions'])
+            self.assertFalse(fresh['real_ai']['attempts'])
+            self.assertFalse(fresh['real_ai']['consent'])
+            with self.assertRaises(CompanyError):
+                self.studio.workflow.stage_mission_writer_resume(project,owner_confirmed=True)
+            with self.assertRaisesRegex(CompanyError,'operating_consent_required'): self.run_job()
+            b=self.store.prepare_mission(self.job,key=self.key,account_project='fixture',quota_note='fixture',
+                youtube_key=youtube_key,youtube_project='fixture-youtube',confirm_youtube_policy=True)
+            for section,key in [('mission_writer_resume','consumed_calls'),('mission_account','approved_max_calls'),
+                                ('mission_web','approved_max_searches')]:
+                bad=deepcopy(b);bad[section][key]+=1
+                with self.assertRaises(CompanyError):
+                    self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+            for section in ('mission_account','mission_web'):
+                bad=deepcopy(b);bad[section]['account_project']='different-account'
+                with self.assertRaisesRegex(CompanyError,'mission_writer_account_changed'):
+                    self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+            with self.assertRaises(CompanyError):
+                self.store.approve(self.job,b,review_hash=digest(new_body),owner_confirmed=True)
+            later=(datetime.now(timezone(timedelta(hours=9)))+timedelta(hours=2)).isoformat()
+            with patch('autonomous_free.now',return_value=later):
+                with self.assertRaisesRegex(CompanyError,'consent_expired'):
+                    self.store.approve(self.job,b,review_hash=digest(b),owner_confirmed=True)
+            # Mutated source, receipt, selection, user input and cap cannot be authorized.
+            for mutate in (
+                lambda p:p['mission_writer_resume'].update(selection_hash='tampered'),
+                lambda p:p['quality_inputs'].update(target_segment='tampered'),
+                lambda p:p['employee_web'].update(receipt_hash='tampered'),
+                lambda p:p['limits'].update(max_calls=5)):
+                bad=deepcopy(fresh);mutate(bad)
+                with self.assertRaises(CompanyError): self.store.check_scope(bad)
+            self.store.approve(self.job,b,review_hash=digest(b),owner_confirmed=True)
+            with patch.dict('os.environ',GEMINI_API_KEY='changed-fixture-key'):
+                changed_company=OfflineMissionCompany(self.store,LiveManagerProvider('fixture-manager'),
+                    LiveEmployeeProvider('fixture-staff'),Gemini35Config('changed-fixture-key'))
+                with self.assertRaises(CompanyError):
+                    changed_company.run(self.job,expected_state_hash=self.store.load(self.job)['storage_hash'])
+            self.http.reset_mock(side_effect=False)
+            self.new_phases=[]
+            original_send=self.http.side_effect
+            def writer_send(request,timeout):
+                msg=json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
+                self.new_phases.append((msg['phase'],msg['data'].get('assignment',{}).get('role')))
+                return original_send(request,timeout)
+            self.http.side_effect=writer_send
+            result=self.run_job()
+            self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
+            self.assertEqual(self.new_phases,[('execute','writer'),('review','writer'),('execute','editor'),('review','editor')])
+            self.assertEqual(self.http.call_count,4)
+            self.assertEqual(result['final']['source'],'accepted_review_handoff')
+            self.assertEqual(result['final']['provider'],'system')
+            self.assertEqual(len(urls),4)  # Historical mock batch only, no new YouTube requests.
+            report=self.studio.workflow.report_plan(project,provider_store=self.store,allow_fixture=True)
+            self.assertEqual(self.studio.detail('workspace',project)['stage'],'awaiting_plan_approval')
+            self.assertEqual(report['research']['manager_decision'],decision)
+            self.assertEqual(report['research']['reuse']['source_job'],third)
+            self.assertEqual(report['research']['reuse']['final_evaluation'],'not_performed_local_handoff')
+            self.assertEqual(report['provenance'],'offline_http_fixture')
+            self.assertEqual(report['script']['target_audience'],script['target_audience'])
+            self.assertEqual(report['script']['target_duration'],decision['duration_seconds'])
+            with self.assertRaises(CompanyError):
+                self.company._preflight(self.store.load(self.job))
+            self.assertEqual(self.http.call_count,4)
+            for path,content in before.items():self.assertEqual(path.read_bytes(),content)
+            return
         if getattr(self,'script_topic_tamper',False):
             self.assertEqual(result['reason_code'],'mission_selected_topic_mismatch')
             self.assertEqual(self.http.call_count,4)

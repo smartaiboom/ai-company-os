@@ -183,6 +183,28 @@ class RepresentativeVideoWorkflow:
                 self._transition(p, 'research_planning')
                 return job['id']
 
+    def stage_mission_writer_resume(self, project_id, *, owner_confirmed=False):
+        """Separate writer start; immutable prior selection, no historical failure replay."""
+        from video_mission_one import MissionOneStore
+        require(owner_confirmed is True, 'explicit_owner_confirmation_required')
+        with self.store.lock(project_id):
+            p=self.store.load(project_id)
+            flow=p['representative']
+            require(flow['stage']=='research_planning' and not flow['plan_versions'], 'representative_stage_mismatch')
+            store=MissionOneStore(self.store.root/'mission_one_provider')
+            previous=store.load(flow['mission_one_job'])
+            with store.lock(previous['id']):
+                previous=store.load(previous['id'])
+                reference=store.writer_reference(previous)
+                job=store.create(previous['goal'],inputs=deepcopy(previous['quality_inputs']),max_calls=4,max_total_revisions=1)
+                job.update(mission_writer_resume=reference,plan=deepcopy(previous['plan']),
+                    assignments=deepcopy(previous['assignments']),employee_web=deepcopy(previous['employee_web']),phase='work')
+                store.save(job)
+                flow.setdefault('mission_one_job_history',[]).append(previous['id'])
+                flow['mission_one_job']=job['id']
+                self._transition(p,'research_planning')
+                return job['id']
+
     def report_plan(self, project_id, *, summary=None, sources=None, risks=None, changes=None,
                     render_spec=None, provider_store=None, allow_fixture=False):
         with self.store.lock(project_id):

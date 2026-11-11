@@ -253,6 +253,19 @@ class MissionOneTests(unittest.TestCase):
         self.review_error = 'inner_json'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_doubled_budget_writer_handoff_preserves_four_failures_and_caps(self):
+        self.budget_fixture=True
+        self.writer_fixture=True
+        self.successor_fixture=True
+        self.resume_fixture=True
+        self.review_error='inner_json'
+        self.audience_case='inferred'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_doubled_budget_timeout_consumes_once_and_never_retries(self):
+        self.budget_timeout=True
+        self.test_doubled_budget_writer_handoff_preserves_four_failures_and_caps()
+
     def test_fixed_provenance_prompt_and_25_second_inferred_audience_handoff(self):
         self.provenance_case='correct'
         self.audience_case='inferred'
@@ -288,6 +301,8 @@ class MissionOneTests(unittest.TestCase):
         from urllib.parse import parse_qs, urlsplit
         from employee_web_research import TOOL
         from video_mission_one import _binding
+        account='gen-lang-client-0938732315' if getattr(self,'budget_fixture',False) else 'fixture'
+        web_account=account if getattr(self,'budget_fixture',False) else 'fixture-youtube'
         fixture_audience = '' if getattr(self,'audience_case',None) in ('inferred','missing_inference') else AUDIENCE
         project = self.studio.create(dict(goal=GAME_GOAL,audience=fixture_audience,language='한국어',
             platform='YouTube Shorts',duration=None,notes='',key='00000000-0000-4000-8000-000000000044'))['id']
@@ -298,8 +313,8 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(self.store.load(previous)['real_ai']['attempts'],[])
         youtube_key='fixture-youtube-key-secret'
         self.enterContext(patch.dict('os.environ',YOUTUBE_DATA_API_KEY=youtube_key))
-        body=self.store.prepare_mission(self.job,key=self.key,account_project='fixture',remaining_requests=None,
-            quota_note='fixture',youtube_key=youtube_key,youtube_project='fixture-youtube',
+        body=self.store.prepare_mission(self.job,key=self.key,account_project=account,remaining_requests=None,
+            quota_note='fixture',youtube_key=youtube_key,youtube_project=web_account,
             search_remaining=None,units_remaining=None,confirm_youtube_policy=True)
         self.assertNotIn(youtube_key,json.dumps(body))
         self.assertEqual(body['mission_web']['search_remaining'], 'unknown')
@@ -334,8 +349,8 @@ class MissionOneTests(unittest.TestCase):
             with self.assertRaisesRegex(CompanyError, 'operating_consent_required'):
                 self.run_job()
             self.assertEqual(self.http.call_count, 1)
-            new_body = self.store.prepare_mission(self.job,key=self.key,account_project='fixture',quota_note='fixture',
-                youtube_key=youtube_key,youtube_project='fixture-youtube',confirm_youtube_policy=True)
+            new_body = self.store.prepare_mission(self.job,key=self.key,account_project=account,quota_note='fixture',
+                youtube_key=youtube_key,youtube_project=web_account,confirm_youtube_policy=True)
             self.assertEqual(new_body['mission_account']['approved_max_calls'], 9)
             self.assertEqual(new_body['limits']['max_calls'], 9)
             for field in ('mission_resume', 'mission_account', 'limits'):
@@ -352,7 +367,7 @@ class MissionOneTests(unittest.TestCase):
                 self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
             self.store.approve(self.job,new_body,review_hash=digest(new_body),owner_confirmed=True)
             self.http.reset_mock(side_effect=True)
-        duration=25 if getattr(self,'provenance_case',None) else 34
+        duration=25 if getattr(self,'provenance_case',None) or getattr(self,'budget_fixture',False) else 34
         published=(datetime.now(timezone.utc)-timedelta(days=1)).isoformat().replace('+00:00','Z')
         vid='abcdefghijk'
         urls=[]
@@ -414,8 +429,13 @@ class MissionOneTests(unittest.TestCase):
                     if self.provenance_case=='mock_conflict': content['provenance']['mock']=True
                     else: content['provenance']['model']='synthetic-wrong-model'
                     result['content']=json.dumps(content,ensure_ascii=False)
+                if (role=='writer' and getattr(self,'budget_fixture',False)
+                        and self.store.load(self.job).get('mission_writer_resume')):
+                    content=json.loads(result['content']);content['provenance']['mock']=True
+                    result['content']=json.dumps(content,ensure_ascii=False)
                 if (role=='writer' and getattr(self,'writer_fixture',False)
-                        and not self.store.load(self.job).get('mission_writer_resume')):
+                        and not self.store.load(self.job).get('mission_writer_resume')
+                        and not self.store.load(self.job).get('mission_budget_writer')):
                     content=json.loads(result['content'])
                     content['target_audience']='미정'
                     result['content']=json.dumps(content,ensure_ascii=False)
@@ -482,8 +502,8 @@ class MissionOneTests(unittest.TestCase):
                 self.studio.workflow.stage_mission_successor(project,owner_confirmed=True)
             with self.assertRaisesRegex(CompanyError,'operating_consent_required'):
                 self.run_job()
-            b=self.store.prepare_mission(self.job,key=self.key,account_project='fixture',quota_note='fixture',
-                youtube_key=youtube_key,youtube_project='fixture-youtube',confirm_youtube_policy=True)
+            b=self.store.prepare_mission(self.job,key=self.key,account_project=account,quota_note='fixture',
+                youtube_key=youtube_key,youtube_project=web_account,confirm_youtube_policy=True)
             self.assertEqual(b['mission_web']['approved_max_searches'],2)
             self.assertEqual(b['mission_successor']['consumed_calls'],4)
             for section,key in [('mission_successor','consumed_calls'),('mission_account','approved_max_calls'),('mission_web','approved_max_searches')]:
@@ -538,8 +558,8 @@ class MissionOneTests(unittest.TestCase):
             with self.assertRaises(CompanyError):
                 self.studio.workflow.stage_mission_writer_resume(project,owner_confirmed=True)
             with self.assertRaisesRegex(CompanyError,'operating_consent_required'): self.run_job()
-            b=self.store.prepare_mission(self.job,key=self.key,account_project='fixture',quota_note='fixture',
-                youtube_key=youtube_key,youtube_project='fixture-youtube',confirm_youtube_policy=True)
+            b=self.store.prepare_mission(self.job,key=self.key,account_project=account,quota_note='fixture',
+                youtube_key=youtube_key,youtube_project=web_account,confirm_youtube_policy=True)
             for section,key in [('mission_writer_resume','consumed_calls'),('mission_account','approved_max_calls'),
                                 ('mission_web','approved_max_searches')]:
                 bad=deepcopy(b);bad[section][key]+=1
@@ -578,6 +598,13 @@ class MissionOneTests(unittest.TestCase):
                 return original_send(request,timeout)
             self.http.side_effect=writer_send
             result=self.run_job()
+            if getattr(self,'budget_fixture',False):
+                self.assertEqual(result['reason_code'],'script_provenance_mismatch')
+                self.assertEqual(self.http.call_count,1)
+                fourth=self.job
+                before.update({p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and fourth in p.name})
+                self.finish_budget_fixture(project,result,before,urls,decision,script,youtube_key,writer_send)
+                return
             self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
             self.assertEqual(self.new_phases,[('execute','writer'),('review','writer'),('execute','editor'),('review','editor')])
             self.assertEqual(self.http.call_count,4)
@@ -671,6 +698,90 @@ class MissionOneTests(unittest.TestCase):
             self.store.save(changed)
             with self.assertRaises(CompanyError):
                 self.store.check_scope(self.store.load(self.job))
+
+    def finish_budget_fixture(self,project,failed,before,urls,decision,script,youtube_key,send):
+        from video_mission_one import DOUBLE_BUDGET_POLICY, MISSION_ACCOUNT
+        fourth=self.job
+        reference=self.store.budget_writer_reference(failed)
+        self.assertEqual(reference['policy'],DOUBLE_BUDGET_POLICY)
+        self.assertEqual(len(reference['previous_attempt_ids']),7)
+        for old_guard in (self.store.resume_reference,self.store.successor_reference,self.store.writer_reference):
+            with self.assertRaises(CompanyError):old_guard(failed)
+        with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_budget_writer_resume(project)
+        self.job=self.studio.workflow.stage_mission_budget_writer_resume(project,owner_confirmed=True)
+        fresh=self.store.load(self.job)
+        self.assertEqual(fresh['limits']['max_calls'],13)
+        self.assertFalse(fresh['real_ai']['consent'])
+        self.assertFalse(fresh['real_ai']['attempts'])
+        self.assertEqual(fresh['assignments'],failed['assignments'])
+        self.assertEqual(fresh['employee_web'],failed['employee_web'])
+        with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_budget_writer_resume(project,owner_confirmed=True)
+        with self.assertRaises(CompanyError):self.run_job()
+        body=self.store.prepare_mission(self.job,key=self.key,account_project=MISSION_ACCOUNT,quota_note='synthetic attestation',
+            youtube_key=youtube_key,youtube_project=MISSION_ACCOUNT,confirm_youtube_policy=True)
+        self.assertEqual(body['mission_account']['remaining_requests'],'unknown')
+        self.assertEqual(body['mission_account']['approved_max_calls'],13)
+        self.assertEqual(body['mission_web']['approved_max_searches'],6)
+        self.assertEqual(body['mission_web']['approved_max_videos'],6)
+        self.assertEqual((reference['consumed_calls'],reference['new_max_calls'],reference['total_max_calls']),(7,13,20))
+        self.assertEqual((reference['consumed_searches'],reference['new_max_searches'],reference['total_max_searches']),(2,6,8))
+        self.assertEqual((reference['consumed_videos'],reference['new_max_videos'],reference['total_max_videos']),(2,6,8))
+        for section,key in [('mission_budget_writer','consumed_calls'),('mission_budget_writer','new_max_calls'),
+                            ('mission_budget_writer','total_max_calls'),('mission_budget_writer','total_max_searches'),
+                            ('mission_budget_writer','total_max_videos'),('mission_budget_writer','execution_max_searches'),
+                            ('mission_account','approved_max_calls'),('mission_web','approved_max_searches'),
+                            ('mission_web','approved_max_videos')]:
+            bad=deepcopy(body);bad[section][key]+=1
+            with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+        old_body=json.loads(self.store._grant_path(fourth).read_text())['record']['body']
+        with self.assertRaises(CompanyError):self.store.approve(self.job,old_body,review_hash=digest(old_body),owner_confirmed=True)
+        for mutate in (lambda p:p['mission_budget_writer'].update(selection_hash='tamper'),
+                       lambda p:p['quality_inputs'].update(target_segment='tamper'),
+                       lambda p:p['employee_web'].update(receipt_hash='tamper'),
+                       lambda p:p['limits'].update(max_calls=14)):
+            bad=deepcopy(fresh);mutate(bad)
+            with self.assertRaises(CompanyError):self.store.check_scope(bad)
+        self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+        for env in ({'GEMINI35_MODEL':'other-model'},{'YOUTUBE_DATA_API_KEY':'changed-fixture-key'}):
+            with patch.dict('os.environ',env):
+                with self.assertRaises(CompanyError):self.run_job()
+        with self.assertRaisesRegex(CompanyError,'mission_cached_research_revision_requires_new_approval'):
+            self.company._mission_call(self.store.load(self.job),self.company.employee,'execute','research',
+                dict(assignment=dict(role='research')))
+        self.http.reset_mock(side_effect=False)
+        self.http.side_effect=TimeoutError('synthetic timeout') if getattr(self,'budget_timeout',False) else send
+        self.new_phases=[]
+        result=self.run_job()
+        if getattr(self,'budget_timeout',False):
+            self.assertEqual(result['status'],'stopped')
+            self.assertEqual(len(result['real_ai']['attempts']),1)
+            self.assertEqual(self.http.call_count,1)
+            with self.assertRaises(CompanyError):self.run_job()
+            self.assertEqual(self.http.call_count,1)
+        else:
+            self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
+            self.assertEqual(self.http.call_count,4)
+            self.assertEqual(self.new_phases,[('execute','writer'),('review','writer'),('execute','editor'),('review','editor')])
+            report=self.studio.workflow.report_plan(project,provider_store=self.store,allow_fixture=True)
+            self.assertEqual(self.studio.detail('workspace',project)['stage'],'awaiting_plan_approval')
+            self.assertEqual(report['research']['manager_decision'],decision)
+            self.assertEqual(report['research']['reuse']['source_job'],fourth)
+            self.assertEqual(report['provenance'],'offline_http_fixture')
+            self.assertEqual(report['script']['target_duration'],25)
+            self.assertEqual(report['script']['target_audience'],script['target_audience'])
+            # Synthetic boundary states only: 7 historical + 12 new permits a request;
+            # 7 + 13 stops before payload validation or transport. No provider evidence is invented.
+            boundary=deepcopy(result)
+            entry=deepcopy(result['real_ai']['attempts'][0])
+            boundary['real_ai']['attempts']=[{**entry,'id':'synthetic-boundary-'+str(i)} for i in range(12)]
+            self.company._preflight(boundary)
+            boundary['real_ai']['attempts'].append({**entry,'id':'synthetic-boundary-12'})
+            with self.assertRaisesRegex(CompanyError,'optional_technical_cap_reached'):
+                self.company._request_json(boundary,model=MODEL,base_url=ENDPOINT,body=b'{}',api_key=self.key,
+                    timeout=1,transport=lambda *a: self.fail('cap must block transport'),kind='synthetic',task_id=None,goal=boundary['goal'])
+            self.assertEqual(self.http.call_count,4)
+        self.assertEqual(len(urls),4)  # Original mock observations only.
+        for path,content in before.items():self.assertEqual(path.read_bytes(),content)
 
     def test_unknown_quota_and_signed_caps_cannot_be_increased(self):
         body = self.store.prepare_mission(self.job, key=self.key, account_project='fixture',

@@ -127,10 +127,13 @@ function planPanel(p, plan, previous) {
   const script = plan.script;
   return `<section class="panel" id="plan-panel">
     <div class="panel-heading"><h2>${icon('script')} 기획·대본</h2>${versionSelect('plan',p.flow.plan_versions,plan)}</div>
-    <h3>${h(plan.topic)}</h3><p>${h(plan.summary)}</p>${facts([['첫 3초 후크',script.hook_0_3s],['시청자 문제',script.viewer_problem],['전달할 효용',script.payoff],['작성 출처',reportOrigin(plan)],['비용 한도',`$${plan.cost_limit_usd}`],['보고 시각',time(plan.reported_at)]])}
+    <h3>${h(plan.topic)}</h3><p>${h(plan.summary)}</p>${facts([['목표 길이',script.target_duration+'초'],['첫 3초 후크',script.hook_0_3s],['시청자 문제',script.viewer_problem],['전달할 효용',script.payoff],['작성 출처',reportOrigin(plan)],['비용 한도',`$${plan.cost_limit_usd}`],['보고 시각',time(plan.reported_at)]])}
     ${plan.research ? `<details class="subpanel" open><summary>조사 후보·선정 근거</summary>
       <p>${h(plan.research.selection_reason)}</p>
-      ${plan.research.candidates.map(c=>`<p><strong>${h(c.topic)}</strong> · ${h(c.rationale)} · 최신성 미검증</p>`).join('')}
+      ${plan.research.candidates.map(c=>`<p><strong>${h(c.topic)}</strong> · ${h(c.game ? c.game+' · ' : '')}${h(c.rationale)} · 쇼츠 성과 미검증${c.rights_plan ? ' · '+h(c.rights_plan) : ''}</p>`).join('')}
+      ${plan.research.manager_decision ? `<p><strong>관리자 길이 판단</strong> · ${h(plan.research.manager_decision.duration_reason)}</p>
+        <p>다른 후보 제외 이유 · ${h(plan.research.manager_decision.other_candidates_reason)}</p>
+        <p class="muted">검토 길이 ${h(plan.research.manager_decision.considered_durations.join(', '))}초 · 내레이션 ${h(plan.research.narration_estimate.characters)}자 / 초당 ${h(plan.research.narration_estimate.characters_per_second)}자 예상</p>` : ''}
       <p class="muted">${h(plan.research.uncertainty)}</p></details>` : ''}
     ${plan.task_history ? `<details class="subpanel"><summary>AI 업무·내부 검토 이력</summary>
       <p>${h(plan.manager_plan.rationale)}</p>

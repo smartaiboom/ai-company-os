@@ -8,6 +8,8 @@ from autonomous_company import CompanyError, Store, digest, exact, parse, requir
 from autonomous_gemini35 import Gemini35Config, MODEL, ENDPOINT
 from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
 from goal_dialogue_live import send_once
+from mission_game_evidence import (DURATION_RANGE, GAME_EVIDENCE, GAME_GOAL, GAME_SCOPE,
+    validate_game_decision, validate_game_research)
 from quality_provider import QualityProviderStore
 from quality_workflow import VideoProviderQualityCompany
 from script_quality import SCRIPT_CONTRACT, inspect_script
@@ -39,7 +41,17 @@ class MissionOneStore(QualityProviderStore):
 
     @staticmethod
     def check_scope(p):
-        require(p['quality_inputs']['capabilities'] == {'script_contract': SCRIPT_CONTRACT, 'mission': SCOPE}
+        quality = p['quality_inputs']
+        capabilities = {'script_contract': SCRIPT_CONTRACT, 'mission': SCOPE}
+        if p['goal'] == GAME_GOAL:
+            capabilities['editorial_scope'] = GAME_SCOPE
+            require(quality['answers'].get('public_evidence') == GAME_EVIDENCE
+                    and quality['constraints'].get('duration_range_seconds') == list(DURATION_RANGE)
+                    and 'duration_seconds' not in quality['constraints']
+                    and all(quality['constraints'].get(key) == value for key, value in
+                            dict(aspect='9:16', language='한국어', platform='YouTube Shorts').items()),
+                    'mission_game_scope_mismatch')
+        require(quality['capabilities'] == capabilities
                 and p['limits'] == dict(max_calls=MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
                 and not p.get('local_tools'), 'mission_scope_mismatch')
 
@@ -100,8 +112,48 @@ class MissionOneCompany(VideoProviderQualityCompany):
                     'mission_restart_forbidden')
         return super()._run(project_id, expected_state_hash=expected_state_hash, resume=False)
 
+    def _game_evidence(self, p):
+        quality = p['quality_inputs']
+        return quality['answers']['public_evidence'] if quality['capabilities'].get('editorial_scope') == GAME_SCOPE else None
+
+    def _game_selection(self, p):
+        evidence = self._game_evidence(p)
+        if evidence is None:
+            return None
+        task = next((t for t in p['assignments'] if t['role'] == 'research' and
+                     t['state'] == 'accepted_by_ai_manager'), None)
+        if task is None:
+            return None
+        research = validate_game_research(parse(task['versions'][-1]['content']), evidence)
+        return validate_game_decision(parse(task['reviews'][-1]['feedback']), research, evidence)
+
+    def _script_duration(self, p):
+        selection = self._game_selection(p)
+        return selection['duration_seconds'] if selection else super()._script_duration(p)
+
     def _tool_notice(self, p):
-        return (super()._tool_notice(p) +
+        notice = super()._tool_notice(p)
+        if self._game_evidence(p) is not None:
+            return (notice.replace('target_duration=60', 'target_duration=manager-selected integer seconds')
+                .replace('Select one useful evergreen topic for the target audience, or mark current claims verification_pending.',
+                         'Use the manager-selected topic and mark current claims verification_pending.') +
+                ' GAME SHORTS MISSION: exactly one research task, one writer depending on research, one editor '
+                'depending on writer. Research JSON {candidates:[{game,topic,rationale,player_evidence_id,'
+                'shorts_evidence_status:"unverified",rights_plan}],uncertainty}; compare about three distinct games '
+                'from supplied public_evidence. Separate Steam concurrent players, Korean Shorts performance and '
+                'length distributions. Assess hook, Korean audience relevance, factual uncertainty and capture/rights. '
+                'Only the manager chooses topic and duration after reading research. On accepting research, the '
+                'manager review.feedback must be a JSON string {selected_topic,duration_seconds,duration_reason,'
+                'selection_reason,other_candidates_reason,considered_durations,duration_evidence_ids}. '
+                'Compare at least two distinct integer lengths in 15–60 seconds. Consider 25–45s by default, '
+                '15–25s for a quick reveal, 45–60s for a tip/story. Cite at least two supplied length_distribution IDs; '
+                'different samples do not prove causation. Explain other topics excluded and why the chosen duration '
+                'fits the hook, narration pace and visual beats. The writer uses quality.manager_selection exactly '
+                'for title and target_duration, exact target_segment, Korean narration and captions; all visual '
+                'sources must remain pending. No invented URLs, ranks, match results or acquired rights; no '
+                'search, capture, media, TTS or generation tools. No earlier topic is approved. Finalize with deliver '
+                'only for a text proposal, keeping short popularity and publication rights unverified.')
+        return (notice +
             ' MISSION 01: planning only. Use exactly one research task, one writer depending on research, '
             'and one editor depending on writer. Research compares 2–4 original topics and outputs JSON '
             '{candidates:[{topic,rationale,evidence_status:"unverified"}],selected_topic,selection_reason,uncertainty}. '
@@ -115,7 +167,14 @@ class MissionOneCompany(VideoProviderQualityCompany):
             'The application stops delivery at human review; do not claim approval or generate media.')
 
     def _call(self, p, provider, phase, task_id, context):
+        selection = self._game_selection(p)
+        if selection:
+            context = {**context, 'quality':{**context['quality'], 'manager_selection':selection}}
         result = super()._call(p, provider, phase, task_id, context)
+        evidence = self._game_evidence(p)
+        if evidence and phase == 'review' and context['assignment']['role'] == 'research' and result['action'] == 'accept':
+            research = validate_game_research(parse(context['result']['content']), evidence)
+            validate_game_decision(parse(result['feedback']), research, evidence)
         if phase == 'plan' and 'tasks' in result:
             roles = {task['role']:task for task in result['tasks']}
             require(len(result['tasks']) == 3 and set(roles) == set(ROLES)
@@ -124,10 +183,11 @@ class MissionOneCompany(VideoProviderQualityCompany):
             role = context['assignment']['role']
             content = parse(result['content'])
             if role == 'research':
-                validate_research(content)
+                validate_game_research(content, evidence) if evidence else validate_research(content)
             elif role == 'writer':
                 research = next(r for r in context['previous_results'] if r['role'] == 'research')
-                require(content['topic']['title'] == validate_research(parse(research['content']))['selected_topic'],
+                chosen = selection or validate_research(parse(research['content']))
+                require(content['topic']['title'] == chosen['selected_topic'],
                         'mission_selected_topic_mismatch')
                 require(all(beat['source_status'] == 'pending' for beat in content['narrative_beats']),
                         'mission_visual_source_unverified')
@@ -155,9 +215,24 @@ def checked_result(job, *, allow_fixture=False):
             'mission_provider_evidence_incomplete')
     require(all(v['source'] == source for task in tasks.values() for v in task['versions']),
             'mission_provider_evidence_incomplete')
-    research = validate_research(parse(tasks['research']['versions'][-1]['content']))
+    quality = job['quality_inputs']
+    research_task = tasks['research']
+    research = parse(research_task['versions'][-1]['content'])
+    duration = 60
+    if quality['capabilities'].get('editorial_scope') == GAME_SCOPE:
+        evidence = quality['answers']['public_evidence']
+        research = validate_game_research(research, evidence)
+        decision = validate_game_decision(parse(research_task['reviews'][-1]['feedback']), research, evidence)
+        duration = decision['duration_seconds']
+        research = {**research, 'selected_topic':decision['selected_topic'],
+                    'selection_reason':decision['selection_reason'], 'manager_decision':decision}
+    else:
+        research = validate_research(research)
     script = parse(tasks['writer']['versions'][-1]['content'])
-    inspection = inspect_script(script, job['quality_inputs']['target_segment'], mock=False)
+    inspection = inspect_script(script, quality['target_segment'], mock=False, target_duration=duration)
+    if quality['capabilities'].get('editorial_scope') == GAME_SCOPE:
+        spoken_chars = sum(not char.isspace() for char in script['transcript'])
+        research['narration_estimate'] = dict(characters=spoken_chars, characters_per_second=round(spoken_chars/duration,2))
     require(not inspection['defects'] and script['provenance']['model'] == MODEL
             and script['topic']['title'] == research['selected_topic'], 'mission_script_not_ready')
     return research, source
@@ -195,6 +270,7 @@ def main():
         p = workflow.store.load(args.project)
         pid = p['representative'].get('mission_one_job')
         require(pid is not None, 'mission_stage_in_studio_first')
+        require(p['goal'] == GAME_GOAL, 'mission_game_goal_required')
         config = Gemini35Config.from_env()
         if args.action == 'prepare':
             require(args.confirm_free_account, 'mission_free_account_unverified')

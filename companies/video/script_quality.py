@@ -40,9 +40,10 @@ def _nonempty(value):
     require(isinstance(value, str) and bool(value.strip()), 'missing_script_text')
 
 
-def inspect_script(value, audience, *, mock):
+def inspect_script(value, audience, *, mock, target_duration=60):
     exact(value, WRITER_FIELDS)
-    require(value['contract'] == SCRIPT_CONTRACT and value['target_duration'] == 60, 'invalid_script_contract')
+    require(value['contract'] == SCRIPT_CONTRACT and type(value['target_duration']) is int
+            and value['target_duration'] == target_duration, 'invalid_script_contract')
     for field in ('target_audience', 'viewer_problem', 'promise', 'viewing_reason', 'hook_0_3s',
                   'payoff', 'close', 'transcript', 'estimation_method'):
         _nonempty(value[field])
@@ -99,8 +100,8 @@ def inspect_script(value, audience, *, mock):
                                 fact_status=beat['fact_status']))
     if beats[0]['end'] != 3 or value['hook_0_3s'] != beats[0]['narration']:
         defect('hook_window', 'hook', beats[0]['narration'], '첫 장면을 0–3초로 두고 후크 문구를 일치시킨다.')
-    if cursor != 60:
-        defect('total_duration', 'duration', f'최종 종료 {cursor}초', '장면을 60초까지 재배치한다.')
+    if cursor != target_duration:
+        defect('total_duration', 'duration', f'최종 종료 {cursor}초', f'장면을 {target_duration}초까지 재배치한다.')
     if all(beat['shot_type'] != 'demo' for beat in beats):
         defect('missing_demo', 'demo', '장면 유형: ' + ', '.join(b['shot_type'] for b in beats),
                '가상 예시 입력과 결과 비교를 화면 동작으로 지정한다.')

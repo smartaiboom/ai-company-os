@@ -30,6 +30,7 @@ ERRORS = {
     'readonly_project': '기존 검증 사례는 읽기 전용입니다.',
     'invalid_request': '요청 형식이 올바르지 않습니다.',
     'invalid_creation_key': '프로젝트 생성 요청을 확인해 주세요.',
+    'mission_game_duration_is_manager_decision': '게임 쇼츠 미션은 관리자가 길이를 정합니다. 프로젝트에서 길이 입력을 비워 주세요.',
     'mission_duration_requires_60': '미션 01은 60초 대본 범위입니다. 새 목표에서 길이를 60초로 설정해 주세요.',
     'mission_provider_result_required': '실행 권한을 받은 미션의 내부 검토 결과가 필요합니다.',
     'representative_render_spec_pending': '이 기획의 제작 사양은 아직 등록되지 않았습니다.',

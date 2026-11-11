@@ -13,9 +13,9 @@ from urllib.error import HTTPError
 from autonomous_company import CompanyError, digest
 from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config
 from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
-from mission_game_evidence import GAME_EVIDENCE, GAME_GOAL, validate_game_decision, validate_game_research
 from studio_server import Studio
-from video_mission_one import MissionOneCompany, MissionOneStore
+from video_mission_one import GAME_GOAL, GAME_RESEARCH_BLOCKER, MissionOneCompany, MissionOneStore
+from script_quality import inspect_script
 from tests.test_script_quality import script_callbacks, script_from_beats
 from voice_quality import AUDIENCE
 
@@ -59,7 +59,7 @@ class MissionOneTests(unittest.TestCase):
     def run_job(self, **kwargs):
         return self.company.run(self.job, expected_state_hash=self.store.load(self.job)['storage_hash'], **kwargs)
 
-    def fixture(self, *, game=False, wrong_duration=False):
+    def fixture(self):
         def beat(start, end, narration, shot):
             return dict(start=start,end=end,narration=narration,caption='가상 예시',screen='가상 예시 화면',
                         shot_type=shot,source_ref='소스 미확보',source_status='pending',fact_status='illustrative')
@@ -67,31 +67,12 @@ class MissionOneTests(unittest.TestCase):
                                    beat(30,60,'원본과 한 번 대조해 보세요.','card')])
         draft['topic']['title'] = '가상 문서의 입력 조건 확인'
         draft['provenance'] = dict(author='fixture response', model=MODEL, mock=False)
-        if game:
-            draft['topic']['title'] = '가상 역전의 한 장면'
-            draft['target_duration'] = 34
-            draft['narrative_beats'][1]['end'] = 17
-            draft['narrative_beats'][2].update(start=17,end=34)
         revision = deepcopy(draft)
         revision['narrative_beats'][1]['shot_type'] = 'demo'
         research = dict(candidates=[
             dict(topic=draft['topic']['title'],rationale='가상 입력으로 시연 가능',evidence_status='unverified'),
             dict(topic='가상 화면 설정 비교',rationale='두 화면 필요',evidence_status='unverified')],
             selected_topic=draft['topic']['title'],selection_reason='한 화면 시연',uncertainty='최근 유행·실제 성과 미검증')
-        decision = None
-        if game:
-            research = dict(candidates=[
-                dict(game='Counter-Strike 2',topic=draft['topic']['title'],rationale='가상 한 장면 시연',
-                     player_evidence_id='steam-cs2',shorts_evidence_status='unverified',rights_plan='권리 확인 전 미확보'),
-                dict(game='Dota 2',topic='가상 시야 설명',rationale='설명 분량이 더 필요',
-                     player_evidence_id='steam-dota2',shorts_evidence_status='unverified',rights_plan='권리 확인 대기')],
-                uncertainty='한국 게임 쇼츠 실적 미검증')
-            decision = dict(selected_topic=draft['topic']['title'],duration_seconds=34,duration_reason='후크와 두 장면 배치',
-                selection_reason='한 장면에 집중',other_candidates_reason='시야 규칙 설명이 추가로 필요',
-                considered_durations=[22,34,45],duration_evidence_ids=['korea-length','gaming-length'])
-            validate_game_research(research,GAME_EVIDENCE)
-            with self.assertRaisesRegex(CompanyError, 'mission_duration_evidence_mismatch'):
-                validate_game_decision({**decision,'duration_evidence_ids':['korea-length','youtube-rule']},research,GAME_EVIDENCE)
         manager, employee = script_callbacks(draft, revision)
 
         def send(request, timeout):
@@ -113,24 +94,15 @@ class MissionOneTests(unittest.TestCase):
             elif phase == 'execute':
                 if role == 'writer':
                     self.assertEqual(context['previous_results'][0]['role'], 'research')
-                if game:
-                    self.assertEqual(context['quality']['manager_selection'],decision)
-                    self.assertEqual(context['quality']['answers']['public_evidence'],GAME_EVIDENCE)
                 response = json.loads(employee(phase, context))
-                if game and wrong_duration and role == 'writer':
-                    script = json.loads(response['content'])
-                    script['target_duration'] = 60
-                    response['content'] = json.dumps(script,ensure_ascii=False)
             else:
                 response = json.loads(manager(phase, context))
                 if phase == 'plan':
                     response['tasks'][0]['depends_on'] = ['research']
                     response['tasks'].insert(0, dict(id='research',role='research',title='조사',depends_on=[],
                         criteria_ids=['facts'],instructions='근거 미확인과 후보 비교'))
-                if game and phase == 'review' and role == 'research':
-                    response['feedback'] = json.dumps(decision, ensure_ascii=False)
                 if phase == 'finalize':
-                    response.update(action='deliver', content='가상 예시 기획 및 전체 대본',
+                    response.update(action='deliver', content='60초 가상 예시 기획 및 전체 대본',
                         checks=[{**check,'status':'met'} for check in response['checks']])
                 response.pop('task_refs', None)
             return FixtureResponse(json.dumps(dict(candidates=[dict(finishReason='STOP',content=dict(role='model',
@@ -186,33 +158,36 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(self.studio.detail('workspace', self.project)['stage'], 'research_planning')
 
 
-    def _stage_game(self):
-        self.project = self.studio.create(dict(goal=GAME_GOAL, audience=AUDIENCE, language='한국어',
-            platform='YouTube Shorts', duration=None, notes='', key='00000000-0000-4000-8000-000000000042'))['id']
-        self.job = self.studio.workflow.stage_mission_one(self.project)
-        staged = self.store.load(self.job)
-        self.assertNotIn('duration_seconds', staged['quality_inputs']['constraints'])
-        self.assertEqual(staged['quality_inputs']['answers']['public_evidence'],GAME_EVIDENCE)
+    def test_game_goal_has_no_injected_data_or_fixed_duration_and_cannot_call(self):
+        project = self.studio.create(dict(goal=GAME_GOAL, audience='', language='한국어',
+            platform='YouTube Shorts', duration=None, notes='', key='00000000-0000-4000-8000-000000000043'))['id']
+        self.job = self.studio.workflow.stage_mission_one(project)
+        job = self.store.load(self.job)
+        self.store.check_scope(job)
+        self.assertEqual(set(job['quality_inputs']['answers']), {'audience','representative_project'})
+        self.assertNotIn('duration_seconds', job['quality_inputs']['constraints'])
+        with self.assertRaisesRegex(CompanyError, GAME_RESEARCH_BLOCKER):
+            self.store.prepare_mission(self.job, key=self.key, account_project='fixture project',
+                remaining_requests=10, quota_note='fixture RPM/TPM')
+        with self.assertRaisesRegex(CompanyError, GAME_RESEARCH_BLOCKER):
+            self.run_job()
+        with self.assertRaisesRegex(CompanyError, GAME_RESEARCH_BLOCKER):
+            self.studio.workflow.report_plan(project, provider_store=self.store, allow_fixture=True)
+        self.http.assert_not_called()
+        detail = self.studio.detail('workspace', project)
+        self.assertEqual(detail['stage'], 'research_planning')
+        self.assertEqual(detail['mission']['reason'], GAME_RESEARCH_BLOCKER)
+        self.assertEqual(detail['flow']['plan_versions'], [])
 
-    def test_game_manager_selects_topic_and_length_before_writer_and_report(self):
-        self._stage_game()
-        self.approve()
-        self.fixture(game=True)
-        result = self.run_job()
-        self.assertEqual(result['status'], 'needs_user_review', result.get('reason_code'))
-        self.assertEqual(self.http.call_count, 10)
-        report = self.studio.workflow.report_plan(self.project, provider_store=self.store, allow_fixture=True)
-        self.assertEqual(report['script']['target_duration'], 34)
-        self.assertEqual(report['script']['narrative_beats'][-1]['end'], 34)
-        self.assertEqual(report['research']['manager_decision']['considered_durations'], [22,34,45])
-        self.assertEqual(len(report['sources']), 4)
-        self.assertIsNone(report['render_spec'])
-
-    def test_game_writer_cannot_restore_60_seconds_after_manager_decision(self):
-        self._stage_game()
-        self.approve()
-        self.fixture(game=True, wrong_duration=True)
-        result = self.run_job()
-        self.assertEqual(result['reason_code'], 'invalid_script_contract')
-        self.assertEqual(self.http.call_count, 4)
-        self.assertEqual(self.studio.detail('workspace', self.project)['stage'], 'research_planning')
+    def test_explicit_script_duration_can_differ_from_legacy_default(self):
+        def beat(start, end, text, shot):
+            return dict(start=start,end=end,narration=text,caption='가상 예시',screen='가상 화면',
+                shot_type=shot,source_ref='미확보',source_status='pending',fact_status='illustrative')
+        script = script_from_beats([beat(0,3,'어떻게 달라졌나요?','card'),beat(3,34,'한 장면만 비교해 보세요.','demo')])
+        script['target_duration'] = 34
+        self.assertFalse(inspect_script(script, AUDIENCE, mock=True, target_duration=34)['defects'])
+        with self.assertRaisesRegex(CompanyError,'invalid_script_contract'):
+            inspect_script(script, AUDIENCE, mock=True)
+        script['narrative_beats'][-1]['end'] = 33
+        self.assertIn('total_duration', {d['issue'] for d in inspect_script(script, AUDIENCE, mock=True,
+            target_duration=34)['defects']})

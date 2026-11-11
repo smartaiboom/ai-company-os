@@ -85,8 +85,7 @@ class RepresentativeVideoWorkflow:
             return job['id']
 
     def stage_mission_one(self, project_id):
-        from mission_game_evidence import DURATION_RANGE, GAME_EVIDENCE, GAME_GOAL, GAME_SCOPE
-        from video_mission_one import MAX_CALLS, SCOPE, MissionOneStore
+        from video_mission_one import GAME_GOAL, GAME_SCOPE, MAX_CALLS, SCOPE, MissionOneStore
         with self.store.lock(project_id):
             p = self.store.load(project_id)
             flow = p['representative']
@@ -100,9 +99,7 @@ class RepresentativeVideoWorkflow:
             capabilities = dict(script_contract=SCRIPT_CONTRACT, mission=SCOPE)
             if game:
                 require('duration_seconds' not in constraints, 'mission_game_duration_is_manager_decision')
-                constraints.update(duration_range_seconds=list(DURATION_RANGE), aspect='9:16', language='한국어',
-                                   platform='YouTube Shorts')
-                answers['public_evidence'] = deepcopy(GAME_EVIDENCE)
+                constraints.update(aspect='9:16', language='한국어', platform='YouTube Shorts')
                 capabilities['editorial_scope'] = GAME_SCOPE
             else:
                 require(constraints.get('duration_seconds', 60) == 60, 'mission_duration_requires_60')
@@ -136,14 +133,6 @@ class RepresentativeVideoWorkflow:
                     return deepcopy(flow['plan_versions'][-1])
                 summary = job['final']['content']
                 sources = []
-                if research.get('manager_decision'):
-                    evidence = job['quality_inputs']['answers']['public_evidence']
-                    ids = {candidate['player_evidence_id'] for candidate in research['candidates']}
-                    ids.update(research['manager_decision']['duration_evidence_ids'])
-                    for key in sorted(ids):
-                        source = evidence[key]
-                        sources.append(dict(url=source['url'], observed_at=source['observed_at'],
-                            claim=source['claim']+' '+source['limits'], rights='수치 참고. 영상 소스 권리 미확인.'))
                 risks = research['uncertainty'] + ' · 한국 게임 쇼츠 성과 및 시각 소스 권리 미검증.'
                 changes = '내부 검토 후 대표에게 제출한 첫 기획안.'
                 mission_details = dict(research=research, provider_run=provider_view(job),

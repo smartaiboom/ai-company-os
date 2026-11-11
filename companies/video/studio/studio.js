@@ -131,9 +131,6 @@ function planPanel(p, plan, previous) {
     ${plan.research ? `<details class="subpanel" open><summary>조사 후보·선정 근거</summary>
       <p>${h(plan.research.selection_reason)}</p>
       ${plan.research.candidates.map(c=>`<p><strong>${h(c.topic)}</strong> · ${h(c.game ? c.game+' · ' : '')}${h(c.rationale)} · 쇼츠 성과 미검증${c.rights_plan ? ' · '+h(c.rights_plan) : ''}</p>`).join('')}
-      ${plan.research.manager_decision ? `<p><strong>관리자 길이 판단</strong> · ${h(plan.research.manager_decision.duration_reason)}</p>
-        <p>다른 후보 제외 이유 · ${h(plan.research.manager_decision.other_candidates_reason)}</p>
-        <p class="muted">검토 길이 ${h(plan.research.manager_decision.considered_durations.join(', '))}초 · 내레이션 ${h(plan.research.narration_estimate.characters)}자 / 초당 ${h(plan.research.narration_estimate.characters_per_second)}자 예상</p>` : ''}
       <p class="muted">${h(plan.research.uncertainty)}</p></details>` : ''}
     ${plan.task_history ? `<details class="subpanel"><summary>AI 업무·내부 검토 이력</summary>
       <p>${h(plan.manager_plan.rationale)}</p>
@@ -182,11 +179,14 @@ function videoPanel(p, video) {
 }
 function missionStatus(mission) {
   if (!mission) return '';
-  const reasons = {provider_rate_limit:'요청 한도에 도달했습니다.', free_request_failed:'요청이 실패했거나 시간 초과되었습니다.',
+  const reasons = {mission_independent_web_research_unavailable:'조사 직원의 웹 접근 도구 미연결 · 게임·길이 근거 조사 불가',
+    mission_old_scope_superseded:'이전 조사 입력이 들어간 준비본 · 최신 미션 프로젝트를 사용해 주세요.',
+    provider_rate_limit:'요청 한도에 도달했습니다.', free_request_failed:'요청이 실패했거나 시간 초과되었습니다.',
     known_script_defects:'대본의 검증 결함이 남아 있습니다.', manager_stopped:'관리자가 내부 작업을 중단했습니다.',
     manager_plan_stopped:'관리자가 계획 단계에서 중단했습니다.', optional_technical_cap_reached:'승인된 호출 한도에 도달했습니다.'};
   const terminal = ['stopped','paused','needs_operational_permission'].includes(mission.status);
-  const status = mission.status==='needs_user_review' ? '내부 검토 완료 · 대표 제출 확인' :
+  const blocked = ['mission_independent_web_research_unavailable','mission_old_scope_superseded'].includes(mission.reason);
+  const status = blocked ? '독립 조사 연결 대기 · 실제 호출 0회' : mission.status==='needs_user_review' ? '내부 검토 완료 · 대표 제출 확인' :
     terminal ? '실행 중단 · 자동 재호출 없음' : mission.status==='running' ? '기획 작업 진행 중 · 재호출 금지' :
     mission.authorized ? '외부 전송 승인 기록 있음 · 별도 실행 대기' : '외부 AI 실행 권한 필요';
   return `<div class="subpanel"><h3>미션 01 · 기획과 대본</h3><p class="warning">${h(status)}</p>

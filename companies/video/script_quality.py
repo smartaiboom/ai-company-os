@@ -4,6 +4,7 @@ import re
 from autonomous_company import digest, exact, parse, require
 from production_video import units
 
+MAX_SHORTS_SECONDS = 180
 SCRIPT_CONTRACT = 'short_script_v1'
 CRITERIA = {
     'hook': '첫 3초 관심', 'message': '한 가지 메시지', 'utility': '구체적인 시청자 효용',
@@ -42,6 +43,7 @@ def _nonempty(value):
 
 def inspect_script(value, audience, *, mock, target_duration=60):
     exact(value, WRITER_FIELDS)
+    require(type(target_duration) is int and 4 <= target_duration <= MAX_SHORTS_SECONDS, 'invalid_script_duration')
     require(value['contract'] == SCRIPT_CONTRACT and type(value['target_duration']) is int
             and value['target_duration'] == target_duration, 'invalid_script_contract')
     for field in ('target_audience', 'viewer_problem', 'promise', 'viewing_reason', 'hook_0_3s',
@@ -78,7 +80,7 @@ def inspect_script(value, audience, *, mock, target_duration=60):
         for key in BEAT_FIELDS[2:]:
             _nonempty(beat[key])
         start, end = beat['start'], beat['end']
-        require(type(start) is int and type(end) is int and 0 <= start < end <= 120, 'invalid_beat_time')
+        require(type(start) is int and type(end) is int and 0 <= start < end <= max(120, target_duration), 'invalid_beat_time')
         quote = f'{start}–{end}초: {beat["narration"]}'
         if start != cursor:
             defect('timeline_gap_or_overlap', 'duration', quote, f'장면 시작을 직전 종료 {cursor}초에 맞춘다.')

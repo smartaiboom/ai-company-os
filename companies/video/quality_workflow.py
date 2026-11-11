@@ -1,9 +1,10 @@
 """Video quality planning adapter. Text plans are not rendered or publishable videos."""
 from copy import deepcopy
 import math
-from autonomous_company import Company, require, exact, parse, digest, validate_plan
+from autonomous_company import Company, require, exact, parse, digest, validate_plan, now, text
 from quality_feedback import ROLE_CONTRACTS
 from video_production_company import offline_clip_decision_context
+from topic_research import compare_topics, writer_topic_handoff
 from script_quality import CRITERIA, SCRIPT_CONTRACT, SCRIPT_INSTRUCTIONS, inspect_script, validate_script_editor
 
 RUBRIC = (
@@ -140,12 +141,59 @@ def _validate_script_review(task, review, audience, *, mock):
 
 class VideoQualityCompany(Company):
     """Opt-in mock adapter over existing orchestration. Live providers remain rejected."""
+    def review_topic_research(self, project_id, brief, sources, candidates, *, researched_at):
+        """Persist the research recommendation in the existing project before invoking staff."""
+        decision = compare_topics(brief, sources, candidates, researched_at=researched_at)
+        with self.store.lock(project_id):
+            p = self.store.load(project_id)
+            quality = p.get('quality_context', {})
+            require(p['status'] == 'ready' and not p['attempts']
+                    and quality.get('answers', {}).get('audience') == brief['audience']
+                    and quality.get('capabilities', {}).get('script_contract') == SCRIPT_CONTRACT,
+                    'topic_research_project_mismatch')
+            history = p.setdefault('topic_research_history', [])
+            if not history or history[-1]['decision']['decision_sha256'] != decision['decision_sha256']:
+                history.append(dict(decision=deepcopy(decision), recorded_at=now(),
+                    previous_decision_sha256=history[-1]['decision']['decision_sha256'] if history else None,
+                    owner_review=None))
+                self.store.save(p)
+        return decision
+
+    def record_topic_review(self, project_id, decision_sha256, *, candidate_id, feedback):
+        """Record the owner's selection or request to revise (candidate_id=None)."""
+        text(feedback, 2000)
+        with self.store.lock(project_id):
+            p = self.store.load(project_id)
+            history = p.get('topic_research_history', [])
+            require(p['status'] == 'ready' and not p['attempts'] and history, 'topic_review_unavailable')
+            current = history[-1]
+            require(current['decision']['decision_sha256'] == decision_sha256, 'stale_topic_decision')
+            handoff = writer_topic_handoff(current['decision'], candidate_id) if candidate_id is not None else None
+            require(current['owner_review'] is None, 'topic_review_already_recorded')
+            current['owner_review'] = dict(candidate_id=candidate_id, feedback=feedback,
+                source='user_structured', recorded_at=now(), writer_handoff=handoff)
+            self.store.save(p)
+            return deepcopy(current['owner_review'])
+
+    def _run_workflow(self, project_id):
+        p = self.store.load(project_id)
+        history = p.get('topic_research_history', [])
+        capabilities = p.get('quality_context', {}).get('capabilities', {})
+        if history or capabilities.get('topic_research_required') is True:
+            review = history[-1]['owner_review'] if history else None
+            require(review and review['writer_handoff'] is not None, 'owner_topic_review_required')
+        return super()._run_workflow(project_id)
+
     def _workflow_context(self, p):
         require('quality_context' in p, 'quality_context_required')
         from voice_quality import voice_policy_for_brief
         quality = p['quality_context']
         if quality['capabilities'].get('script_contract') == SCRIPT_CONTRACT:
             quality = {**quality, 'capabilities': {**quality['capabilities'], 'script_instructions': SCRIPT_INSTRUCTIONS}}
+        history = p.get('topic_research_history', [])
+        if history:
+            review = history[-1]['owner_review']
+            quality = {**quality, 'topic_handoff': review['writer_handoff'], 'topic_feedback': review['feedback']}
         return dict(quality=deepcopy(quality), role_contracts=deepcopy(ROLE_CONTRACTS),
                     video_roles=deepcopy(VIDEO_ROLES), voice_policy=voice_policy_for_brief(
                         quality['experiences'], quality['answers'].get('audience'),quality['answers'].get('video_voice_brief')))
@@ -167,6 +215,9 @@ class VideoQualityCompany(Company):
                 value = parse(result['content'])
                 if role == 'writer':
                     inspect_script(value, quality['answers'].get('audience'), mock=True)
+                    handoff = context['quality'].get('topic_handoff')
+                    if handoff:
+                        require(value['topic']['title'] == handoff['topic'], 'writer_topic_handoff_mismatch')
                 else:
                     validate_script_editor(value, context['previous_results'])
             return result

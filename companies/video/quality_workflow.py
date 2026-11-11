@@ -105,14 +105,14 @@ def _validate_script_plan(value):
             and writers[0]['id'] in editors[0]['depends_on'], 'script_plan_handoff_required')
 
 
-def _script_context(quality, task, phase, context, *, mock):
+def _script_context(quality, task, phase, context, *, mock, target_duration=60):
     if quality['capabilities'].get('script_contract') != SCRIPT_CONTRACT or task['role'] not in ('writer', 'editor'):
         return None
     audience = quality['answers'].get('audience') if mock else quality['target_segment']
     context = {**context, 'version_history': deepcopy(task['versions'])}
     if phase == 'review':
         if task['role'] == 'writer':
-            context['plan_inspection'] = _script_review(task, audience, mock=mock)
+            context['plan_inspection'] = _script_review(task, audience, mock=mock, target_duration=target_duration)
         else:
             value = parse(context['result']['content'])
             validate_script_editor(value, context['previous_results'])
@@ -121,18 +121,18 @@ def _script_context(quality, task, phase, context, *, mock):
     return context
 
 
-def _script_review(task, audience, *, mock):
-    current = inspect_script(parse(task['versions'][-1]['content']), audience, mock=mock)
+def _script_review(task, audience, *, mock, target_duration=60):
+    current = inspect_script(parse(task['versions'][-1]['content']), audience, mock=mock, target_duration=target_duration)
     if len(task['versions']) > 1:
-        previous = inspect_script(parse(task['versions'][-2]['content']), audience, mock=mock)
+        previous = inspect_script(parse(task['versions'][-2]['content']), audience, mock=mock, target_duration=target_duration)
         current['previous_artifact_hash'] = previous['artifact_hash']
         remaining = {d['issue'] for d in current['defects']}
         current['resolved_issue_types'] = sorted({d['issue'] for d in previous['defects']} - remaining)
     return current
 
 
-def _validate_script_review(task, review, audience, *, mock):
-    inspection = _script_review(task, audience, mock=mock)
+def _validate_script_review(task, review, audience, *, mock, target_duration=60):
+    inspection = _script_review(task, audience, mock=mock, target_duration=target_duration)
     require(review['action'] != 'accept' or not inspection['defects'], 'known_script_defects')
     if review['action'] == 'revise' and inspection['defects']:
         require(all(d['issue'] in review['feedback'] for d in inspection['defects']), 'script_feedback_missing_defect')
@@ -306,11 +306,16 @@ class VideoProviderQualityCompany(QualityProviderCompany):
                 'Separate plan_inspection deterministic counts from semantic judgments. '
                 'Read actual predecessor content/hash and previous versions; explain each revision and remaining blockers.' + script)
 
+    def _script_duration(self, p):
+        return 60
+
     def _call(self,p,provider,phase,task_id,context):
         task=next((t for t in p['assignments'] if t['id']==task_id),None)
         quality = p['quality_inputs']
         script_mode = quality['capabilities'].get('script_contract') == SCRIPT_CONTRACT
-        script = _script_context(quality, task, phase, context, mock=False) if task else None
+        duration = self._script_duration(p)
+        script = _script_context(quality, task, phase, context, mock=False,
+                                 target_duration=duration) if task else None
         context = script if script is not None else context
         context={**context,'plan_evidence':[dict(task_id=r['task_id'],**inspect_plan(r['role'],parse(r['content'])))
                   for r in context.get('previous_results',[]) if r['role'] in (('voice',) if script_mode else ('writer','editor','voice'))]}
@@ -329,7 +334,7 @@ class VideoProviderQualityCompany(QualityProviderCompany):
         if phase=='execute' and task:
             content=parse(result['content'])
             if script is not None and task['role'] == 'writer':
-                inspect_script(content, quality['target_segment'], mock=False)
+                inspect_script(content, quality['target_segment'], mock=False, target_duration=duration)
                 require(content['provenance']['model'] == self.bound_model, 'script_provenance_mismatch')
             elif script is not None:
                 validate_script_editor(content, context['previous_results'])
@@ -342,7 +347,8 @@ class VideoProviderQualityCompany(QualityProviderCompany):
         quality = p['quality_inputs']
         if quality['capabilities'].get('script_contract') == SCRIPT_CONTRACT and task['role'] in ('writer','editor'):
             if task['role'] == 'writer':
-                _validate_script_review(task, review, quality['target_segment'], mock=False)
+                _validate_script_review(task, review, quality['target_segment'], mock=False,
+                                        target_duration=self._script_duration(p))
             return
         if task['role'] in ('writer','editor','voice'):
             inspection=inspect_plan(task['role'],parse(task['versions'][-1]['content']))

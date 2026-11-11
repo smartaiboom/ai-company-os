@@ -180,6 +180,8 @@ function videoPanel(p, video) {
 function missionStatus(mission) {
   if (!mission) return '';
   const reasons = {mission_independent_web_research_unavailable:'조사 직원의 웹 접근 도구 미연결 · 게임·길이 근거 조사 불가',
+    employee_web_authorization_required:'YouTube 공개 검색·메타데이터 접근의 별도 승인과 키 확인 필요',
+    employee_web_failed_no_retry:'직원 웹 조사 실패 또는 미확정 · 자동 재호출 차단',
     mission_old_scope_superseded:'이전 조사 입력이 들어간 준비본 · 최신 미션 프로젝트를 사용해 주세요.',
     provider_rate_limit:'요청 한도에 도달했습니다.', free_request_failed:'요청이 실패했거나 시간 초과되었습니다.',
     known_script_defects:'대본의 검증 결함이 남아 있습니다.', manager_stopped:'관리자가 내부 작업을 중단했습니다.',

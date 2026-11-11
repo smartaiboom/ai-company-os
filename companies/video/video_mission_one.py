@@ -2,12 +2,15 @@
 import argparse
 import hmac
 import json
+import os
 from pathlib import Path
 
 from autonomous_company import CompanyError, Store, digest, exact, parse, require, text
 from autonomous_gemini35 import Gemini35Config, MODEL, ENDPOINT
 from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
 from goal_dialogue_live import send_once
+from employee_web_research import (TOOL as WEB_TOOL, POLICY as WEB_POLICY, collect,
+    validate_queries, validate_selection, usable_observations)
 from quality_provider import QualityProviderStore
 from quality_workflow import VideoProviderQualityCompany
 from script_quality import SCRIPT_CONTRACT, inspect_script
@@ -29,17 +32,30 @@ def _binding(project_id, key):
 
 
 class MissionOneStore(QualityProviderStore):
-    def prepare_mission(self, project_id, *, key, account_project, remaining_requests, quota_note):
+    def prepare_mission(self, project_id, *, key, account_project, remaining_requests, quota_note,
+                        youtube_key=None, youtube_project=None, search_remaining=None, units_remaining=None,
+                        confirm_youtube_policy=False):
         p = self.load(project_id)
         self.check_scope(p)
-        require(p['goal'] != GAME_GOAL, GAME_RESEARCH_BLOCKER)
+        if p['goal'] == GAME_GOAL:
+            require(p['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL, GAME_RESEARCH_BLOCKER)
+            require(confirm_youtube_policy is True, 'employee_web_policy_confirmation_required')
+            text(youtube_project, 200)
+            require(type(search_remaining) is int and search_remaining >= 4 and
+                    type(units_remaining) is int and units_remaining >= 4, 'employee_web_quota_not_verified')
+            web = dict(policy=WEB_POLICY, account_project=youtube_project,
+                search_remaining=search_remaining, general_units_remaining=units_remaining,
+                credential_binding=_binding(project_id+':youtube',youtube_key), free_usage_verified=True,
+                policy_confirmed=True)
+        else:
+            web = None
         proof = dict(account_project=account_project, remaining_requests=remaining_requests, quota_note=quota_note,
                      credential_binding=_binding(project_id, key), billing_disabled=True,
                      free_data_policy=DATA_POLICY)
         self._check_mission_account(proof)
         require(key not in json.dumps(proof, ensure_ascii=False), 'secret_in_state')
         body = self.prepare(project_id, valid_hours=1, confirm_free_account=True)
-        return {**body, 'mission_account': proof}
+        return {**body, 'mission_account': proof, **({'mission_web':web} if web else {})}
 
     @staticmethod
     def check_scope(p):
@@ -47,6 +63,8 @@ class MissionOneStore(QualityProviderStore):
         capabilities = {'script_contract': SCRIPT_CONTRACT, 'mission': SCOPE}
         if p['goal'] == GAME_GOAL:
             capabilities['editorial_scope'] = GAME_SCOPE
+            if quality['capabilities'].get('employee_web_research') == WEB_TOOL:
+                capabilities['employee_web_research'] = WEB_TOOL
             require(set(quality['answers']) == {'audience', 'representative_project'}
                     and 'duration_seconds' not in quality['constraints']
                     and all(quality['constraints'].get(key) == value for key, value in
@@ -70,9 +88,21 @@ class MissionOneStore(QualityProviderStore):
     def _check_contract(self, p, body):
         require(isinstance(body, dict), 'invalid_fields')
         self.check_scope(p)
-        require(p['goal'] != GAME_GOAL, GAME_RESEARCH_BLOCKER)
+        if p['goal'] == GAME_GOAL:
+            require(p['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL, GAME_RESEARCH_BLOCKER)
+            web = body.get('mission_web')
+            exact(web, ('policy','account_project','search_remaining','general_units_remaining',
+                        'credential_binding','free_usage_verified','policy_confirmed'))
+            text(web['account_project'],200)
+            require(web['policy']==WEB_POLICY and web['free_usage_verified'] is True
+                    and web['policy_confirmed'] is True and type(web['search_remaining']) is int
+                    and web['search_remaining'] >= 4 and type(web['general_units_remaining']) is int
+                    and web['general_units_remaining'] >= 4 and isinstance(web['credential_binding'],str),
+                    'employee_web_scope_unverified')
+        else:
+            require('mission_web' not in body,'mission_scope_mismatch')
         self._check_mission_account(body.get('mission_account'))
-        super()._check_contract(p, {k:v for k,v in body.items() if k != 'mission_account'})
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web')})
 
 
 def validate_research(value):
@@ -98,7 +128,9 @@ class MissionOneCompany(VideoProviderQualityCompany):
 
     def _quality_transport_allowed(self, p):
         self.store.check_scope(p)
-        require(p['goal'] != GAME_GOAL, GAME_RESEARCH_BLOCKER)
+        if p['goal'] == GAME_GOAL:
+            require(p['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL, GAME_RESEARCH_BLOCKER)
+            self._authorize_web(p)
         account = self.store.grant(p)['body']['mission_account']
         require(hmac.compare_digest(account['credential_binding'], _binding(p['id'], self.config.api_key)),
                 'mission_key_binding_mismatch')
@@ -115,8 +147,48 @@ class MissionOneCompany(VideoProviderQualityCompany):
                     'mission_restart_forbidden')
         return super()._run(project_id, expected_state_hash=expected_state_hash, resume=False)
 
+    def _authorize_web(self, p):
+        body = self.store.grant(p)['body']
+        key = os.getenv('YOUTUBE_DATA_API_KEY', '')
+        require(hmac.compare_digest(body['mission_web']['credential_binding'], _binding(p['id']+':youtube', key)),
+                'employee_web_key_mismatch')
+        return key
+
+    def _manager_selection(self, p):
+        if p['goal'] != GAME_GOAL:
+            return None
+        research = next((t for t in p['assignments'] if t['role']=='research'
+                         and t['state']=='accepted_by_ai_manager'),None)
+        if not research:
+            return None
+        return validate_selection(parse(research['reviews'][-1]['feedback']), p.get('employee_web'))
+
+    def _script_duration(self, p):
+        decision = self._manager_selection(p)
+        return decision['duration_seconds'] if decision else 60
+
     def _tool_notice(self, p):
         notice = super()._tool_notice(p)
+        if p['goal'] == GAME_GOAL:
+            return (notice.replace('60초','목표 길이').replace('target_duration=60','target_duration=quality.manager_selection.duration_seconds')+
+                ' Research employee constructs its OWN search queries from the representative goal. No game, '
+                'ranking, topic or duration is preselected. Exactly research then writer then editor, with dependencies. '
+                'Research execute.content must be JSON {tool:"'+WEB_TOOL+'",queries:[{query,purpose,lookback_days,order}]}; '
+                '1–4 queries, purpose game_interest|shorts_examples, lookback_days integer 1–30, '
+                'order relevance|date|viewCount. System uses YouTube public API top 5 gaming results per query '
+                'in KR with Korean relevance. No arbitrary URL fetch or media download. This tool is available '
+                'only once for research; failures stop, never repeat the batch. Tool receipt will be in evidence. '
+                'Manager reviews observed metadata and evidence limits. On accepting research return feedback as '
+                'JSON {game,selected_topic,duration_seconds,duration_reason,selection_reason,other_candidates_reason,'
+                'evidence_ids,shorts_status:"unverified",rights_plan}. Choose duration from observed lengths and '
+                'story needs, not a preset. Technical validation supports 4–180 seconds, no recommended duration. '
+                'Public API does not confirm vertical aspect or Shorts classification. Its short filter includes '
+                'non-Shorts; preserve uncertainty and never equate queried views with global game popularity or '
+                'growth. Missing/private/non-gaming/outdated samples cannot support the selection. '
+                'Writer follows quality.manager_selection for topic and duration. Keep visual sources pending, '
+                'Korean full narration and captions, exact target_segment, and rights unverified. '
+                'Use evidence_ids only from the tool receipt. Finalize deliver after internal acceptance; '
+                'no production, TTS, uploading, publication or representative approval.')
         return (notice +
             ' MISSION 01: planning only. Use exactly one research task, one writer depending on research, '
             'and one editor depending on writer. Research compares 2–4 original topics and outputs JSON '
@@ -131,7 +203,13 @@ class MissionOneCompany(VideoProviderQualityCompany):
             'The application stops delivery at human review; do not claim approval or generate media.')
 
     def _call(self, p, provider, phase, task_id, context):
+        selection = self._manager_selection(p)
+        if selection:
+            context = {**context,'quality':{**context['quality'],'manager_selection':selection}}
         result = super()._call(p, provider, phase, task_id, context)
+        game = p['goal'] == GAME_GOAL
+        if game and phase=='review' and context['assignment']['role']=='research' and result['action']=='accept':
+            validate_selection(parse(result['feedback']),p.get('employee_web'))
         if phase == 'plan' and 'tasks' in result:
             roles = {task['role']:task for task in result['tasks']}
             require(len(result['tasks']) == 3 and set(roles) == set(ROLES)
@@ -140,10 +218,17 @@ class MissionOneCompany(VideoProviderQualityCompany):
             role = context['assignment']['role']
             content = parse(result['content'])
             if role == 'research':
-                validate_research(content)
+                if game:
+                    validate_queries(content)
+                    receipt = collect(self.store,p,task_id,content,self._authorize_web(p),
+                                      lambda:self._authorize_web(p),provenance=self.source)
+                    result['evidence'] += '\nEMPLOYEE_WEB_RECEIPT '+json.dumps(receipt['observations'],ensure_ascii=False)
+                    result['evidence'] += '\nreceipt_hash='+receipt['receipt_hash']
+                else:
+                    validate_research(content)
             elif role == 'writer':
                 research = next(r for r in context['previous_results'] if r['role'] == 'research')
-                chosen = validate_research(parse(research['content']))
+                chosen = selection if game else validate_research(parse(research['content']))
                 require(content['topic']['title'] == chosen['selected_topic'],
                         'mission_selected_topic_mismatch')
                 require(all(beat['source_status'] == 'pending' for beat in content['narrative_beats']),
@@ -155,7 +240,8 @@ class MissionOneCompany(VideoProviderQualityCompany):
 
 
 def checked_result(job, *, allow_fixture=False):
-    require(job['goal'] != GAME_GOAL, GAME_RESEARCH_BLOCKER)
+    if job['goal']==GAME_GOAL:
+        require(job['quality_inputs']['capabilities'].get('employee_web_research')==WEB_TOOL,GAME_RESEARCH_BLOCKER)
     attempts = job['real_ai']['attempts']
     require(job['status'] == job.get('reason_code') == 'needs_user_review' and job['final']
             and not job['artifacts'] and not job['active_operation'] and 8 <= len(attempts) <= MAX_CALLS,
@@ -173,9 +259,19 @@ def checked_result(job, *, allow_fixture=False):
             'mission_provider_evidence_incomplete')
     require(all(v['source'] == source for task in tasks.values() for v in task['versions']),
             'mission_provider_evidence_incomplete')
-    research = validate_research(parse(tasks['research']['versions'][-1]['content']))
+    duration = 60
+    if job['goal']==GAME_GOAL:
+        observations = usable_observations(job.get('employee_web'))
+        decision = validate_selection(parse(tasks['research']['reviews'][-1]['feedback']),job['employee_web'])
+        duration = decision['duration_seconds']
+        research = dict(candidates=[dict(topic=decision['selected_topic'],rationale=decision['selection_reason'])],
+            selected_topic=decision['selected_topic'],selection_reason=decision['selection_reason'],
+            uncertainty='Shorts 형식·채널 규모·증가율·사용권 미확인', manager_decision=decision,
+            observations=observations, tool_receipt_hash=job['employee_web']['receipt_hash'])
+    else:
+        research = validate_research(parse(tasks['research']['versions'][-1]['content']))
     script = parse(tasks['writer']['versions'][-1]['content'])
-    inspection = inspect_script(script, job['quality_inputs']['target_segment'], mock=False)
+    inspection = inspect_script(script, job['quality_inputs']['target_segment'], mock=False,target_duration=duration)
     require(not inspection['defects'] and script['provenance']['model'] == MODEL
             and script['topic']['title'] == research['selected_topic'], 'mission_script_not_ready')
     return research, source
@@ -190,7 +286,12 @@ def provider_view(job):
     reason = job.get('reason_code')
     if job['goal'] == GAME_GOAL:
         scope = job['quality_inputs']['capabilities'].get('editorial_scope')
-        reason = GAME_RESEARCH_BLOCKER if scope == GAME_SCOPE else 'mission_old_scope_superseded'
+        if job.get('employee_web',{}).get('status') == 'failed_or_uncertain':
+            reason = 'employee_web_failed_no_retry'
+        elif job['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL:
+            reason = reason or ('employee_web_authorization_required' if not job['real_ai']['consent'] else None)
+        else:
+            reason = GAME_RESEARCH_BLOCKER if scope == GAME_SCOPE else 'mission_old_scope_superseded'
     return dict(id=job['id'], status=job['status'], reason=reason, model=MODEL,
                 attempts=attempts, authorized=job['real_ai']['consent'].get('approved') is True,
                 assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
@@ -201,11 +302,15 @@ def main():
     from representative_workflow import RepresentativeVideoWorkflow
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
-    parser.add_argument('action', choices=('prepare', 'approve', 'run'))
+    parser.add_argument('action', choices=('connect-web','prepare', 'approve', 'run'))
     parser.add_argument('project')
     parser.add_argument('--account-project')
     parser.add_argument('--remaining-requests', type=int)
     parser.add_argument('--quota-note')
+    parser.add_argument('--youtube-project')
+    parser.add_argument('--youtube-searches-remaining',type=int)
+    parser.add_argument('--youtube-units-remaining',type=int)
+    parser.add_argument('--confirm-youtube-policy',action='store_true')
     parser.add_argument('--proposal', type=Path)
     parser.add_argument('--review-hash')
     parser.add_argument('--confirm-free-account', action='store_true')
@@ -214,6 +319,9 @@ def main():
     workflow = RepresentativeVideoWorkflow(Store(args.root))
     store = MissionOneStore(workflow.store.root/'mission_one_provider')
     try:
+        if args.action=='connect-web':
+            print(workflow.connect_employee_web(args.project))
+            return
         p = workflow.store.load(args.project)
         pid = p['representative'].get('mission_one_job')
         require(pid is not None, 'mission_stage_in_studio_first')
@@ -222,7 +330,10 @@ def main():
         if args.action == 'prepare':
             require(args.confirm_free_account, 'mission_free_account_unverified')
             body = store.prepare_mission(pid, key=config.api_key, account_project=args.account_project,
-                                         remaining_requests=args.remaining_requests, quota_note=args.quota_note)
+                                         remaining_requests=args.remaining_requests, quota_note=args.quota_note,
+                youtube_key=os.getenv('YOUTUBE_DATA_API_KEY',''),youtube_project=args.youtube_project,
+                search_remaining=args.youtube_searches_remaining,units_remaining=args.youtube_units_remaining,
+                confirm_youtube_policy=args.confirm_youtube_policy)
             print(json.dumps(dict(review_hash=digest(body), proposal=body, goal=p['goal'],
                 input=store.load(pid)['quality_inputs']), ensure_ascii=False, indent=2))
         elif args.action == 'approve':

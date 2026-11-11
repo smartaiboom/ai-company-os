@@ -112,6 +112,28 @@ class RepresentativeVideoWorkflow:
             self._transition(p, 'research_planning')
             return job['id']
 
+    def connect_employee_web(self, project_id):
+        from employee_web_research import TOOL
+        from video_mission_one import GAME_GOAL, MAX_CALLS, MissionOneStore
+        with self.store.lock(project_id):
+            p = self.store.load(project_id)
+            flow = p['representative']
+            require(p['goal']==GAME_GOAL and flow['stage']=='research_planning' and not flow['plan_versions'],
+                    'representative_stage_mismatch')
+            store = MissionOneStore(self.store.root/'mission_one_provider')
+            previous = store.load(flow['mission_one_job'])
+            require(not previous['real_ai']['attempts'] and not previous['real_ai']['consent'],
+                    'mission_scope_already_used')
+            if previous['quality_inputs']['capabilities'].get('employee_web_research')==TOOL:
+                return previous['id']
+            inputs = deepcopy(previous['quality_inputs'])
+            inputs['capabilities']['employee_web_research'] = TOOL
+            job = store.create(p['goal'],inputs=inputs,max_calls=MAX_CALLS,max_total_revisions=1)
+            flow.setdefault('mission_one_job_history',[]).append(previous['id'])
+            flow['mission_one_job'] = job['id']
+            self._transition(p,'research_planning')
+            return job['id']
+
     def report_plan(self, project_id, *, summary=None, sources=None, risks=None, changes=None,
                     render_spec=None, provider_store=None, allow_fixture=False):
         with self.store.lock(project_id):
@@ -133,6 +155,10 @@ class RepresentativeVideoWorkflow:
                     return deepcopy(flow['plan_versions'][-1])
                 summary = job['final']['content']
                 sources = []
+                for observation in research.get('observations',[]):
+                    sources.append(dict(url=observation['url'],observed_at=observation['observed_at'],
+                        claim=f"{observation['title']} · {observation['duration_seconds']}초 · 조회수 {observation['view_count']} · 게시 {observation['published_at']}",
+                        rights='메타데이터 확인. Shorts 형식·영상 사용권 미확인.'))
                 risks = research['uncertainty'] + ' · 한국 게임 쇼츠 성과 및 시각 소스 권리 미검증.'
                 changes = '내부 검토 후 대표에게 제출한 첫 기획안.'
                 mission_details = dict(research=research, provider_run=provider_view(job),

@@ -34,7 +34,7 @@ const statuses = {
   completed:['완료','QA','최종 영상 보기',5,'check','green'],
 };
 const metrics = [
-  ['review','대표 승인 대기','shield','amber',p=>p.stage.startsWith('awaiting_')],
+  ['review','대표 승인 대기','shield','amber',p=>p.stage.startsWith('awaiting_')||p.budget_pending>0],
   ['production','진행 중 제작','film','',p=>p.stage==='production'],
   ['revision','수정 요청','revision','rose',p=>p.stage.endsWith('_revision')],
   ['completed','완료','check','green',p=>p.stage==='completed'],
@@ -92,7 +92,7 @@ function card(p) {
     <div class="thumbnail"><span class="placeholder">${icon('film')}영상 미리보기 없음</span>
     ${p.thumbnail ? `<img src="${h(p.thumbnail)}" alt="저장된 영상 키프레임">` : ''}</div>
     <div class="card-body"><div class="inline">${stateBadge(p.stage)}
-      ${p.readonly ? badge('검증 사례','shield') : ''}</div><h3>${h(p.goal)}</h3>
+      ${p.readonly ? badge('검증 사례','shield') : ''}${p.budget_pending ? badge('대표 예산 검토 대기','shield','amber') : ''}</div><h3>${h(p.goal)}</h3>
       <p class="muted">${icon('user')} ${h(s[1])} · ${h(time(p.updated_at))}</p>
       <div class="card-footer"><span>기획 ${p.plans} · 영상 ${p.videos}</span><span class="next">${h(s[2])} ${icon('arrow')}</span></div>
     </div></a>`;
@@ -215,6 +215,23 @@ function operations(p) {
   if (['production','video_revision'].includes(p.stage)) return `${failed}<button class="button secondary" data-action="produce">${icon('film')} 로컬 기술 시안 제작</button><p class="muted">승인된 대본으로 로컬 렌더러를 실행합니다. 외부 API 비용은 발생하지 않습니다.</p>`;
   return '<p class="muted">기획·대본이나 영상 보고서를 확인해 주세요.</p>';
 }
+function budgetPanel(p) {
+  const b=p.budget;
+  if (!b) return '';
+  return `<section class="panel" id="budget-panel"><h2>AI 사용 예산</h2>
+    <p class="muted">무료 서비스 · 예산 승인과 외부 전송 동의는 별개입니다. 승인 후 실행은 아래 버튼으로 시작합니다.</p>
+    ${facts(Object.entries(b.resources).map(([key,v])=>[key,`승인 ${v.approved} · 소모 ${v.consumed} · 잔여 ${v.remaining} · 불명 ${v.unresolved} (${v.unit})`]))}
+    <p>${h(b.scope.purpose)}</p><p>${h(b.scope.data_policy)}</p>
+    ${facts([['프로젝트',p.id],['모델/계정',Object.values(b.scope.services).map(v=>v.model+' / '+v.account_project).join(', ')],['동의 만료',time(b.scope.consent_expires_at)],['실제 비용','미확인']])}
+    ${b.requests.map(r=>`<article class="subpanel"><h3>${r.status==='pending'?'대표 예산 검토 대기':h(r.status)}</h3>
+      <p>추가 수량: ${h(JSON.stringify(r.amounts))}</p><p>${h(r.reason)}</p><p>완료한 일: ${h(r.progress)}</p>
+      <p>${h(r.cost_impact)} · ${h(r.failure_risk)}</p><p class="mono">작업계획 ${h(r.plan_hash)}</p>
+      <details><summary>검토 해시·만료</summary><p class="mono">${h(r.review_hash)}</p><p>${h(time(r.expires_at))}</p></details>
+      ${r.status==='pending'&&!p.readonly?`<button class="button" data-budget-decision="approve" data-request="${h(r.id)}">예산 승인</button>
+      <button class="button ghost" data-budget-decision="reject" data-request="${h(r.id)}">예산 거절</button>`:''}</article>`).join('')}
+    ${!p.readonly?'<button class="button secondary" data-action="budget-run">승인된 예산으로 작업 시작·계속</button>':''}
+    <p class="muted">${h(b.provider_status)} · ${h(b.reason||'')}</p></section>`;
+}
 function projectPage(p, chosen={}) {
   const f=p.flow;
   const plan=f.plan_versions.find(item=>item.version===chosen.plan) || f.plan_versions.at(-1);
@@ -228,7 +245,7 @@ function projectPage(p, chosen={}) {
       badge(p.mission?.attempts.length?'모델 작업 결과 확인 중':'실제 모델 미실행','alert','amber')}</div>
   <h1>${h(p.goal)}</h1><p class="muted">${h(s[1])} · ${h(time(p.updated_at))}</p></section>
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
-  <div class="detail-grid"><div class="stack">${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
+  <div class="detail-grid"><div class="stack">${budgetPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
   <aside class="stack"><section class="panel"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['다음 행동',s[2]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
   ${operations(p)}${missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
@@ -340,6 +357,17 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.budgetDecision || button.dataset.action==='budget-run') {
+    button.disabled=true;
+    try {
+      if (button.dataset.budgetDecision) {
+        const request=detail.budget.requests.find(r=>r.id===button.dataset.request);
+        await api(detailApi(detail)+'/budget-decide',{request_id:request.id,review_hash:request.review_hash,action:button.dataset.budgetDecision});
+      } else await api(detailApi(detail)+'/budget-run',{});
+      await route();
+      notice('예산·실행 상태를 확인했습니다.');
+    } catch(error) { notice(error.message,true); button.disabled=false; }
+  }
   else if (button.dataset.review) review(...button.dataset.review.split(':'));
   else if (button.dataset.action==='produce') produce();
   else if (button.dataset.action==='refresh') await route();

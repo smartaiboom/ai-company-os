@@ -18,6 +18,11 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 ERRORS = {
+    'budget_approval_required': 'AI 사용 예산이 부족합니다. 예산 요청을 검토해 주세요.',
+    'budget_continue_forbidden': '실패·미확정 작업은 자동 재개할 수 없습니다.',
+    'budget_review_changed': '검토한 예산 요청이 변경됐습니다. 새로고침 후 확인해 주세요.',
+    'budget_or_consent_expired': '예산 요청 또는 외부 전송 동의가 만료됐습니다.',
+    'budget_decision_replay': '이미 처리했거나 유효하지 않은 예산 요청입니다.',
     'representative_stage_mismatch': '현재 단계에서는 실행할 수 없습니다. 최신 상태를 확인해 주세요.',
     'stale_representative_report': '검토한 버전이 최신 보고서와 다릅니다. 새로고침 후 확인해 주세요.',
     'representative_artifact_changed': '파일 또는 검증 기록의 해시가 달라 작업이 차단됐습니다.',
@@ -62,6 +67,7 @@ class Studio:
         self.workflow = RepresentativeVideoWorkflow(self.stores['workspace'])
         self.token = secrets.token_urlsafe(32)
         self.creation_lock = threading.Lock()
+        self.budget_company_factory = None
 
     def projects(self, key):
         store = self.stores[key]
@@ -84,6 +90,7 @@ class Studio:
         return dict(id=p['id'], store=key, goal=p['goal'], updated_at=p['updated_at'], stage=flow['stage'],
                     readonly=key != 'workspace', simulation=p['simulation'], audience=flow['audience'],
                     thumbnail=f'{prefix}/{video["version"]}/thumbnail' if video else None,
+                    budget_pending=sum(r['status']=='pending' for r in self.budget_ledger().view(flow['budget_job'])['requests']) if key=='workspace' and flow.get('budget_job') else 0,
                     plans=len(flow['plan_versions']), videos=len(flow['video_versions']),
                     render_status=flow['render_attempts'][-1]['status'] if flow['render_attempts'] else None)
 
@@ -115,10 +122,55 @@ class Studio:
             from video_mission_one import MissionOneStore, provider_view
             provider_store = MissionOneStore(store.root/'mission_one_provider')
             mission = provider_view(provider_store.load(flow['mission_one_job']))
-        return {**self.card(key, p), 'flow': flow, 'mission': mission,
+        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p),
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
                                            for t in j['assignments']]) for j in jobs]}
+
+    def budget_store(self):
+        from budget_video_provider import BudgetVideoStore
+        return BudgetVideoStore(self.stores['workspace'].root/'budget_provider')
+
+    def budget_ledger(self):
+        from project_budget_ledger import ProjectBudgetLedger
+        return ProjectBudgetLedger(self.stores['workspace'].root/'project_budgets')
+
+    def enable_budget(self, pid, provider_job):
+        """Trusted explicit provisioning after separate provider approval, new projects only."""
+        store = self.stores['workspace']
+        with store.lock(pid):
+            p = self.project('workspace',pid)
+            flow = p['representative']
+            require(flow['stage']=='goal_submitted' and not flow.get('mission_one_job')
+                    and not flow['planning_jobs'] and not flow['plan_versions'] and not flow.get('budget_job'),
+                    'budget_new_project_only')
+            provider = self.budget_store()
+            job = provider.load(provider_job)
+            require(job['goal']==p['goal'] and job['quality_inputs']['answers']['representative_project']==pid
+                    and job['status']=='ready' and not job['real_ai']['attempts'], 'budget_project_mismatch')
+            self.budget_ledger().create(provider_job,scope=provider.budget_scope(job))
+            flow['budget_job']=provider_job
+            self.workflow._transition(p,'research_planning')
+
+    def propose_budget(self, pid, amounts, **estimate):
+        """Internal manager estimate input, never a public representative approval endpoint."""
+        p = self.project('workspace',pid)
+        require(bool(p['representative'].get('budget_job')), 'budget_not_enabled')
+        return self.budget_ledger().request(p['representative']['budget_job'],amounts,**estimate)
+
+    def budget_detail(self, key, p):
+        job_id = p['representative'].get('budget_job')
+        if not job_id or key!='workspace':
+            return None
+        provider = self.budget_store()
+        job = provider.load(job_id)
+        ledger = self.budget_ledger()
+        from project_budget import digest
+        result = ledger.view(job_id)
+        result.update(scope=ledger._load(job_id)['scope'], provider_status=job['status'], reason=job.get('reason_code'))
+        for request in result['requests']:
+            request['review_hash']=digest(request)
+        return result
 
     def create(self, body):
         exact(body, ('goal', 'audience', 'language', 'platform', 'duration', 'notes', 'key'))
@@ -144,7 +196,24 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
-        if name == 'planning':
+        if name in ('budget-decide','budget-run'):
+            job_id = self.project(key,pid)['representative'].get('budget_job')
+            require(bool(job_id), 'budget_not_enabled')
+            if name=='budget-decide':
+                exact(body,('request_id','review_hash','action'))
+                self.budget_ledger().decide(job_id,**body,owner_confirmed=True)
+            else:
+                exact(body,())
+                from budget_video_provider import BudgetVideoCompany
+                from autonomous_live import LiveManagerProvider, LiveEmployeeProvider
+                from autonomous_gemini35 import Gemini35Config
+                provider = self.budget_store()
+                company = (self.budget_company_factory(provider) if self.budget_company_factory else
+                    BudgetVideoCompany(provider,LiveManagerProvider('budget-manager'),LiveEmployeeProvider('budget-staff'),Gemini35Config.from_env()))
+                job = provider.load(job_id)
+                company.run(job_id,expected_state_hash=job['storage_hash'],
+                            resume=job['status']=='stopped' and job.get('reason_code')=='budget_approval_required')
+        elif name == 'planning':
             exact(body, ())
             self.workflow.start_planning(pid)
         elif name == 'mission':
@@ -266,7 +335,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

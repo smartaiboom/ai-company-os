@@ -226,6 +226,23 @@ class MissionOneTests(unittest.TestCase):
         self.review_error = 'outer_json'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_unspecified_audience_does_not_allow_selected_topic_tampering(self):
+        self.audience_case = 'inferred'
+        self.script_topic_tamper = True
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_unspecified_audience_inference_reaches_representative_handoff(self):
+        self.audience_case = 'inferred'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_concrete_audience_mismatch_stops_without_retry(self):
+        self.audience_case = 'concrete_mismatch'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_unspecified_audience_missing_inference_stops_without_retry(self):
+        self.audience_case = 'missing_inference'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
     def test_review_failure_successor_enforces_cumulative_ten_call_cap(self):
         self.exhaust_resume_budget = True
         self.test_review_failure_successor_reuses_validated_work_with_six_calls()
@@ -250,7 +267,8 @@ class MissionOneTests(unittest.TestCase):
         from urllib.parse import parse_qs, urlsplit
         from employee_web_research import TOOL
         from video_mission_one import _binding
-        project = self.studio.create(dict(goal=GAME_GOAL,audience=AUDIENCE,language='한국어',
+        fixture_audience = '' if getattr(self,'audience_case',None) in ('inferred','missing_inference') else AUDIENCE
+        project = self.studio.create(dict(goal=GAME_GOAL,audience=fixture_audience,language='한국어',
             platform='YouTube Shorts',duration=None,notes='',key='00000000-0000-4000-8000-000000000044'))['id']
         previous = self.studio.workflow.stage_mission_one(project)
         self.job = self.studio.workflow.connect_employee_web(project)
@@ -334,6 +352,10 @@ class MissionOneTests(unittest.TestCase):
                 shot_type=shot,source_ref='미확보',source_status='pending',fact_status='illustrative')
         script=script_from_beats([beat(0,3,'왜 달라졌을까요?','card'),beat(3,34,'두 화면을 비교해 보세요.','demo')])
         script.update(target_duration=34)
+        if getattr(self,'audience_case',None):
+            script['target_audience']='합성 예시 게임의 짧은 시연을 보고 싶은 시청자'
+            if self.audience_case == 'inferred':
+                script['unknowns'].append('AI 추론(사용자 미확정):' + script['target_audience'] + ' 근거: 합성 게임 주제와 관측된 시연 형식')
         script['topic']['title']='가상 게임의 두 장면'
         script['provenance']=dict(author='fixture',model=MODEL,mock=False)
         revised = deepcopy(script)
@@ -360,6 +382,10 @@ class MissionOneTests(unittest.TestCase):
             elif phase=='execute':
                 self.assertEqual(context['quality']['manager_selection'],decision)
                 result=json.loads(employee(phase,context))
+                if role=='writer' and getattr(self,'script_topic_tamper',False):
+                    content=json.loads(result['content'])
+                    content['topic']['title']='관리자가 선정하지 않은 합성 주제'
+                    result['content']=json.dumps(content,ensure_ascii=False)
             else:
                 result=json.loads(manager(phase,context))
                 if phase=='plan':
@@ -433,6 +459,24 @@ class MissionOneTests(unittest.TestCase):
             result=self.run_job()
         else:
             result=self.run_job()
+        if getattr(self,'script_topic_tamper',False):
+            self.assertEqual(result['reason_code'],'mission_selected_topic_mismatch')
+            self.assertEqual(self.http.call_count,4)
+            with self.assertRaises(CompanyError):
+                self.run_job()
+            self.assertEqual(self.http.call_count,4)
+            return
+        if getattr(self,'audience_case',None) in ('concrete_mismatch','missing_inference'):
+            expected = 'script_audience_mismatch' if self.audience_case=='concrete_mismatch' else 'script_audience_inference_required'
+            self.assertEqual(result['reason_code'],expected)
+            diag=result['real_ai']['attempts'][-1]['script_validation_diagnostics']
+            self.assertEqual(diag['field'],'target_audience')
+            self.assertEqual(diag['audience_unspecified'],self.audience_case=='missing_inference')
+            self.assertEqual(self.http.call_count,4)
+            with self.assertRaises(CompanyError):
+                self.run_job()
+            self.assertEqual(self.http.call_count,4)
+            return
         if getattr(self, 'review_error', None):
             error = self.review_error
             expected = ('mission_research_review_json_invalid' if error == 'outer_json' else
@@ -467,6 +511,11 @@ class MissionOneTests(unittest.TestCase):
         if getattr(self,'successor_fixture',False):
             self.assertEqual(report['research']['reuse']['source_job'],second)
             self.assertFalse(report['research']['reuse']['newly_observed'])
+        if getattr(self,'audience_case',None)=='inferred':
+            self.assertEqual(self.store.load(self.job)['quality_inputs']['target_segment'],'미정')
+            self.assertEqual(report['script']['target_audience'],script['target_audience'])
+            self.assertIn('AI 추론(사용자 미확정):',report['script']['unknowns'][-1])
+            self.assertEqual(report['provenance'],'offline_http_fixture')
         self.assertEqual(report['script']['target_duration'],34)
         self.assertEqual(report['research']['observations'][0]['shorts_classification'],'unverified')
         self.assertEqual(report['sources'][0]['url'],'https://www.youtube.com/watch?v='+vid)

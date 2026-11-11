@@ -11,6 +11,15 @@ CRITERIA = {
     'density': '중복과 군더더기', 'demo': '구체 사례와 실제 시연 가능성',
     'facts': '사실·시점 근거', 'duration': '60초 분량과 자막', 'editability': '편집 현실성',
 }
+AUDIENCE_INFERENCE_PREFIX = 'AI 추론(사용자 미확정):'
+AUDIENCE_INSTRUCTIONS = (
+    ' A concrete user target_segment requires exactly matching target_audience. '
+    'target_segment=미정 means the user did not specify an audience, never a literal audience name. '
+    'In that case propose a concrete target_audience from the goal, selected topic and available evidence. '
+    'Add an unknowns entry starting with "AI 추론(사용자 미확정):", containing the exact proposed '
+    'target_audience and "근거:" followed by a nonempty explanation. Do not claim user confirmation. '
+    'Keep the original input target_segment unchanged; appeal and retention remain unassessed.'
+)
 WRITER_FIELDS = (
     'contract', 'target_audience', 'topic', 'viewer_problem', 'promise', 'viewing_reason',
     'hook_0_3s', 'payoff', 'narrative_beats', 'close', 'transcript', 'target_duration',
@@ -34,6 +43,7 @@ SCRIPT_INSTRUCTIONS = (
     'task_id,revision,result_hash; each shot includes start,end,narration,caption,screen,shot_type,source_ref,source_status. '
     'Review criteria: ' + ', '.join(CRITERIA.values()) + '. Cite actual passages and give severity, owner, and a concrete edit. '
     'On revision read previous version and revision_feedback. Keep audience appeal and retention unassessed without evidence.'
+    + AUDIENCE_INSTRUCTIONS
 )
 
 
@@ -49,7 +59,8 @@ def inspect_script(value, audience, *, mock, target_duration=60):
     for field in ('target_audience', 'viewer_problem', 'promise', 'viewing_reason', 'hook_0_3s',
                   'payoff', 'close', 'transcript', 'estimation_method'):
         _nonempty(value[field])
-    require(value['target_audience'] == audience, 'script_audience_mismatch')
+    if audience != '미정':
+        require(value['target_audience'] == audience, 'script_audience_mismatch')
     exact(value['topic'], ('title', 'freshness'))
     _nonempty(value['topic']['title'])
     require(value['topic']['freshness'] in ('evergreen', 'current'), 'invalid_topic_freshness')
@@ -63,6 +74,12 @@ def inspect_script(value, audience, *, mock, target_duration=60):
     require(isinstance(value['unknowns'], list), 'invalid_script_unknowns')
     for unknown in value['unknowns']:
         _nonempty(unknown)
+
+    if audience == '미정':
+        require(value['target_audience'].strip() != '미정' and any(
+            unknown.startswith(AUDIENCE_INFERENCE_PREFIX) and value['target_audience'] in unknown
+            and '근거:' in unknown and bool(unknown.split('근거:', 1)[1].strip())
+            for unknown in value['unknowns']), 'script_audience_inference_required')
 
     beats = value['narrative_beats']
     require(isinstance(beats, list) and 2 <= len(beats) <= 20, 'invalid_script_beats')

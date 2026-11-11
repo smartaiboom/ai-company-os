@@ -108,6 +108,34 @@ class ScriptQualityTests(unittest.TestCase):
                                           beat(3, 30, '시간과 장소를 요청에 적어요.', 'demo'),
                                           beat(30, 60, '보내기 전에 한 번 더 확인해요.', 'detail')])
 
+    def test_unspecified_audience_requires_explicit_inference_and_basis(self):
+        from autonomous_company import CompanyError
+        from script_quality import AUDIENCE_INFERENCE_PREFIX
+        script = deepcopy(self.revision)
+        with self.assertRaisesRegex(CompanyError,'script_audience_inference_required'):
+            inspect_script(script,'미정',mock=True)
+        script['unknowns'].append(AUDIENCE_INFERENCE_PREFIX + script['target_audience'] + ' 근거: 합성 예제의 주제와 시연 난이도')
+        self.assertEqual(inspect_script(script,'미정',mock=True)['defects'],[])
+        self.assertTrue(script['provenance']['mock'])
+        with self.assertRaisesRegex(CompanyError,'script_audience_mismatch'):
+            inspect_script(script,'사용자 확정 타깃',mock=True)
+        script['target_audience']='미정'
+        with self.assertRaisesRegex(CompanyError,'script_audience_inference_required'):
+            inspect_script(script,'미정',mock=True)
+
+    def test_unspecified_audience_does_not_relax_other_script_fields(self):
+        from autonomous_company import CompanyError
+        from script_quality import AUDIENCE_INFERENCE_PREFIX
+        script = deepcopy(self.revision)
+        script['unknowns'].append(AUDIENCE_INFERENCE_PREFIX + script['target_audience'] + ' 근거: 합성 주제')
+        for field, value, code in [('target_duration',25,'invalid_script_contract'),
+                                    ('transcript','다른 본문','script_transcript_mismatch'),
+                                    ('provenance',dict(author='fixture',model=None,mock=False),'script_provenance_mismatch')]:
+            with self.subTest(field=field):
+                bad=deepcopy(script);bad[field]=value
+                with self.assertRaisesRegex(CompanyError,code):
+                    inspect_script(bad,'미정',mock=True)
+
     def test_revision_and_editor_receive_only_accepted_version(self):
         result = run_script_case(self.store, self.project, self.draft, self.revision)
         self.assertEqual(result['reason_code'], 'manager_final_stopped')

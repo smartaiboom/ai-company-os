@@ -15,7 +15,7 @@ from employee_web_research import (TOOL as WEB_TOOL, POLICY as WEB_POLICY, colle
 from role_json_schema import response_format, matches, obj, arr, S
 from quality_provider import QualityProviderStore
 from quality_workflow import VideoProviderQualityCompany
-from script_quality import SCRIPT_CONTRACT, inspect_script
+from script_quality import SCRIPT_CONTRACT, inspect_script, AUDIENCE_INSTRUCTIONS
 
 SCOPE = 'representative_video_mission_01'
 GAME_GOAL = '요즘 인기있는 게임에 대한 흥미있는 쇼츠 영상을 만들어봐. 기본적으로 인기있는 쇼츠는 몇초인지도 확인해보고.'
@@ -344,7 +344,7 @@ class MissionOneCompany(VideoProviderQualityCompany):
         return decision['duration_seconds'] if decision else 60
 
     def _tool_notice(self, p):
-        notice = super()._tool_notice(p)
+        notice = super()._tool_notice(p) + AUDIENCE_INSTRUCTIONS
         if p.get('mission_successor'):
             notice += (' The validated prior manager plan and employee research are reused with original timestamps '
                        'and receipt evidence. Research is pending your NEW structured review, not approved. '
@@ -367,7 +367,7 @@ class MissionOneCompany(VideoProviderQualityCompany):
                 'non-Shorts; preserve uncertainty and never equate queried views with global game popularity or '
                 'growth. Missing/private/non-gaming/outdated samples cannot support the selection. '
                 'Writer follows quality.manager_selection for topic and duration. Keep visual sources pending, '
-                'Korean full narration and captions, exact target_segment, and rights unverified. '
+                'Korean full narration and captions; apply the specified versus unspecified audience policy; rights unverified. '
                 'Use evidence_ids only from the tool receipt. Finalize deliver after internal acceptance; '
                 'no production, TTS, uploading, publication or representative approval.')
         return (notice +
@@ -377,7 +377,7 @@ class MissionOneCompany(VideoProviderQualityCompany):
             'No search or supplied verified sources exist for this run. Do not cite invented URLs, dates, rankings, '
             'rights, or real match results. No prior topic was approved. Frame examples as fictional or evergreen, '
             'use illustrative facts or verification_pending, and leave every visual source pending. '
-            'Use the exact target_segment in the script; if 미정, describe the audience inference in planning. '
+            'Apply the specified versus unspecified audience policy in the script. '
             'Write the full Korean script. The writer topic.title must match the selected research topic verbatim. '
             'The editor output is a storyboard handoff, never a tool or video request. '
             'After all three tasks are accepted, use finalize action=deliver for a text-only representative handoff. '
@@ -388,6 +388,18 @@ class MissionOneCompany(VideoProviderQualityCompany):
             and context['assignment']['role'] == 'research' else None)
         try:
             return self._mission_call(p, provider, phase, task_id, context)
+        except CompanyError as exc:
+            if (phase=='execute' and context['assignment']['role']=='writer'
+                    and exc.code in ('script_audience_mismatch','script_audience_inference_required')
+                    and p['real_ai']['attempts']):
+                entry = p['real_ai']['attempts'][-1]
+                entry['script_validation_diagnostics'] = dict(stage='writer_script_validation',
+                    category=exc.code, field='target_audience',
+                    audience_unspecified=p['quality_inputs']['target_segment']=='미정',
+                    response_bytes=entry.get('response_diagnostics',{}).get('response_bytes'),
+                    response_hash=entry.get('response_hash'))
+                self.store.save(p)
+            raise
         finally:
             self._research_review_state = None
 

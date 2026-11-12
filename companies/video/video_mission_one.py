@@ -1059,7 +1059,9 @@ def main():
     parser.add_argument('--confirm-free-data-policy', action='store_true')
     args = parser.parse_args()
     workflow = RepresentativeVideoWorkflow(Store(args.root))
-    store = MissionOneStore(workflow.store.root/'mission_one_provider')
+    # -m loads this file as __main__; report_plan requires the canonical store class.
+    from video_mission_one import MissionOneStore as CanonicalMissionOneStore
+    store = CanonicalMissionOneStore(workflow.store.root/'mission_one_provider')
     try:
         if args.action=='create-validated-successor':
             print(workflow.stage_mission_validated_successor(args.project,owner_confirmed=args.confirm_new_execution,new_purpose=args.new_purpose))

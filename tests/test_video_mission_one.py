@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_cli_local_handoff_uses_canonical_store_and_preserves_guards(self):
+        self.local_handoff_fixture=True
+        self.test_caption_revision_new_signed_budget_and_cutroom()
+
     def test_caption_revision_new_signed_budget_and_cutroom(self):
         self.caption_revision_fixture=True
         self.test_partial_writer_revision_continuation_preserves_feedback_and_hands_off()
@@ -1508,6 +1512,31 @@ class MissionOneTests(unittest.TestCase):
             result=self.run_job()
         self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
         self.assertEqual(self.http.call_count,4)
+        if getattr(self,'local_handoff_fixture',False):
+            import runpy
+            from representative_workflow import RepresentativeVideoWorkflow
+            from video_mission_one import checked_result
+            module=runpy.run_module('video_mission_one',run_name='mission_cli_fixture')
+            foreign=module['MissionOneStore'](self.store.root)
+            self.assertIsNot(type(foreign),MissionOneStore)
+            with self.assertRaisesRegex(CompanyError,'mission_scope_mismatch'):
+                self.studio.workflow.report_plan(project,provider_store=foreign,allow_fixture=True)
+            original=RepresentativeVideoWorkflow.report_plan
+            def offline_report(workflow,pid,**kwargs):
+                self.assertIs(type(kwargs['provider_store']),MissionOneStore)
+                return original(workflow,pid,allow_fixture=True,**kwargs)
+            grant_path=self.store._grant_path(self.job);saved=grant_path.read_bytes()
+            bad=json.loads(saved);bad['signature']='0'*64;grant_path.write_text(json.dumps(bad))
+            with self.assertRaises(CompanyError):
+                self.studio.workflow.report_plan(project,provider_store=self.store,allow_fixture=True)
+            grant_path.write_bytes(saved)
+            bad=deepcopy(result);bad['assignments'][1]['state']='awaiting_ai_review'
+            with self.assertRaises(CompanyError):checked_result(bad,allow_fixture=True)
+            bad=deepcopy(result);bad['quality_inputs']['answers']['representative_project']='other-mission'
+            with self.assertRaises(CompanyError):self.store.check_scope(bad)
+            with patch('sys.argv',['video_mission_one','--root',str(self.store.root.parent),'run',project]),                  patch.object(RepresentativeVideoWorkflow,'report_plan',offline_report),                  patch.object(module['MissionOneCompany'],'run',side_effect=AssertionError('production rerun forbidden')):
+                module['main']()
+            self.assertEqual(len(self.studio.workflow.store.load(project)['representative']['plan_versions']),1)
         report=self.studio.workflow.report_plan(project,provider_store=self.store,allow_fixture=True)
         self.assertEqual(self.studio.detail('workspace',project)['stage'],'awaiting_plan_approval')
         self.assertEqual(report['script']['target_duration'],25)

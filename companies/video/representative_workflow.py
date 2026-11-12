@@ -346,6 +346,7 @@ class RepresentativeVideoWorkflow:
                         and flow.get('mission_one_job'), 'mission_scope_mismatch')
                 job = provider_store.result(flow['mission_one_job'])
                 provider_store.check_scope(job)
+                provider_store.grant(job)  # Verify this accepted job's signed scope before local handoff.
                 require(job['goal'] == p['goal'] and job['quality_inputs']['answers']['representative_project'] == project_id,
                         'mission_scope_mismatch')
                 require(render_spec is None, 'mission_media_out_of_scope')

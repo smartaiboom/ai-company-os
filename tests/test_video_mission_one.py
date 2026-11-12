@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_partial_writer_revision_continuation_preserves_feedback_and_hands_off(self):
+        self.partial_revision_fixture=True
+        self.test_dns_permission_successor_preserves_nine_failures_and_hands_off()
+
     def test_dns_permission_successor_preserves_nine_failures_and_hands_off(self):
         self.dns_permission_fixture=True
         self.test_native_audience_v2_preserves_history_and_allows_only_changed_contract()
@@ -1372,6 +1376,64 @@ class MissionOneTests(unittest.TestCase):
                 bad=deepcopy(body);mutate(bad)
                 with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
             self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+        if getattr(self,'partial_revision_fixture',False):
+            from video_mission_one import PARTIAL_REVISION_PURPOSE
+            def partial_send(request,timeout):
+                current=self.store.load(self.job);attempt=current['real_ai']['attempts'][-1]
+                if len(current['real_ai']['attempts'])==3:
+                    raise HTTPError(ENDPOINT,503,'synthetic unavailable',{},None)
+                response=send(request,timeout)
+                if attempt['phase']=='review':
+                    envelope=json.loads(response.getvalue())
+                    value=json.loads(envelope['candidates'][0]['content']['parts'][0]['text'])
+                    value['result'].update(action='revise',feedback='missing_demo/caption_width/dense_narration: compress preserved draft')
+                    envelope['candidates'][0]['content']['parts'][0]['text']=json.dumps(value,ensure_ascii=False)
+                    return FixtureResponse(json.dumps(envelope).encode())
+                return response
+            self.http.reset_mock(side_effect=False);self.http.side_effect=partial_send
+            partial=self.run_job()
+            self.assertEqual(partial['status'],'paused');self.assertEqual(partial['reason_code'],'provider_unavailable')
+            self.assertEqual(self.http.call_count,3)
+            old_id=self.job
+            before.update({p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and old_id in p.name})
+            ref=self.store.unified_successor_reference(partial,new_purpose=PARTIAL_REVISION_PURPOSE)
+            self.assertEqual(ref['consumed_calls'],15)
+            self.assertEqual(ref['writer_v1_hash'],digest(partial['assignments'][1]['versions'][0]))
+            for mutate in (lambda j:j['assignments'][1]['reviews'][0].update(feedback='tampered'),
+                           lambda j:j['real_ai']['attempts'][-1].update(http_status=429)):
+                bad=deepcopy(partial);mutate(bad)
+                with self.assertRaises(CompanyError):self.store.unified_successor_reference(bad,new_purpose=PARTIAL_REVISION_PURPOSE)
+            self.job=self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True,new_purpose=PARTIAL_REVISION_PURPOSE)
+            self.assertEqual(self.store.load(self.job)['assignments'],partial['assignments'])
+            with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True,new_purpose=PARTIAL_REVISION_PURPOSE)
+            body=self.store.prepare_mission(self.job,key=self.key,account_project=MISSION_ACCOUNT,quota_note='synthetic partial continuation',
+                youtube_key=youtube_key,youtube_project=MISSION_ACCOUNT,confirm_youtube_policy=True)
+            old_body=json.loads(self.store._grant_path(old_id).read_text())['record']['body']
+            with self.assertRaises(CompanyError):self.store.approve(self.job,old_body,review_hash=digest(old_body),owner_confirmed=True)
+            for mutate in (lambda b:b.update(model='other'),lambda b:b['mission_account'].update(account_project='other'),
+                           lambda b:b['mission_unified_successor'].update(writer_v1_hash='0'*64)):
+                bad=deepcopy(body);mutate(bad)
+                with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+            self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+            with patch.dict('os.environ',GEMINI_API_KEY='different-key'):
+                # Config is bound at construction; test the actual transport binding.
+                with patch.object(self.company,'config',Gemini35Config('different-key')):
+                    with self.assertRaises(CompanyError):self.run_job()
+            original_send=send
+            def send(request,timeout):
+                message=json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
+                if not self.store.load(self.job)['assignments'][1]['versions'][1:]:
+                    context=message['data']
+                    self.assertEqual(context['revision_feedback'],partial['assignments'][1]['reviews'][0]['feedback'])
+                    self.assertEqual(context['version_history'],partial['assignments'][1]['versions'])
+                response=original_send(request,timeout)
+                if message['phase']=='execute' and message['data']['assignment']['role']=='writer':
+                    envelope=json.loads(response.getvalue())
+                    value=json.loads(envelope['candidates'][0]['content']['parts'][0]['text'])
+                    value['result']['content']['narrative_beats'][0]['caption']='수정 예시'
+                    envelope['candidates'][0]['content']['parts'][0]['text']=json.dumps(value,ensure_ascii=False)
+                    return FixtureResponse(json.dumps(envelope).encode())
+                return response
         self.http.reset_mock(side_effect=False);self.http.side_effect=send;self.new_phases=[]
         result=self.run_job()
         self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))

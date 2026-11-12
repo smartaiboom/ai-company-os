@@ -24,6 +24,7 @@ GAME_SCOPE = 'game_shorts_independent_research_20261111'
 GAME_RESEARCH_BLOCKER = 'mission_independent_web_research_unavailable'
 MAX_CALLS = 10  # Historical policy; never rewrite old signed grants.
 UNIFIED_SUCCESSOR_POLICY = 'mission01_validated_writer_successor_20261112_v1'
+PARTIAL_REVISION_PURPOSE = 'revise_accepted_format_writer_v1_from_preserved_manager_feedback_after_503'
 DNS_PERMISSION_PURPOSE = 'write_new_script_under_native_v2_with_authorized_network_permission'
 UNIFIED_PURPOSE = '구조화 writer schema에 맞는 새 대본 작성'
 WRITER_FAILURES = frozenset(('invalid_script_shot','invalid_script_source','invalid_script_fact','invalid_script_timeline',
@@ -350,9 +351,10 @@ class MissionOneStore(QualityProviderStore):
         check_scope always computes the current successor contract from server facts.
         """
         text(new_purpose,400)
+        partial = previous.get('status')=='paused' and previous.get('reason_code')=='provider_unavailable'
         dns = (previous.get('reason_code') == 'free_request_failed'
                and previous.get('mission_unified_successor') is not None)
-        require(previous['status']=='stopped' and (previous.get('reason_code') in WRITER_FAILURES or dns)
+        require((partial or previous['status']=='stopped' and (previous.get('reason_code') in WRITER_FAILURES or dns))
                 and (previous.get('mission_topic_successor') or previous.get('mission_unified_successor')),
                 'mission_unified_not_eligible')
         grant=parse(self._grant_path(previous['id']).read_text())
@@ -372,7 +374,7 @@ class MissionOneStore(QualityProviderStore):
         require(digest(prior)==digest(expected) and body.get(marker)==prior
                 and previous['goal']==parent['goal'] and previous['quality_inputs']==parent['quality_inputs']
                 and previous['plan']==parent['plan'] and previous['employee_web']==parent['employee_web']
-                and previous['assignments']==parent['assignments']
+                and (partial or previous['assignments']==parent['assignments'])
                 and previous['limits']==dict(max_calls=None,max_revisions_per_task=1,max_total_revisions=1),
                 'mission_unified_history_changed')
         require(body['mission_account']['account_project']==body['mission_web']['account_project']==MISSION_ACCOUNT
@@ -380,32 +382,61 @@ class MissionOneStore(QualityProviderStore):
                 and body['model']==MODEL and body['endpoint']==ENDPOINT and body['free_only'] is True,
                 'mission_unified_scope_changed')
         attempts=previous['real_ai']['attempts']
-        require(len(attempts)==1 and attempts[0]['phase']=='execute'
-                and attempts[0]['task_id']==previous['assignments'][1]['id']
-                and attempts[0]['model']==MODEL
-                and previous['active_operation']==attempts[0]['id'] and not previous.get('final'),
-                'mission_unified_attempts_invalid')
-        attempt=attempts[0]
-        if dns:
-            require(attempt['status']=='failed' and attempt.get('error_code')=='free_request_failed'
-                    and attempt.get('provider_error_diagnostics')==dict(category='dns_error',stage='transport_open')
-                    and attempt.get('transport_started_at') and not attempt.get('http_status')
-                    and not attempt.get('response_hash') and not attempt.get('response_received_at')
-                    and attempt.get('role_result_status')=='unvalidated'
-                    and new_purpose==DNS_PERMISSION_PURPOSE
-                    and prior.get('new_purpose')!=DNS_PERMISSION_PURPOSE,
-                    'mission_dns_permission_scope_invalid')
+        if partial:
+            require(previous==self.load(previous['id']) and new_purpose==PARTIAL_REVISION_PURPOSE
+                    and prior['new_purpose']==DNS_PERMISSION_PURPOSE, 'mission_partial_scope_invalid')
+            tasks=previous['assignments'];writer=tasks[1]
+            require(tasks[0]==parent['assignments'][0] and tasks[2]==parent['assignments'][2]
+                    and all(writer[k]==parent['assignments'][1][k] for k in ('id','role','title','depends_on','criteria_ids','instructions'))
+                    and writer['state']=='revision_requested' and writer['revisions']==1
+                    and len(writer['versions'])==len(writer['reviews'])==1
+                    and writer['reviews'][0]['action']=='revise' and writer['reviews'][0]['feedback']
+                    and len(attempts)==3 and not previous.get('final'), 'mission_partial_artifacts_invalid')
+            for attempt,phase in zip(attempts[:2],('execute','review')):
+                require(attempt['task_id']==writer['id'] and attempt['phase']==phase
+                        and attempt['model']==MODEL and attempt['status']=='completed'
+                        and attempt.get('http_status')==200 and attempt.get('response_hash')
+                        and attempt.get('role_result_status')=='validated'
+                        and attempt.get('free_account_policy_verified') is True, 'mission_partial_attempts_invalid')
+            attempt=attempts[-1]
+            require(attempt['task_id']==writer['id'] and attempt['phase']=='execute'
+                    and attempt['model']==MODEL and attempt['status']=='failed'
+                    and attempt.get('http_status')==503 and attempt.get('error_code')=='provider_unavailable'
+                    and attempt.get('provider_error_diagnostics')==dict(category='5xx_server',stage='transport_open')
+                    and attempt.get('transport_started_at') and not attempt.get('response_hash')
+                    and not attempt.get('response_received_at') and attempt.get('role_result_status')=='unvalidated'
+                    and previous['active_operation']==attempt['id'], 'mission_partial_attempts_invalid')
+            from script_quality import validate_writer_contract
+            selected=validate_selection(parse(tasks[0]['reviews'][-1]['feedback']),previous['employee_web'])
+            validate_writer_contract(parse(writer['versions'][0]['content']),writer_contract(
+                previous['quality_inputs']['target_segment'],selected['duration_seconds'],MODEL,selected['selected_topic']))
         else:
-            require(attempt['status']=='completed' and attempt.get('http_status')==200
-                    and attempt.get('response_hash') and attempt.get('free_account_policy_verified') is True
-                    and attempt['role_result_status']=='json_parsed', 'mission_unified_attempts_invalid')
+            require(len(attempts)==1 and attempts[0]['phase']=='execute'
+                    and attempts[0]['task_id']==previous['assignments'][1]['id']
+                    and attempts[0]['model']==MODEL
+                    and previous['active_operation']==attempts[0]['id'] and not previous.get('final'),
+                    'mission_unified_attempts_invalid')
+            attempt=attempts[0]
+            if dns:
+                require(attempt['status']=='failed' and attempt.get('error_code')=='free_request_failed'
+                        and attempt.get('provider_error_diagnostics')==dict(category='dns_error',stage='transport_open')
+                        and attempt.get('transport_started_at') and not attempt.get('http_status')
+                        and not attempt.get('response_hash') and not attempt.get('response_received_at')
+                        and attempt.get('role_result_status')=='unvalidated'
+                        and new_purpose==DNS_PERMISSION_PURPOSE
+                        and prior.get('new_purpose')!=DNS_PERMISSION_PURPOSE,
+                        'mission_dns_permission_scope_invalid')
+            else:
+                require(attempt['status']=='completed' and attempt.get('http_status')==200
+                        and attempt.get('response_hash') and attempt.get('free_account_policy_verified') is True
+                        and attempt['role_result_status']=='json_parsed', 'mission_unified_attempts_invalid')
         selection=validate_selection(parse(previous['assignments'][0]['reviews'][-1]['feedback']),previous['employee_web'])
         contract_hash=_history_contract_hash or digest(writer_contract(previous['quality_inputs']['target_segment'],
             selection['duration_seconds'],MODEL,selection['selected_topic']))
         require(isinstance(contract_hash,str) and len(contract_hash)==64 and all(c in '0123456789abcdef' for c in contract_hash),
                 'mission_unified_contract_invalid')
         key=digest(dict(previous_job_id=previous['id'],new_purpose=new_purpose,writer_contract_hash=contract_hash))
-        if dns:
+        if partial or dns:
             require(contract_hash==prior['writer_contract_hash'], 'mission_dns_contract_changed')
         elif marker=='mission_unified_successor':
             require(contract_hash!=prior['writer_contract_hash'],
@@ -414,7 +445,9 @@ class MissionOneStore(QualityProviderStore):
             previous_grant_hash=digest(grant),previous_reference_hash=digest(prior),
             anchor_job=prior.get('anchor_job',previous['id']),new_purpose=new_purpose,writer_contract_hash=contract_hash,
             duplicate_key=key,previous_attempt_ids=prior['previous_attempt_ids']+[attempts[0]['id']],
-            consumed_calls=prior['consumed_calls']+len(attempts),new_max_calls=None,total_max_calls=None,
+            consumed_calls=prior['consumed_calls']+len(attempts),
+            **(dict(writer_v1_hash=digest(previous['assignments'][1]['versions'][0]),
+                    manager_revise_hash=digest(previous['assignments'][1]['reviews'][0])) if partial else {}),new_max_calls=None,total_max_calls=None,
             consumed_searches=2,consumed_videos=2,new_max_searches=None,new_max_videos=None,
             execution_max_searches=0,execution_max_videos=0,total_max_searches=None,total_max_videos=None,
             account_project=MISSION_ACCOUNT,model=MODEL,endpoint=ENDPOINT,data_policy=DATA_POLICY,
@@ -445,6 +478,10 @@ class MissionOneStore(QualityProviderStore):
             require(len(p['assignments'])==3 and all(
                 all(t[k]==original[k] for k in ('id','role','title','depends_on','criteria_ids','instructions'))
                 for t,original in zip(p['assignments'],previous['assignments'])), 'mission_writer_history_changed')
+            if unified and writer['new_purpose']==PARTIAL_REVISION_PURPOSE:
+                inherited=previous['assignments'][1];current=p['assignments'][1]
+                require(current['versions'][:1]==inherited['versions'] and current['reviews'][:1]==inherited['reviews']
+                        and current['revisions']==1, 'mission_partial_inheritance_changed')
             studio=Store(self.root.parent).load(p['quality_inputs']['answers']['representative_project'])
             require(studio['representative']['mission_one_job']==p['id'], 'mission_resume_detached')
         successor = p.get('mission_successor')

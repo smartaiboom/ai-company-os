@@ -133,7 +133,7 @@ function planPanel(p, plan, previous) {
       ${plan.research.candidates.map(c=>`<p><strong>${h(c.topic)}</strong> · ${h(c.game ? c.game+' · ' : '')}${h(c.rationale)} · 쇼츠 성과 미검증${c.rights_plan ? ' · '+h(c.rights_plan) : ''}</p>`).join('')}
       <p class="muted">${h(plan.research.uncertainty)}</p></details>` : ''}
     ${plan.task_history ? `<details class="subpanel"><summary>AI 업무·내부 검토 이력</summary>
-      <p>${h(plan.manager_plan.rationale)}</p>
+      <p>${h(plan.manager_plan?.rationale || plan.changes)}</p>
       ${plan.task_history.map(t=>`<div><h3>${h(eventRoles[t.role] || t.role)} · 버전 ${t.versions.length}</h3>
       ${t.reviews.map((r,i)=>`<p>v${i+1} · ${r.action==='accept'?'수락':'수정 요청'} · ${h(r.rationale)} ${h(r.feedback)}</p>`).join('')}</div>`).join('')}</details>` : ''}
     <details class="subpanel" open><summary>대본 전문</summary><p class="script">${h(script.transcript)}</p></details>
@@ -143,6 +143,8 @@ function planPanel(p, plan, previous) {
     <details class="subpanel" open><summary>조사 출처·권리·미확인 항목</summary>
       ${plan.sources.length ? plan.sources.map(s=>`<p>${h(s.claim)} · ${h(s.observed_at)} · ${h(s.rights)} ${sourceLink(s.url)}</p>`).join('') : '<p class="muted">이 보고서에 등록된 외부 조사 출처가 없습니다.</p>'}
       <p>${h(plan.risks)}</p>${script.unknowns.map(u=>`<p class="muted">${h(u)}</p>`).join('')}</details>
+    ${plan.representative_feedback?`<details class="subpanel" open><summary>대표 피드백 반영·관리자 재기획</summary><p>${h(plan.representative_feedback)}</p><p>${h(plan.changes)}</p><pre>${h(JSON.stringify(plan.goal_reviews,null,2))}</pre></details>`:''}
+    <details class="subpanel"><summary>편집 직원 스토리보드 · 이전 버전 비교</summary>${[plan,previous].filter(Boolean).map(v=>`<h3>기획 v${v.version}</h3>${(v.task_history||[]).filter(t=>t.role==='editor').map(t=>`<pre>${h(t.versions.at(-1)?.content||'')}</pre>`).join('')}`).join('')}</details>
     <details class="subpanel"><summary>변경사항·보고서 해시</summary><p>${h(plan.changes)}</p><p class="mono">${h(plan.sha256)}</p>
       ${previous ? `<p class="muted">이전 기획 v${previous.version} 대본</p><p class="script">${h(previous.script.transcript)}</p>` : ''}
       <p class="muted">내부 검토 ${plan.internal_reviews.length}건 · ${h(plan.internal_reviews.map(r=>r.action==='accept'?'수락':r.action==='revise'?'수정':'보류').join(' → '))}</p></details>
@@ -208,13 +210,28 @@ function operations(p) {
   const failed = attempt?.status === 'failed' ? `<p class="warning">최근 렌더 실패 · ${h(attempt.reason)}</p>` : '';
   if (attempt?.status === 'reserved') return '<p class="warning">로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단</p>';
   if (p.stage==='goal_submitted') return `<button class="button secondary" data-action="mission">${icon('folder')} 미션 01 준비</button><p class="muted">기획 작업만 준비합니다. 외부 전송은 별도 승인 후 실행합니다.</p>`;
-  if (p.mission && p.stage==='plan_revision') return '<p class="warning">대표 수정 요청 저장 · 후속 실 AI 실행 범위 승인 대기</p>';
+  if (p.rework && p.stage==='plan_revision') return reworkPanel(p);
   if (p.mission && p.stage==='production') return '<p class="warning">기획 승인 기록 완료 · 제작 사양 등록 대기</p>';
   if (p.mission && p.stage==='research_planning') return '';
   if (p.stage==='plan_revision') return `<button class="button secondary" data-action="planning">${icon('folder')} 기획 작업 열기</button><p class="muted">내부 작업을 열고 보고서 제출을 기다립니다.</p>`;
   if (['production','video_revision'].includes(p.stage)) return `${failed}<button class="button secondary" data-action="produce">${icon('film')} 로컬 기술 시안 제작</button><p class="muted">승인된 대본으로 로컬 렌더러를 실행합니다. 외부 API 비용은 발생하지 않습니다.</p>`;
   return '<p class="muted">기획·대본이나 영상 보고서를 확인해 주세요.</p>';
 }
+function reworkPanel(p) {
+  const r=p.rework;
+  if (!r) return '';
+  const labels={available:'실행 동의 준비',pending:'새 외부 전송 동의 대기',approved:'동의 완료 · 실행 대기',running:'AI 재기획·재작업 실행 중',stopped:'재작업 중단 · 자동 재호출 없음',completed:'새 기획 대표 재승인 대기'};
+  return `<section class="panel"><h3>대표 피드백 AI 재작업</h3><p>${h(labels[r.status]||r.status)}</p><p>${h(r.feedback)}</p>
+    <p class="muted">이전 버전은 보존됩니다. 관리자 재기획 → 대본/스토리보드 → 의미·형식 검토 후 같은 컷룸에 새 버전을 제출합니다. 웹 조회·음성·렌더·게시 없음.</p>
+    ${r.error?`<p class="warning">${h(r.error)}</p>`:''}
+    ${r.proposal?facts([['모델',r.proposal.model],['프로젝트',r.proposal.rework_scope.account_project],['무료 quota / 청구','unknown / unverified'],['시도',r.attempts]]):''}
+    ${r.proposal?`<details><summary>전송 범위·재기획·검토 기록</summary><p>${h(r.proposal.rework_scope.data_policy)}</p><p>원 목표·저장된 대표 피드백·이전 대본/스토리보드·공개 관측을 Google에 전송합니다. 입출력 개선 활용·인적 검토 가능. 무료 여부는 소유자 확인이며 독립 검증되지 않았습니다.</p><pre>${h(JSON.stringify({inputs:r.proposal.quality_contract.inputs,replan:r.replan,reviews:r.reviews},null,2))}</pre></details>`:''}
+    ${r.status==='available'?'<button class="button secondary" data-action="rework-prepare">AI 재작업 동의 준비</button>':''}
+    ${r.status==='pending'?'<button class="button secondary" data-action="rework-consent">새 외부 전송 동의</button>':''}
+    ${r.status==='approved'?'<button class="button" data-action="rework-run">AI 재작업 시작</button>':''}
+    ${r.status==='running'?'<p class="muted">중복 시작은 차단됩니다. 페이지를 닫아도 서버에서 진행됩니다. 서버 종료로 상태가 불명확하면 자동 재시작하지 않습니다.</p><button class="button ghost" data-action="refresh">상태 새로고침</button>':''}</section>`;
+}
+
 function budgetSetupPanel(p) {
   const setup=p.budget_setup;
   if (!setup||p.readonly) return '';
@@ -263,7 +280,7 @@ function projectPage(p, chosen={}) {
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
   <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
   <aside class="stack"><section class="panel"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['다음 행동',s[2]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
-  ${operations(p)}${missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
+  ${operations(p)}${p.stage!=='plan_revision'?reworkPanel(p):''}${missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
   <section class="panel"><h2>${icon('clock')} 진행 타임라인</h2><ol class="timeline">${[...f.events].reverse().map(e=>`<li><strong>${h(statuses[e.stage]?.[0] || e.stage)}</strong><p class="muted">${h(time(e.at))}</p></li>`).join('')}</ol></section></aside></div>`;
 }
@@ -373,6 +390,19 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action==='rework-prepare') {
+    modal('AI 재작업 동의 준비',`<p>저장된 피드백을 사용합니다. 지금은 제안만 준비하며 API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
+      '제안 준비',async data=>{await api(detailApi(detail)+'/rework-prepare',{account_project:data.get('account_project'),confirm_free_account:data.has('free')});return {message:'새 동의 제안을 확인하세요.'};});
+  }
+  else if (button.dataset.action==='rework-consent') {
+    modal('새 외부 전송 동의',`<p>원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,
+      '이 범위에 동의',async data=>{await api(detailApi(detail)+'/rework-consent',{review_hash:detail.rework.review_hash,confirm_free_account:data.has('free'),confirm_data_policy:data.has('policy')});return {message:'동의 저장. AI 재작업 시작을 눌러 실행하세요.'};});
+  }
+  else if (button.dataset.action==='rework-run') {
+    button.disabled=true;
+    try {await api(detailApi(detail)+'/rework-run',{});await route();notice('AI 재작업을 시작했습니다. 상태 새로고침으로 진행을 확인하세요.');}
+    catch(error){notice(error.message,true);button.disabled=false;}
+  }
   else if (['budget-prepare','budget-reprepare'].includes(button.dataset.action)) {
     const project=detail;
     const renew=button.dataset.action==='budget-reprepare';

@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_representative_feedback_rework_end_to_end_offline(self):
+        self.representative_rework_fixture=True
+        self.test_cli_local_handoff_uses_canonical_store_and_preserves_guards()
+
     def test_cli_local_handoff_uses_canonical_store_and_preserves_guards(self):
         self.local_handoff_fixture=True
         self.test_caption_revision_new_signed_budget_and_cutroom()
@@ -1545,7 +1549,92 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(report['provenance'],'offline_http_fixture')
         self.assertEqual(report['research']['manager_decision'],decision)
         self.assertEqual(len(urls),4)
+        if getattr(self,'representative_rework_fixture',False):
+            self.finish_representative_rework_fixture(project)
         for path,data in before.items():self.assertEqual(path.read_bytes(),data)
+
+    def finish_representative_rework_fixture(self,project):
+        from representative_rework import prepare,ReworkStore,ReworkCompany,handoff
+        from script_quality import script_editor_handoff
+        original=self.studio.workflow.store.load(project)['representative']['plan_versions'][-1]
+        original_bytes={p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file()}
+        feedback='게임 자체의 재미있는 한 장면을 다루세요. 제작 방법 설명은 원 목표와 다릅니다.'
+        self.studio.workflow.decide(project,'plan',version=1,sha256=original['sha256'],action='request_revision',feedback=feedback)
+        self.studio.action('workspace',project,'rework-prepare',dict(account_project='gen-lang-client-0938732315',confirm_free_account=True))
+        self.assertEqual(self.studio.detail('workspace',project)['rework']['status'],'pending')
+        state=self.studio.workflow.store.load(project)['representative']['rework']
+        provider=ReworkStore(self.store.root.parent/'representative_rework');pid=state['job']
+        self.assertFalse(provider.load(pid)['real_ai']['attempts'])
+        prepare(self.studio.workflow,project,self.key,'gen-lang-client-0938732315')
+        self.assertEqual(self.studio.workflow.store.load(project)['representative']['rework']['job'],pid)
+        class OfflineRework(ReworkCompany):source='offline_http_fixture'
+        company=OfflineRework(provider,LiveManagerProvider('fixture-manager'),LiveEmployeeProvider('fixture-staff'),Gemini35Config(self.key))
+        def run():return company.run(pid,expected_state_hash=provider.load(pid)['storage_hash'])
+        with self.assertRaises(CompanyError):run()
+        body=state['proposal']
+        bad=deepcopy(body);bad['rework_scope']['reference']['plan_hash']='0'*64
+        with self.assertRaises(CompanyError):provider.approve(pid,bad,review_hash=digest(bad),owner_confirmed=True)
+        self.studio.action('workspace',project,'rework-consent',dict(review_hash=digest(body),confirm_free_account=True,confirm_data_policy=True))
+        draft=deepcopy(original['script']);draft['topic']['title']='역전 한 수의 이야기'
+        for i,b in enumerate(draft['narrative_beats']):
+            b.update(narration=['마지막 한 수가 보이나요?','빈칸에 놓자 길이 열렸어요.','작은 선택이 판을 뒤집었죠.'][i],caption='역전 한 수',screen='가상 보드 한 수 비교',fact_status='illustrative')
+        draft.update(hook_0_3s=draft['narrative_beats'][0]['narration'],close=draft['narrative_beats'][-1]['narration'],
+            transcript='\n'.join(b['narration'] for b in draft['narrative_beats']))
+        manager,_=script_callbacks(draft,draft)
+        def send(request,timeout):
+            wire=json.loads(request.data);message=json.loads(wire['contents'][0]['parts'][0]['text']);phase=message['phase'];context=message['data']
+            self.assertEqual(context['quality']['feedback_text'],feedback)
+            self.assertEqual(context['quality']['answers']['previous_plan']['sha256'],original['sha256'])
+            if phase=='plan':
+                result=json.loads(manager(phase,context));result['replan']=dict(selected_topic=draft['topic']['title'],duration_seconds=25,
+                    duration_reason='기존25초 유지, 최적값 주장은 하지 않음',feedback_response='제작법 대신 게임 장면으로 재기획')
+            elif phase=='execute':
+                value=draft if context['assignment']['role']=='writer' else script_editor_handoff(context['previous_results'][0])
+                result=dict(content=value if context['assignment']['role']=='writer' else json.dumps(value),evidence='offline fixture',uncertainty='unassessed')
+            else:
+                result=json.loads(manager(phase,context));result['goal_review']={k:dict(met=True,evidence='역전 한 수') for k in ('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')}
+            return FixtureResponse(json.dumps(dict(candidates=[dict(finishReason='STOP',content=dict(role='model',parts=[dict(text=json.dumps(dict(result=result),ensure_ascii=False))]))],
+                usageMetadata=dict(promptTokenCount=20,candidatesTokenCount=30,totalTokenCount=50))).encode())
+        self.http.reset_mock(side_effect=False);self.http.side_effect=send
+        queued=[]
+        class QueuedThread:
+            def __init__(self,*,target,daemon):self.target=target
+            def start(self):queued.append(self.target)
+        original_handoff=handoff
+        def offline_handoff(*args,**kwargs):return original_handoff(*args,allow_fixture=True,**kwargs)
+        with patch('threading.Thread',QueuedThread),patch('representative_rework.ReworkCompany',OfflineRework),patch('representative_rework.handoff',offline_handoff):
+            self.studio.action('workspace',project,'rework-run',{})
+            with self.assertRaises(CompanyError):self.studio.action('workspace',project,'rework-run',{})
+            self.assertEqual(self.http.call_count,0)
+            queued.pop()()
+        result=provider.load(pid);self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
+        self.assertEqual(self.http.call_count,5)
+        with self.assertRaises(CompanyError):run()
+        self.assertEqual(self.http.call_count,5)
+        handoff(self.studio.workflow,project,provider,allow_fixture=True)
+        flow=self.studio.workflow.store.load(project)['representative']
+        self.assertEqual(flow['stage'],'awaiting_plan_approval');self.assertEqual(len(flow['plan_versions']),2)
+        self.assertEqual(flow['plan_versions'][0],original)
+        self.assertEqual(flow['plan_versions'][1]['representative_feedback'],feedback)
+        # The server rejects an explicit instructional drift even if the model calls it acceptable.
+        company._review_content='쇼츠 만드는 방법'
+        review=json.loads(manager('review',dict(plan_inspection={},criteria=[dict(id='hook')])) )
+        review['goal_review']={k:dict(met=True,evidence='쇼츠 만드는 방법') for k in ('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')}
+        with self.assertRaisesRegex(CompanyError,'rework_obvious_goal_drift'):
+            company._parse_role_content(json.dumps(dict(result=review)),'review')
+        # A later separately consented revision fails once; duplicate starts cannot retry it.
+        latest=flow['plan_versions'][-1]
+        self.studio.workflow.decide(project,'plan',version=2,sha256=latest['sha256'],action='request_revision',feedback='후크를 더 구체화하세요')
+        self.studio.action('workspace',project,'rework-prepare',dict(account_project='gen-lang-client-0938732315',confirm_free_account=True))
+        pending=self.studio.detail('workspace',project)['rework']
+        self.studio.action('workspace',project,'rework-consent',dict(review_hash=pending['review_hash'],confirm_free_account=True,confirm_data_policy=True))
+        self.http.reset_mock(side_effect=False);self.http.side_effect=HTTPError(ENDPOINT,503,'fixture',{},None)
+        with patch('threading.Thread',QueuedThread),patch('representative_rework.ReworkCompany',OfflineRework):
+            self.studio.action('workspace',project,'rework-run',{});queued.pop()()
+            with self.assertRaises(CompanyError):self.studio.action('workspace',project,'rework-run',{})
+        self.assertEqual(self.http.call_count,1)
+        self.assertEqual(self.studio.detail('workspace',project)['rework']['status'],'stopped')
+        for path,data in original_bytes.items():self.assertEqual(path.read_bytes(),data)
 
     def test_unknown_quota_and_signed_caps_cannot_be_increased(self):
         body = self.store.prepare_mission(self.job, key=self.key, account_project='fixture',

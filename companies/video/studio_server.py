@@ -128,10 +128,66 @@ class Studio:
             from video_mission_one import MissionOneStore, provider_view
             provider_store = MissionOneStore(store.root/'mission_one_provider')
             mission = provider_view(provider_store.load(flow['mission_one_job']))
-        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p),
+        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p),
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
                                            for t in j['assignments']]) for j in jobs]}
+
+    def rework_view(self,key,p):
+        if key!='workspace':return None
+        flow=p['representative'];state=flow.get('rework')
+        if not state:
+            return dict(status='available',feedback=flow['decisions'][-1]['feedback']) if flow['stage']=='plan_revision' and flow['plan_versions'] else None
+        from representative_rework import ReworkStore
+        job=ReworkStore(self.stores[key].root/'representative_rework').load(state['job'])
+        return dict(status=state['status'],job=state['job'],error=state.get('error'),
+            feedback=job['quality_inputs']['feedback_text'],proposal=state.get('proposal'),
+            review_hash=digest(state['proposal']) if state.get('proposal') else None,
+            job_status=job['status'],attempts=len(job['real_ai']['attempts']),
+            replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]))
+
+    def rework_action(self,pid,name,body):
+        from representative_rework import prepare,ReworkStore,ReworkCompany,handoff
+        from autonomous_gemini35 import Gemini35Config,MODEL,ENDPOINT
+        from video_mission_one import MISSION_ACCOUNT,_binding
+        config=Gemini35Config.from_env()
+        require(config.model==MODEL and config.endpoint==ENDPOINT,'rework_fixed_model_required')
+        _binding('rework-local',config.api_key)
+        if name=='rework-prepare':
+            exact(body,('account_project','confirm_free_account'))
+            require(body['confirm_free_account'] is True and body['account_project']==MISSION_ACCOUNT,'rework_free_project_required')
+            prepare(self.workflow,pid,config.api_key,body['account_project']);return
+        provider=ReworkStore(self.stores['workspace'].root/'representative_rework')
+        with self.stores['workspace'].lock(pid):
+            project=self.project('workspace',pid);state=project['representative'].get('rework')
+            require(state is not None,'rework_prepare_required')
+            if name=='rework-consent':
+                exact(body,('review_hash','confirm_free_account','confirm_data_policy'))
+                require(state['status']=='pending' and body['confirm_free_account'] is True and body['confirm_data_policy'] is True
+                        and body['review_hash']==digest(state['proposal']),'rework_consent_required')
+                require(state['proposal']['rework_scope']['credential_binding']==_binding(state['job'],config.api_key),'rework_key_changed')
+                provider.approve(state['job'],state['proposal'],review_hash=body['review_hash'],owner_confirmed=True)
+                state['status']='approved';self.stores['workspace'].save(project);return
+            exact(body,())
+            require(name=='rework-run' and state['status']=='approved','rework_duplicate_or_unapproved')
+            job=provider.load(state['job']);provider.grant(job)
+            require(not job['real_ai']['attempts'] and not job['sessions'],'rework_restart_forbidden')
+            state['status']='running';self.stores['workspace'].save(project)
+        def worker():
+            try:
+                from autonomous_live import LiveManagerProvider,LiveEmployeeProvider
+                company=ReworkCompany(provider,LiveManagerProvider('gemini-manager'),LiveEmployeeProvider('gemini-staff'),config)
+                result=company.run(job['id'],expected_state_hash=job['storage_hash'])
+                if result['status']=='needs_user_review':handoff(self.workflow,pid,provider);return
+                error=result.get('reason_code','rework_incomplete')
+            except Exception as exc:
+                error=exc.code if isinstance(exc,CompanyError) else 'rework_internal_error'
+            with self.stores['workspace'].lock(pid):
+                project=self.stores['workspace'].load(pid)
+                project['representative']['rework'].update(status='stopped',error=error)
+                self.stores['workspace'].save(project)
+        from threading import Thread
+        Thread(target=worker,daemon=True).start()
 
     def budget_store(self):
         from budget_video_provider import BudgetVideoStore
@@ -331,7 +387,9 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
-        if name=='budget-prepare':
+        if name in ('rework-prepare','rework-consent','rework-run'):
+            self.rework_action(pid,name,body)
+        elif name=='budget-prepare':
             self.budget_prepare(pid,body)
         elif name=='budget-reprepare':
             self.budget_prepare(pid,body,renew=True)
@@ -481,7 +539,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

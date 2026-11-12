@@ -23,6 +23,13 @@ GAME_GOAL = '요즘 인기있는 게임에 대한 흥미있는 쇼츠 영상을 
 GAME_SCOPE = 'game_shorts_independent_research_20261111'
 GAME_RESEARCH_BLOCKER = 'mission_independent_web_research_unavailable'
 MAX_CALLS = 10  # Historical policy; never rewrite old signed grants.
+UNIFIED_SUCCESSOR_POLICY = 'mission01_validated_writer_successor_20261112_v1'
+UNIFIED_PURPOSE = '구조화 writer schema에 맞는 새 대본 작성'
+WRITER_FAILURES = frozenset(('invalid_script_shot','invalid_script_source','invalid_script_fact','invalid_script_timeline',
+    'invalid_script_contract','invalid_beat_time','invalid_topic_freshness','script_transcript_mismatch',
+    'script_audience_mismatch','script_audience_inference_required','script_provenance_mismatch',
+    'mission_selected_topic_mismatch','mission_visual_source_unverified','invalid_writer_schema',
+    'missing_script_text','invalid_fields','invalid_script_beats','invalid_script_unknowns'))
 TOPIC_SUCCESSOR_POLICY = 'mission01_topic_successor_20261112_v1'
 AUDIENCE_SUCCESSOR_POLICY = 'mission01_audience_successor_20261112_v1'
 FREE_WRITER_POLICY = 'mission01_free_provider_limits_20261112_v1'
@@ -34,11 +41,11 @@ DEFAULT_ROOT = Path('data/video_representative_workflow/studio')
 
 
 def _writer_reuse(p):
-    return p.get('mission_topic_successor') or p.get('mission_audience_successor') or p.get('mission_free_writer') or p.get('mission_budget_writer') or p.get('mission_writer_resume')
+    return p.get('mission_unified_successor') or p.get('mission_topic_successor') or p.get('mission_audience_successor') or p.get('mission_free_writer') or p.get('mission_budget_writer') or p.get('mission_writer_resume')
 
 
 def _web_limit(p):
-    return 0 if p.get('mission_free_writer') or p.get('mission_audience_successor') or p.get('mission_topic_successor') else 6 if p.get('mission_budget_writer') else 2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4
+    return 0 if p.get('mission_unified_successor') or p.get('mission_free_writer') or p.get('mission_audience_successor') or p.get('mission_topic_successor') else 6 if p.get('mission_budget_writer') else 2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4
 
 
 def _binding(project_id, key):
@@ -90,7 +97,8 @@ class MissionOneStore(QualityProviderStore):
                 **({'mission_budget_writer':deepcopy(p['mission_budget_writer'])} if 'mission_budget_writer' in p else {}),
                 **({'mission_free_writer':deepcopy(p['mission_free_writer'])} if 'mission_free_writer' in p else {}),
                 **({'mission_audience_successor':deepcopy(p['mission_audience_successor'])} if 'mission_audience_successor' in p else {}),
-                **({'mission_topic_successor':deepcopy(p['mission_topic_successor'])} if 'mission_topic_successor' in p else {})}
+                **({'mission_topic_successor':deepcopy(p['mission_topic_successor'])} if 'mission_topic_successor' in p else {}),
+                **({'mission_unified_successor':deepcopy(p['mission_unified_successor'])} if 'mission_unified_successor' in p else {})}
 
     def resume_reference(self, previous):
         require('mission_resume' not in previous, 'mission_resume_not_eligible')
@@ -334,17 +342,83 @@ class MissionOneStore(QualityProviderStore):
             next_request_purpose='write_new_script_with_exact_manager_selected_topic_copy_contract')
         return ref
 
+    def unified_successor_reference(self, previous, *, new_purpose=UNIFIED_PURPOSE, _history_contract_hash=None):
+        """A signed new-purpose receipt, never a replay or mutation of a stopped job.
+
+        Historical schema hashes are accepted only while proving signed ancestors;
+        check_scope always computes the current successor contract from server facts.
+        """
+        text(new_purpose,400)
+        require(previous['status']=='stopped' and previous.get('reason_code') in WRITER_FAILURES
+                and (previous.get('mission_topic_successor') or previous.get('mission_unified_successor')),
+                'mission_unified_not_eligible')
+        grant=parse(self._grant_path(previous['id']).read_text())
+        record=grant['record'];body=record['body']
+        require(hmac.compare_digest(str(grant['signature']),self._sign(record))
+                and record['id']==previous['real_ai']['consent'].get('operating_grant_id')
+                and record['revoked_at'] is None, 'invalid_consent_signature')
+        marker='mission_unified_successor' if previous.get('mission_unified_successor') else 'mission_topic_successor'
+        prior=previous[marker]
+        parent=self.load(prior['previous_job'])
+        if marker=='mission_unified_successor':
+            expected=self.unified_successor_reference(parent,new_purpose=prior['new_purpose'],
+                _history_contract_hash=prior['writer_contract_hash'])
+        else:
+            require(previous['reason_code']=='invalid_script_shot','mission_unified_anchor_invalid')
+            expected=self.topic_successor_reference(parent)
+        require(digest(prior)==digest(expected) and body.get(marker)==prior
+                and previous['goal']==parent['goal'] and previous['quality_inputs']==parent['quality_inputs']
+                and previous['plan']==parent['plan'] and previous['employee_web']==parent['employee_web']
+                and previous['assignments']==parent['assignments']
+                and previous['limits']==dict(max_calls=None,max_revisions_per_task=1,max_total_revisions=1),
+                'mission_unified_history_changed')
+        require(body['mission_account']['account_project']==body['mission_web']['account_project']==MISSION_ACCOUNT
+                and body['mission_account']['billing_disabled'] is True and body['mission_account']['free_data_policy']==DATA_POLICY
+                and body['model']==MODEL and body['endpoint']==ENDPOINT and body['free_only'] is True,
+                'mission_unified_scope_changed')
+        attempts=previous['real_ai']['attempts']
+        require(len(attempts)==1 and attempts[0]['phase']=='execute'
+                and attempts[0]['task_id']==previous['assignments'][1]['id']
+                and attempts[0]['status']=='completed' and attempts[0].get('http_status')==200
+                and attempts[0]['model']==MODEL and attempts[0].get('response_hash')
+                and attempts[0].get('free_account_policy_verified') is True
+                and attempts[0]['role_result_status']=='json_parsed'
+                and previous['active_operation']==attempts[0]['id'] and not previous.get('final'),
+                'mission_unified_attempts_invalid')
+        selection=validate_selection(parse(previous['assignments'][0]['reviews'][-1]['feedback']),previous['employee_web'])
+        contract_hash=_history_contract_hash or digest(writer_contract(previous['quality_inputs']['target_segment'],
+            selection['duration_seconds'],MODEL,selection['selected_topic']))
+        require(isinstance(contract_hash,str) and len(contract_hash)==64 and all(c in '0123456789abcdef' for c in contract_hash),
+                'mission_unified_contract_invalid')
+        key=digest(dict(previous_job_id=previous['id'],new_purpose=new_purpose,writer_contract_hash=contract_hash))
+        if marker=='mission_unified_successor':
+            require(contract_hash!=prior['writer_contract_hash'],
+                    'mission_unified_unchanged_request')
+        return dict(policy=UNIFIED_SUCCESSOR_POLICY,previous_job=previous['id'],previous_state_hash=previous['storage_hash'],
+            previous_grant_hash=digest(grant),previous_reference_hash=digest(prior),
+            anchor_job=prior.get('anchor_job',previous['id']),new_purpose=new_purpose,writer_contract_hash=contract_hash,
+            duplicate_key=key,previous_attempt_ids=prior['previous_attempt_ids']+[attempts[0]['id']],
+            consumed_calls=prior['consumed_calls']+len(attempts),new_max_calls=None,total_max_calls=None,
+            consumed_searches=2,consumed_videos=2,new_max_searches=None,new_max_videos=None,
+            execution_max_searches=0,execution_max_videos=0,total_max_searches=None,total_max_videos=None,
+            account_project=MISSION_ACCOUNT,model=MODEL,endpoint=ENDPOINT,data_policy=DATA_POLICY,
+            free_quota='unknown',billing_verification='unverified',automatic_retry=False,
+            plan_hash=prior['plan_hash'],research_hash=prior['research_hash'],selection_hash=digest(selection),
+            receipt_hash=prior['receipt_hash'],handoff=prior['handoff'])
+
     def check_scope(self, p):
         writer = _writer_reuse(p)
         expanded=p.get('mission_budget_writer')
         free=p.get('mission_free_writer')
         audience=p.get('mission_audience_successor')
         topic=p.get('mission_topic_successor')
+        unified=p.get('mission_unified_successor')
         if writer:
             require(not p.get('mission_successor') and not p.get('mission_resume')
-                    and sum(bool(p.get(k)) for k in ('mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor','mission_topic_successor'))==1, 'mission_writer_history_changed')
+                    and sum(bool(p.get(k)) for k in ('mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor','mission_topic_successor','mission_unified_successor'))==1, 'mission_writer_history_changed')
             previous=self.load(writer['previous_job'])
-            expected=(self.topic_successor_reference(previous) if topic else
+            expected=(self.unified_successor_reference(previous,new_purpose=writer['new_purpose']) if unified else
+                      self.topic_successor_reference(previous) if topic else
                       self.audience_successor_reference(previous) if audience else
                       self.free_writer_reference(previous,explicit_max_calls=writer.get('explicit_max_calls')) if free else
                       self.budget_writer_reference(previous) if expanded else self.writer_reference(previous))
@@ -389,7 +463,7 @@ class MissionOneStore(QualityProviderStore):
                             dict(aspect='9:16', language='한국어', platform='YouTube Shorts').items()),
                     'mission_game_scope_mismatch')
         require(quality['capabilities'] == capabilities
-                and p['limits'] == dict(max_calls=None if topic or audience else free['explicit_max_calls'] if free else 13 if expanded else 4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
+                and p['limits'] == dict(max_calls=None if unified or topic or audience else free['explicit_max_calls'] if free else 13 if expanded else 4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
                 and not p.get('local_tools'), 'mission_scope_mismatch')
 
     @staticmethod
@@ -433,13 +507,14 @@ class MissionOneStore(QualityProviderStore):
         require(body.get('mission_free_writer')==p.get('mission_free_writer'), 'mission_free_writer_consent_mismatch')
         require(body.get('mission_audience_successor')==p.get('mission_audience_successor'), 'mission_audience_successor_consent_mismatch')
         require(body.get('mission_topic_successor')==p.get('mission_topic_successor'), 'mission_topic_successor_consent_mismatch')
+        require(body.get('mission_unified_successor')==p.get('mission_unified_successor'), 'mission_unified_consent_mismatch')
         if _writer_reuse(p):
             old=parse(self._grant_path(_writer_reuse(p)['previous_job']).read_text())['record']['body']
             require(body['mission_account']['account_project']==old['mission_account']['account_project']
                     and body['mission_web']['account_project']==old['mission_web']['account_project'],
                     'mission_writer_account_changed')
         self._check_mission_account(body.get('mission_account'), p['limits']['max_calls'])
-        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor','mission_topic_successor')})
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor','mission_topic_successor','mission_unified_successor')})
 
 
 def validate_research(value):
@@ -576,6 +651,12 @@ class MissionOneCompany(VideoProviderQualityCompany):
             require(hmac.compare_digest(old['mission_account']['credential_binding'],_binding(old_id,self.config.api_key))
                     and hmac.compare_digest(old['mission_web']['credential_binding'],
                         _binding(old_id+':youtube',os.getenv('YOUTUBE_DATA_API_KEY',''))), 'mission_key_binding_mismatch')
+        if p.get('mission_unified_successor'):
+            anchor=p['mission_unified_successor']['anchor_job']
+            original=parse(self.store._grant_path(anchor).read_text())['record']['body']
+            require(hmac.compare_digest(original['mission_account']['credential_binding'],_binding(anchor,self.config.api_key))
+                    and hmac.compare_digest(original['mission_web']['credential_binding'],
+                        _binding(anchor+':youtube',os.getenv('YOUTUBE_DATA_API_KEY',''))), 'mission_key_binding_mismatch')
         account = self.store.grant(p)['body']['mission_account']
         require(hmac.compare_digest(account['credential_binding'], _binding(p['id'], self.config.api_key)),
                 'mission_key_binding_mismatch')
@@ -846,9 +927,10 @@ def main():
     from representative_workflow import RepresentativeVideoWorkflow
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
-    parser.add_argument('action', choices=('create-topic-successor','create-audience-successor','create-free-writer-resume','create-budget-writer-resume','create-writer-resume','create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
+    parser.add_argument('action', choices=('create-validated-successor','create-topic-successor','create-audience-successor','create-free-writer-resume','create-budget-writer-resume','create-writer-resume','create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
     parser.add_argument('project')
     parser.add_argument('--confirm-new-execution', action='store_true')
+    parser.add_argument('--new-purpose',default=UNIFIED_PURPOSE)
     parser.add_argument('--explicit-max-calls',type=int,help='Optional owner-specified limit for create-free-writer-resume; default none.')
     parser.add_argument('--account-project')
     parser.add_argument('--remaining-requests', type=int, help='Observed provider balance; omit for unknown. Not the approved call cap.')
@@ -865,6 +947,9 @@ def main():
     workflow = RepresentativeVideoWorkflow(Store(args.root))
     store = MissionOneStore(workflow.store.root/'mission_one_provider')
     try:
+        if args.action=='create-validated-successor':
+            print(workflow.stage_mission_validated_successor(args.project,owner_confirmed=args.confirm_new_execution,new_purpose=args.new_purpose))
+            return
         if args.action=='create-topic-successor':
             print(workflow.stage_mission_topic_successor(args.project,owner_confirmed=args.confirm_new_execution))
             return

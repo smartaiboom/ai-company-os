@@ -299,6 +299,36 @@ class RepresentativeVideoWorkflow:
                 self._transition(p,'research_planning')
                 return job['id']
 
+    def stage_mission_validated_successor(self, project_id, *, owner_confirmed=False, new_purpose=None):
+        """Single writer-contract successor entry; never automatically invoked on failure."""
+        from video_mission_one import MissionOneStore, UNIFIED_PURPOSE
+        require(owner_confirmed is True, 'explicit_owner_confirmation_required')
+        with self.store.lock(project_id):
+            p=self.store.load(project_id);flow=p['representative']
+            require(flow['stage']=='research_planning' and not flow['plan_versions'], 'representative_stage_mismatch')
+            store=MissionOneStore(self.store.root/'mission_one_provider');previous=store.load(flow['mission_one_job'])
+            with store.lock(previous['id']):
+                previous=store.load(previous['id'])
+                reference=store.unified_successor_reference(previous,new_purpose=UNIFIED_PURPOSE if new_purpose is None else new_purpose)
+                require(previous['goal']==p['goal'] and previous['quality_inputs']['answers']['representative_project']==project_id,
+                        'mission_scope_mismatch')
+                keys=flow.setdefault('validated_successor_keys',{})
+                require(reference['duplicate_key'] not in keys,'mission_successor_duplicate')
+                # An interrupted link save must not create a second orphan for the same purpose/contract.
+                for path in store.root.glob('qualityprovider-*.json'):
+                    if '.consent.' not in path.name:
+                        existing=store.load(path.stem)
+                        require(existing.get('mission_unified_successor',{}).get('duplicate_key')!=reference['duplicate_key'],
+                                'mission_successor_duplicate')
+                job=store.create(previous['goal'],inputs=deepcopy(previous['quality_inputs']),max_calls=None,max_total_revisions=1)
+                job.update(mission_unified_successor=reference,plan=deepcopy(previous['plan']),assignments=deepcopy(previous['assignments']),
+                    employee_web=deepcopy(previous['employee_web']),phase='work')
+                store.save(job)
+                keys[reference['duplicate_key']]=job['id']
+                flow.setdefault('mission_one_job_history',[]).append(previous['id']);flow['mission_one_job']=job['id']
+                self._transition(p,'research_planning')
+                return job['id']
+
     def report_plan(self, project_id, *, summary=None, sources=None, risks=None, changes=None,
                     render_spec=None, provider_store=None, allow_fixture=False):
         with self.store.lock(project_id):

@@ -235,6 +235,22 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_audience_variant_25_second_script_reaches_human_handoff(self):
+        self.audience_variant=True
+        self.provenance_case='correct'
+        self.audience_case='inferred'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_literal_unspecified_audience_has_safe_detail_and_no_retry(self):
+        self.audience_detail='literal_unspecified_audience'
+        self.audience_case='missing_inference'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_missing_inference_reason_has_safe_detail_and_no_retry(self):
+        self.audience_detail='reason_missing'
+        self.audience_case='missing_inference'
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
     def test_concrete_audience_mismatch_stops_without_retry(self):
         self.audience_case = 'concrete_mismatch'
         self.test_employee_web_queries_to_manager_duration_and_representative()
@@ -427,6 +443,12 @@ class MissionOneTests(unittest.TestCase):
             script['target_audience']='합성 예시 게임의 짧은 시연을 보고 싶은 시청자'
             if self.audience_case == 'inferred':
                 script['unknowns'].append('AI 추론(사용자 미확정):' + script['target_audience'] + ' 근거: 합성 게임 주제와 관측된 시연 형식')
+        if getattr(self,'audience_variant',False):
+            script['unknowns']=[f'사용자 확인 전 AI 제안: {script["target_audience"].replace(" ","  ")}. 이유는 합성 주제와 관측된 시연 형식이 맞기 때문입니다.']
+        if getattr(self,'audience_detail',None)=='literal_unspecified_audience':
+            script['target_audience']='미정'
+        elif getattr(self,'audience_detail',None)=='reason_missing':
+            script['unknowns']=[f'AI 제안(사용자 미확정): {script["target_audience"]}']
         script['topic']['title']='가상 게임의 두 장면'
         script['provenance']=dict(author='fixture',model=MODEL,mock=False)
         revised = deepcopy(script)
@@ -676,6 +698,11 @@ class MissionOneTests(unittest.TestCase):
             diag=result['real_ai']['attempts'][-1]['script_validation_diagnostics']
             self.assertEqual(diag['field'],'target_audience')
             self.assertEqual(diag['audience_unspecified'],self.audience_case=='missing_inference')
+            if self.audience_case=='missing_inference':
+                self.assertEqual(diag['detail_code'],getattr(self,'audience_detail','inference_marker_missing'))
+                self.assertEqual(set(diag),{'stage','category','field','audience_unspecified','response_bytes','response_hash','detail_code'})
+                self.assertNotIn(script['target_audience'],json.dumps(diag,ensure_ascii=False))
+                self.assertNotIn(self.key,json.dumps(diag))
             self.assertEqual(self.http.call_count,4)
             with self.assertRaises(CompanyError):
                 self.run_job()
@@ -718,7 +745,7 @@ class MissionOneTests(unittest.TestCase):
         if getattr(self,'audience_case',None)=='inferred':
             self.assertEqual(self.store.load(self.job)['quality_inputs']['target_segment'],'미정')
             self.assertEqual(report['script']['target_audience'],script['target_audience'])
-            self.assertIn('AI 추론(사용자 미확정):',report['script']['unknowns'][-1])
+            self.assertIn('사용자 확인 전 AI 제안:' if getattr(self,'audience_variant',False) else 'AI 추론(사용자 미확정):',report['script']['unknowns'][-1])
             self.assertEqual(report['provenance'],'offline_http_fixture')
         self.assertEqual(report['script']['target_duration'],duration)
         self.assertEqual(report['research']['observations'][0]['shorts_classification'],'unverified')

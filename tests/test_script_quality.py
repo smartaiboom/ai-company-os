@@ -123,6 +123,45 @@ class ScriptQualityTests(unittest.TestCase):
         with self.assertRaisesRegex(CompanyError,'script_audience_inference_required'):
             inspect_script(script,'미정',mock=True)
 
+    def test_audience_inference_wording_variants_and_safe_failure_details(self):
+        from autonomous_company import CompanyError
+        script=deepcopy(self.revision)
+        target=script['target_audience']
+        spaced=' '.join(target)
+        valid=[
+            f'AI 추론(사용자 미확정): {target} 근거: 합성 주제의 시연을 이해할 대상',
+            f'사용자 확인 전 AI 제안 대상은 {spaced}. 이유는 합성 주제와 짧은 시연 형식이 맞기 때문입니다.',
+            f'AI가 추천한 {target} (사용자가 지정하지 않은 대상). 근거： 합성 예제의 설명 난이도',
+        ]
+        for declaration in valid:
+            with self.subTest(declaration=declaration):
+                script['unknowns']=[declaration]
+                original=deepcopy(script)
+                self.assertFalse(inspect_script(script,'미정',mock=True)['defects'])
+                self.assertEqual(script,original)  # Checks never rewrite the generated script.
+        cases=[
+            ('미정',[valid[0]],'literal_unspecified_audience'),
+            (target,[],'inference_marker_missing'),
+            (target,[f'사용자 미확정: {target}. 이유: 합성 주제'],'inference_marker_missing'),
+            (target,[f'AI 제안: {target}. 이유: 합성 주제'],'inference_marker_missing'),
+            (target,['AI 제안(사용자 미확정): 다른 시청자. 이유: 합성 주제'],'audience_reference_mismatch'),
+            (target,[f'AI 제안(사용자 미확정): {target}'],'reason_missing'),
+            (target,[f'AI 제안(사용자 미확정): {target}. 이유: ...'],'reason_missing'),
+            (target,[f'AI 제안(사용자 미확정): {target}. 근거가 없습니다'],'reason_missing'),
+            (target,[f'AI 제안(사용자 미확정): {target}. 이유: 미확인'],'reason_missing'),
+            (target,[f'AI 제안(사용자 미확정): {target}. 이유: {target}'],'reason_missing'),
+            (target,[f'AI 제안(사용자 미확정): {target}', '이유: 합성 주제'],'reason_missing'),
+        ]
+        for audience,unknowns,detail in cases:
+            with self.subTest(detail=detail,unknowns=unknowns):
+                script.update(target_audience=audience,unknowns=unknowns)
+                with self.assertRaisesRegex(CompanyError,'script_audience_inference_required') as caught:
+                    inspect_script(script,'미정',mock=True)
+                self.assertEqual(caught.exception.detail_code,detail)
+        script.update(target_audience=target,unknowns=[valid[0]])
+        with self.assertRaisesRegex(CompanyError,'script_audience_mismatch'):
+            inspect_script(script,target+' 지정값',mock=True)
+
     def test_unspecified_audience_does_not_relax_other_script_fields(self):
         from autonomous_company import CompanyError
         from script_quality import AUDIENCE_INFERENCE_PREFIX

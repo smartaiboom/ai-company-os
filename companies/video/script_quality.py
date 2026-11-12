@@ -1,7 +1,8 @@
 """Short-form script checks and editor handoff for the existing video workflow."""
 import re
+import unicodedata
 
-from autonomous_company import digest, exact, parse, require
+from autonomous_company import CompanyError, digest, exact, parse, require
 from production_video import units
 
 MAX_SHORTS_SECONDS = 180
@@ -16,8 +17,10 @@ AUDIENCE_INSTRUCTIONS = (
     ' A concrete user target_segment requires exactly matching target_audience. '
     'target_segment=미정 means the user did not specify an audience, never a literal audience name. '
     'In that case propose a concrete target_audience from the goal, selected topic and available evidence. '
-    'Add an unknowns entry starting with "AI 추론(사용자 미확정):", containing the exact proposed '
-    'target_audience and "근거:" followed by a nonempty explanation. Do not claim user confirmation. '
+    '사용자가 시청자를 정하지 않았습니다. 구체적인 target_audience 하나를 제안하고 unknowns 한 항목에 '
+    '사용자 미확정 AI 제안임을 밝히고 그 대상과 실제 추론 이유를 함께 적으세요. '
+    '형식 예시(값을 복사하지 말 것): "AI 제안(사용자 미확정): <제안 대상> — 이유: <선정 주제와 관측 자료에 따른 설명>". '
+    'Equivalent clear Korean wording and spacing/punctuation are allowed. Do not claim user confirmation. '
     'Keep the original input target_segment unchanged; appeal and retention remain unassessed.'
 )
 WRITER_FIELDS = (
@@ -51,6 +54,38 @@ def _nonempty(value):
     require(isinstance(value, str) and bool(value.strip()), 'missing_script_text')
 
 
+def _audience_text(value):
+    return re.sub(r'[\W_]+','',unicodedata.normalize('NFKC',value).casefold())
+
+
+def audience_inference_issue(value):
+    """Conservative declaration checks, not a judgment of audience appeal or reason quality."""
+    audience=_audience_text(value['target_audience'])
+    if not audience or audience=='미정':
+        return 'literal_unspecified_audience'
+    entries=value['unknowns']
+    marked=[entry for entry in entries if (
+        re.search(r'(?<![a-z])ai(?![a-z])',entry.casefold())
+        and any(word in _audience_text(entry) for word in ('추론','제안','추천','가정'))
+        and any(word in _audience_text(entry) for word in (
+            '사용자미확정','사용자미지정','사용자확인전','사용자확정전','사용자확인필요',
+            '사용자가지정하지않','사용자가확정하지않','사용자에게확인필요'))
+        and not any(word in _audience_text(entry) for word in ('사용자승인완료','사용자확정완료','ai제안아님','ai추론아님')))]
+    if not marked:
+        return 'inference_marker_missing'
+    referenced=[entry for entry in marked if audience in _audience_text(entry)]
+    if not referenced:
+        return 'audience_reference_mismatch'
+    for entry in referenced:
+        reason=re.search(r'(?:근거|이유)\s*(?:[:：]|는|가|로는)?\s*([^;\n]+)',entry)
+        if reason:
+            explanation=_audience_text(reason[1])
+            if (bool(explanation) and explanation!=audience and explanation not in (
+                    '없음','없다','없습니다','없어요','미제공','근거없음','미정','미확인','추후확인','unknown','해당없음','불명','모름')):
+                return None
+    return 'reason_missing'
+
+
 def inspect_script(value, audience, *, mock, target_duration=60):
     exact(value, WRITER_FIELDS)
     require(type(target_duration) is int and 4 <= target_duration <= MAX_SHORTS_SECONDS, 'invalid_script_duration')
@@ -76,10 +111,11 @@ def inspect_script(value, audience, *, mock, target_duration=60):
         _nonempty(unknown)
 
     if audience == '미정':
-        require(value['target_audience'].strip() != '미정' and any(
-            unknown.startswith(AUDIENCE_INFERENCE_PREFIX) and value['target_audience'] in unknown
-            and '근거:' in unknown and bool(unknown.split('근거:', 1)[1].strip())
-            for unknown in value['unknowns']), 'script_audience_inference_required')
+        issue=audience_inference_issue(value)
+        if issue:
+            error=CompanyError('script_audience_inference_required')
+            error.detail_code=issue  # Enum only: never attach response text or audience values.
+            raise error
 
     beats = value['narrative_beats']
     require(isinstance(beats, list) and 2 <= len(beats) <= 20, 'invalid_script_beats')

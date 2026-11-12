@@ -569,6 +569,8 @@ class MissionOneCompany(VideoProviderQualityCompany):
                     audience_unspecified=p['quality_inputs']['target_segment']=='미정',
                     response_bytes=entry.get('response_diagnostics',{}).get('response_bytes'),
                     response_hash=entry.get('response_hash'))
+                if exc.code=='script_audience_inference_required':
+                    entry['script_validation_diagnostics']['detail_code']=getattr(exc,'detail_code','inference_marker_missing')
                 self.store.save(p)
             raise
         finally:

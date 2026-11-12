@@ -1422,6 +1422,11 @@ class MissionOneTests(unittest.TestCase):
             original_send=send
             def send(request,timeout):
                 message=json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
+                from script_quality import CAPTION_WIDTH_INSTRUCTIONS
+                wire=json.loads(request.data)
+                self.assertIn(CAPTION_WIDTH_INSTRUCTIONS,wire['systemInstruction']['parts'][0]['text'])
+                self.assertIn('W 또는 F',CAPTION_WIDTH_INSTRUCTIONS)
+                self.assertIn('6+1+3=10폭',CAPTION_WIDTH_INSTRUCTIONS)
                 if not self.store.load(self.job)['assignments'][1]['versions'][1:]:
                     context=message['data']
                     self.assertEqual(context['revision_feedback'],partial['assignments'][1]['reviews'][0]['feedback'])

@@ -200,6 +200,26 @@ class ScriptQualityTests(unittest.TestCase):
             editor_transform=lambda value: value['writer_ref'].update(revision=1))
         self.assertEqual(result['reason_code'], 'script_editor_handoff_mismatch')
 
+    def test_caption_width_boundaries_and_manager_accept_guard(self):
+        from autonomous_company import CompanyError
+        from production_video import units
+        from quality_workflow import _validate_script_review
+        self.assertEqual(units('가나다 ABC'),10)
+        for caption,valid in [('가'*14,True),('가'*15,False),('A'*28,True),('A'*29,False),
+                              ('가'*14+'\n'+'A'*28,True),('가'*14+' / '+'가'*14,False),('a\nb\nc',False)]:
+            with self.subTest(caption=caption):
+                value=deepcopy(self.revision);value['narrative_beats'][0]['caption']=caption
+                original=deepcopy(value)
+                defects=inspect_script(value,AUDIENCE,mock=True)['defects']
+                self.assertEqual(any(d['issue']=='caption_width' for d in defects),not valid)
+                task=dict(versions=[dict(content=json.dumps(value))])
+                if valid:
+                    _validate_script_review(task,dict(action='accept'),AUDIENCE,mock=True)
+                else:
+                    with self.assertRaisesRegex(CompanyError,'known_script_defects'):
+                        _validate_script_review(task,dict(action='accept'),AUDIENCE,mock=True)
+                self.assertEqual(value,original)
+
     def test_caption_timing_and_freshness_are_checked_without_appeal_score(self):
         value = deepcopy(self.revision)
         value['narrative_beats'][1].update(start=4, caption='길' * 30)

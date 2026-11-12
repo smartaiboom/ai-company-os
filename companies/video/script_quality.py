@@ -35,6 +35,16 @@ BEAT_FIELDS = (
     'start', 'end', 'narration', 'caption', 'screen', 'shot_type', 'source_ref', 'source_status',
     'fact_status',
 )
+CAPTION_WIDTH_INSTRUCTIONS = (
+    ' caption_width 규칙(생성·수정·검토 공통): 각 beat.caption은 최대 2줄, 각 줄 28폭 이하입니다. '
+    '글자 수가 아니라 Python unicodedata.east_asian_width가 W 또는 F인 문자당 2폭, 나머지는 1폭으로 합산합니다. '
+    '한글 완성형은 2폭, ASCII 영문·숫자·공백·문장부호는 각각 1폭입니다. '
+    '예: "가나다 ABC"는 6+1+3=10폭; 한글 14자는 28폭(허용), 한글 15자는 30폭(초과), ASCII 28자는 28폭입니다. '
+    '모든 줄의 폭을 각각 합산해 확인하고, 초과하면 단어를 줄이거나 실제 줄바꿈을 넣어 두 줄 이내로 나누세요. '
+    'JSON에서는 줄바꿈을 \\n escape로 인코딩하세요. 슬래시 / 나 자동 화면 줄바꿈은 줄 분리가 아닙니다. '
+    '수정 시 caption_width와 문제 자막을 짚고 줄별 28폭 이하가 되도록 구체적으로 지시하세요. '
+    '검토 시 남은 caption_width major 결함은 accept하지 말고 수정 피드백에 포함하세요.'
+)
 SCRIPT_INSTRUCTIONS = (
     'Plan one writer reviewed against all eight criteria ids and one editor depending on the writer. '
     'Criteria ids: ' + ', '.join(CRITERIA) + '. '
@@ -49,7 +59,7 @@ SCRIPT_INSTRUCTIONS = (
     'task_id,revision,result_hash; each shot includes start,end,narration,caption,screen,shot_type,source_ref,source_status. '
     'Review criteria: ' + ', '.join(CRITERIA.values()) + '. Cite actual passages and give severity, owner, and a concrete edit. '
     'On revision read previous version and revision_feedback. Keep audience appeal and retention unassessed without evidence.'
-    + AUDIENCE_INSTRUCTIONS
+    + AUDIENCE_INSTRUCTIONS + CAPTION_WIDTH_INSTRUCTIONS
 )
 
 

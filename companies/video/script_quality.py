@@ -174,9 +174,10 @@ def inspect_script(value, audience, *, mock, target_duration=60):
                 retention='unassessed', previous_artifact_hash=None)
 
 
-def writer_contract(audience, duration, model, selected_topic):
+def writer_contract(audience, duration, model, selected_topic, *, version=2):
     """One source for mission writer wire schema and relational acceptance rules."""
     from role_json_schema import obj, arr, enum
+    require(type(version) is int and version in (1,2),'invalid_writer_contract_version')
     string={'type':'string','minLength':1}
     beat=obj(**{k:dict(string) for k in BEAT_FIELDS})
     beat['properties'].update(start=dict(type='integer',minimum=0,maximum=duration),
@@ -190,7 +191,7 @@ def writer_contract(audience, duration, model, selected_topic):
         target_duration=dict(type='integer',enum=[duration]),
         unknowns={**arr(dict(string)),'minItems':1 if audience=='미정' else 0},
         provenance=obj(author=dict(string),model=enum(model),mock=dict(type='boolean',enum=[False])))
-    return dict(version=1,schema=schema,audience=audience,duration=duration,model=model,selected_topic=selected_topic,
+    contract=dict(version=version,schema=schema,audience=audience,duration=duration,model=model,selected_topic=selected_topic,
         invariants=[
             'All required text must be nonblank. Do not add or omit object keys.',
             'topic.title copies selected_topic exactly; viewer-facing copy belongs in hook_0_3s/promise/viewing_reason.',
@@ -200,6 +201,26 @@ def writer_contract(audience, duration, model, selected_topic):
             'Keep sources pending and facts illustrative or verification_pending; flag current claims verification_pending.',
             'Include a demo; avoid repeated/dense narration; captions at most 2 lines, 28 width units per line.',
             'Audience appeal, retention, Shorts classification and rights remain unverified; no media or publication.'])
+    if version==1:
+        return contract  # Exact historical representation; never substitute it for a new default contract.
+    unspecified=audience=='미정'
+    contract['audience_input']=dict(target_segment=audience,user_specified=not unspecified)
+    contract['audience_output']=dict(field='result.content.target_audience',
+        policy='propose_one_concrete_audience_not_input_status' if unspecified else 'copy_user_specified_audience_exactly')
+    if unspecified:
+        instruction=('입력 target_segment=미정은 사용자가 시청자를 지정하지 않았다는 상태입니다. '
+            '출력 result.content.target_audience는 입력 상태를 복사하는 필드가 아닙니다. '
+            '관리자 선정 주제와 관측을 근거로 구체적인 대상 하나를 AI가 제안하세요. '
+            '출력에 미정 또는 아래 placeholder를 복사하지 마세요. '
+            'unknowns 한 항목에 AI 제안(사용자 미확정), 제안한 대상, 비어 있지 않은 실제 이유를 함께 적으세요.')
+        contract['audience_output_instruction']=instruction
+        schema['properties']['target_audience']['description']=instruction
+        schema['properties']['unknowns']['items']['description']='제안 대상의 사용자 미확정 상태와 AI 제안 이유를 기록. 대상의 타당성/성과는 미검증.'
+        contract['audience_output_example']=dict(template_only=True,target_audience='<AI가 제안할 구체적 대상>',
+            unknowns=['AI 제안(사용자 미확정): <동일한 제안 대상>. 이유: <선정 주제와 관측에 따른 실제 설명>'])
+    else:
+        contract['audience_output_instruction']='사용자가 지정한 target_segment를 target_audience에 문자 그대로 복사하세요. AI가 바꾸지 마세요.'
+    return contract
 
 
 def validate_writer_contract(value, contract):

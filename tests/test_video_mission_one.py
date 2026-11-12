@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_native_audience_v2_preserves_history_and_allows_only_changed_contract(self):
+        self.audience_upgrade_fixture=True
+        self.test_unified_writer_successor_preserves_seven_failures_and_hands_off()
+
     def test_unified_writer_successor_preserves_seven_failures_and_hands_off(self):
         self.unified_successor_fixture=True
         self.test_topic_failure_successor_preserves_six_failures_and_hands_off()
@@ -261,6 +265,20 @@ class MissionOneTests(unittest.TestCase):
         original=deepcopy(script)
         self.assertFalse(validate_writer_contract(script,contract)['defects'])
         self.assertEqual(script,original)
+        self.assertEqual(contract['version'],2)
+        self.assertEqual(contract['audience_input'],dict(target_segment='미정',user_specified=False))
+        old=writer_contract('미정',25,MODEL,script['topic']['title'],version=1)
+        self.assertNotEqual(digest(old),digest(contract))
+        encoded=json.dumps(contract['schema'])
+        self.assertNotIn('"not":',encoded);self.assertNotIn('"pattern":',encoded)
+        literal=deepcopy(script);literal['target_audience']='미정'
+        with self.assertRaisesRegex(CompanyError,'script_audience_inference_required') as caught:
+            validate_writer_contract(literal,contract)
+        self.assertEqual(caught.exception.detail_code,'literal_unspecified_audience')
+        specified=writer_contract(script['target_audience'],25,MODEL,script['topic']['title'])
+        self.assertFalse(validate_writer_contract(script,specified)['defects'])
+        different=deepcopy(script);different['target_audience']+=' 다른 대상'
+        with self.assertRaisesRegex(CompanyError,'script_audience_mismatch'):validate_writer_contract(different,specified)
         for field in WRITER_FIELDS:
             bad=deepcopy(script);bad.pop(field)
             with self.subTest(missing=field), self.assertRaises(CompanyError) as caught:validate_writer_contract(bad,contract)
@@ -552,12 +570,22 @@ class MissionOneTests(unittest.TestCase):
                 self.assertEqual(context['quality']['manager_selection']['selected_topic'],script['topic']['title'])
                 from role_json_schema import obj, S
                 from script_quality import writer_contract
-                contract=writer_contract(self.store.load(self.job)['quality_inputs']['target_segment'],duration,MODEL,decision['selected_topic'])
+                contract=writer_contract(self.store.load(self.job)['quality_inputs']['target_segment'],duration,MODEL,decision['selected_topic'],
+                    version=getattr(self,'writer_contract_version',2))
                 self.assertEqual(context['quality']['writer_contract'],contract)
                 expected=obj(result=obj(content=contract['schema'],evidence=S,uncertainty=S))
                 self.assertEqual(wire['generationConfig']['responseJsonSchema'],expected)
                 self.assertEqual(message['output_contract'],expected)
                 self.assertIn('result.content MUST be a JSON object',notice)
+                if contract['version']==2:
+                    self.assertEqual(context['quality']['target_segment'],self.store.load(self.job)['quality_inputs']['target_segment'])
+                    self.assertIn('target_segment',contract['audience_input'])
+                    if contract['audience']=='미정':
+                        self.assertFalse(contract['audience_input']['user_specified'])
+                        self.assertIn('입력 target_segment=미정',notice)
+                        self.assertIn('입력 상태를 복사하는 필드가 아닙니다',notice)
+                        self.assertIn('AI가 제안',contract['schema']['properties']['target_audience']['description'])
+                        self.assertTrue(contract['audience_output_example']['template_only'])
             if phase=='execute' and role=='research':
                 result=dict(content=json.dumps(queries),evidence='fixture query builder',uncertainty='unverified')
             elif phase=='execute':
@@ -1213,6 +1241,8 @@ class MissionOneTests(unittest.TestCase):
         for path,data in before.items():self.assertEqual(path.read_bytes(),data)
 
     def finish_unified_successor_fixture(self,project,failed,before,urls,decision,script,youtube_key,send):
+        if getattr(self,'audience_upgrade_fixture',False):
+            return self.finish_audience_upgrade_fixture(project,failed,before,urls,decision,script,youtube_key,send)
         from video_mission_one import UNIFIED_SUCCESSOR_POLICY, MISSION_ACCOUNT, UNIFIED_PURPOSE
         from script_quality import writer_contract
         seventh=self.job
@@ -1263,6 +1293,61 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(report['research']['reuse']['source_job'],seventh)
         self.assertEqual(report['script']['target_duration'],25)
         self.assertEqual(report['provenance'],'offline_http_fixture')
+        self.assertEqual(len(urls),4)
+        for path,data in before.items():self.assertEqual(path.read_bytes(),data)
+
+    def finish_audience_upgrade_fixture(self,project,failed,before,urls,decision,script,youtube_key,send):
+        from video_mission_one import MISSION_ACCOUNT
+        from script_quality import writer_contract
+        seventh=self.job
+        before.update({p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and seventh in p.name})
+        with patch('video_mission_one.writer_contract',side_effect=lambda *args:writer_contract(*args,version=1)):
+            self.writer_contract_version=1
+            self.job=self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True)
+            body=self.store.prepare_mission(self.job,key=self.key,account_project=MISSION_ACCOUNT,quota_note='synthetic historical v1',
+                youtube_key=youtube_key,youtube_project=MISSION_ACCOUNT,confirm_youtube_policy=True)
+            self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+            self.http.reset_mock(side_effect=False)
+            def unspecified(request,timeout):
+                response=send(request,timeout)
+                envelope=json.loads(response.getvalue())
+                result=json.loads(envelope['candidates'][0]['content']['parts'][0]['text'])
+                result['result']['content']['target_audience']='미정'
+                envelope['candidates'][0]['content']['parts'][0]['text']=json.dumps(result,ensure_ascii=False)
+                return FixtureResponse(json.dumps(envelope).encode())
+            self.http.side_effect=unspecified
+            old_failed=self.run_job()
+            self.assertEqual(old_failed['reason_code'],'script_audience_inference_required')
+            self.assertEqual(old_failed['real_ai']['attempts'][-1]['script_validation_diagnostics']['detail_code'],'literal_unspecified_audience')
+            self.assertEqual(self.http.call_count,1)
+            with self.assertRaises(CompanyError):self.run_job()
+            with self.assertRaisesRegex(CompanyError,'mission_unified_unchanged_request'):
+                self.store.unified_successor_reference(old_failed,new_purpose='renaming alone cannot replay')
+        eighth=self.job
+        before.update({p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and eighth in p.name})
+        self.writer_contract_version=2
+        reference=self.store.unified_successor_reference(old_failed)
+        self.assertEqual(reference['consumed_calls'],11)
+        self.assertNotEqual(reference['writer_contract_hash'],old_failed['mission_unified_successor']['writer_contract_hash'])
+        self.assertEqual(reference['writer_contract_hash'],digest(writer_contract('미정',25,MODEL,decision['selected_topic'])))
+        self.job=self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True)
+        with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True)
+        body=self.store.prepare_mission(self.job,key=self.key,account_project=MISSION_ACCOUNT,quota_note='synthetic v2 approval',
+            youtube_key=youtube_key,youtube_project=MISSION_ACCOUNT,confirm_youtube_policy=True)
+        bad=deepcopy(body);bad['mission_unified_successor']['writer_contract_hash']=old_failed['mission_unified_successor']['writer_contract_hash']
+        with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+        self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+        self.http.reset_mock(side_effect=False);self.http.side_effect=send;self.new_phases=[]
+        result=self.run_job()
+        self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
+        self.assertEqual(self.http.call_count,4)
+        report=self.studio.workflow.report_plan(project,provider_store=self.store,allow_fixture=True)
+        self.assertEqual(self.studio.detail('workspace',project)['stage'],'awaiting_plan_approval')
+        self.assertEqual(report['script']['target_duration'],25)
+        self.assertEqual(report['script']['target_audience'],script['target_audience'])
+        self.assertEqual(self.store.load(self.job)['quality_inputs']['target_segment'],'미정')
+        self.assertEqual(report['provenance'],'offline_http_fixture')
+        self.assertEqual(report['research']['manager_decision'],decision)
         self.assertEqual(len(urls),4)
         for path,data in before.items():self.assertEqual(path.read_bytes(),data)
 

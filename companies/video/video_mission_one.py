@@ -572,6 +572,7 @@ class MissionOneCompany(VideoProviderQualityCompany):
             system=wire['systemInstruction']['parts'][0]
             system['text']=system['text'].replace('Writer/editor/voice content must be a JSON string','Editor/voice content must be a JSON string')
             system['text']+=' WRITER NATIVE CONTRACT: result.content MUST be a JSON object, not a JSON string. Follow quality.writer_contract.schema and all quality.writer_contract.invariants. These exact dynamic constraints override generic writer guidance.'
+            system['text']+=' '+contract.get('audience_output_instruction','')
         return wire
 
     def _validate_payload(self, payload):

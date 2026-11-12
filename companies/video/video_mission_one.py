@@ -7,7 +7,7 @@ from pathlib import Path
 from copy import deepcopy
 
 from autonomous_company import CompanyError, Store, digest, exact, parse, require, text
-from autonomous_gemini35 import Gemini35Config, MODEL, ENDPOINT
+from autonomous_gemini35 import Gemini35Config, Gemini35Store, MODEL, ENDPOINT
 from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
 from goal_dialogue_live import send_once
 from employee_web_research import (TOOL as WEB_TOOL, POLICY as WEB_POLICY, collect,
@@ -22,6 +22,7 @@ GAME_GOAL = '요즘 인기있는 게임에 대한 흥미있는 쇼츠 영상을 
 GAME_SCOPE = 'game_shorts_independent_research_20261111'
 GAME_RESEARCH_BLOCKER = 'mission_independent_web_research_unavailable'
 MAX_CALLS = 10  # Historical policy; never rewrite old signed grants.
+FREE_WRITER_POLICY = 'mission01_free_provider_limits_20261112_v1'
 DOUBLE_BUDGET_POLICY = 'mission01_double_budget_20261112_v1'
 MISSION_ACCOUNT = 'gen-lang-client-0938732315'
 ROLES = ('research', 'writer', 'editor')
@@ -30,11 +31,11 @@ DEFAULT_ROOT = Path('data/video_representative_workflow/studio')
 
 
 def _writer_reuse(p):
-    return p.get('mission_budget_writer') or p.get('mission_writer_resume')
+    return p.get('mission_free_writer') or p.get('mission_budget_writer') or p.get('mission_writer_resume')
 
 
 def _web_limit(p):
-    return 6 if p.get('mission_budget_writer') else 2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4
+    return 0 if p.get('mission_free_writer') else 6 if p.get('mission_budget_writer') else 2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4
 
 
 def _binding(project_id, key):
@@ -51,6 +52,9 @@ def quota_observation(value):
 
 
 class MissionOneStore(QualityProviderStore):
+    # Only this adapter opts into the common optional-cap validator. check_scope keeps old policies exact.
+    _limits = staticmethod(Gemini35Store._limits)
+
     def prepare_mission(self, project_id, *, key, account_project, quota_note, remaining_requests=None,
                         youtube_key=None, youtube_project=None, search_remaining=None, units_remaining=None,
                         confirm_youtube_policy=False):
@@ -80,7 +84,8 @@ class MissionOneStore(QualityProviderStore):
                 **({'mission_resume':deepcopy(p['mission_resume'])} if 'mission_resume' in p else {}),
                 **({'mission_successor':deepcopy(p['mission_successor'])} if 'mission_successor' in p else {}),
                 **({'mission_writer_resume':deepcopy(p['mission_writer_resume'])} if 'mission_writer_resume' in p else {}),
-                **({'mission_budget_writer':deepcopy(p['mission_budget_writer'])} if 'mission_budget_writer' in p else {})}
+                **({'mission_budget_writer':deepcopy(p['mission_budget_writer'])} if 'mission_budget_writer' in p else {}),
+                **({'mission_free_writer':deepcopy(p['mission_free_writer'])} if 'mission_free_writer' in p else {})}
 
     def resume_reference(self, previous):
         require('mission_resume' not in previous, 'mission_resume_not_eligible')
@@ -233,14 +238,30 @@ class MissionOneStore(QualityProviderStore):
             plan_hash=ref['plan_hash'],research_hash=ref['research_hash'],
             selection_hash=ref['selection_hash'],receipt_hash=ref['receipt_hash'],handoff=ref['handoff'])
 
+    def free_writer_reference(self, previous, *, explicit_max_calls=None):
+        """Provider-limited policy, separate from every historical counter/grant."""
+        require(explicit_max_calls is None or type(explicit_max_calls) is int and explicit_max_calls>=1,
+                'invalid_explicit_call_limit')
+        reference=self.budget_writer_reference(previous)  # Authenticate only the immutable failure chain.
+        reference.update(policy=FREE_WRITER_POLICY,explicit_max_calls=explicit_max_calls,
+            new_max_calls=explicit_max_calls,total_max_calls=None,
+            new_max_searches=None,new_max_videos=None,total_max_searches=None,total_max_videos=None,
+            quota_policy='provider_free_limits_only_unknown_until_observed',
+            paid_transition='separate_explicit_owner_approval_required',automatic_retry=False,
+            next_request_purpose='write_new_script_with_explicit_server_provenance_contract')
+        return reference
+
     def check_scope(self, p):
         writer = _writer_reuse(p)
         expanded=p.get('mission_budget_writer')
+        free=p.get('mission_free_writer')
         if writer:
             require(not p.get('mission_successor') and not p.get('mission_resume')
-                    and not (expanded and p.get('mission_writer_resume')), 'mission_writer_history_changed')
+                    and sum(bool(p.get(k)) for k in ('mission_writer_resume','mission_budget_writer','mission_free_writer'))==1, 'mission_writer_history_changed')
             previous=self.load(writer['previous_job'])
-            require(digest(writer)==digest(self.budget_writer_reference(previous) if expanded else self.writer_reference(previous))
+            expected=(self.free_writer_reference(previous,explicit_max_calls=writer.get('explicit_max_calls')) if free else
+                      self.budget_writer_reference(previous) if expanded else self.writer_reference(previous))
+            require(digest(writer)==digest(expected)
                     and p['goal']==previous['goal'] and p['quality_inputs']==previous['quality_inputs']
                     and p['plan']==previous['plan'] and p['employee_web']==previous['employee_web']
                     and p['assignments'][0]==previous['assignments'][0], 'mission_writer_history_changed')
@@ -281,7 +302,7 @@ class MissionOneStore(QualityProviderStore):
                             dict(aspect='9:16', language='한국어', platform='YouTube Shorts').items()),
                     'mission_game_scope_mismatch')
         require(quality['capabilities'] == capabilities
-                and p['limits'] == dict(max_calls=13 if expanded else 4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
+                and p['limits'] == dict(max_calls=free['explicit_max_calls'] if free else 13 if expanded else 4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
                 and not p.get('local_tools'), 'mission_scope_mismatch')
 
     @staticmethod
@@ -291,7 +312,8 @@ class MissionOneStore(QualityProviderStore):
         text(value['account_project'], 200)
         text(value['quota_note'], 500)
         quota_observation(value['remaining_requests'])
-        require(type(value['approved_max_calls']) is int and value['approved_max_calls'] == max_calls
+        require((value['approved_max_calls'] is None if max_calls is None else
+                 type(value['approved_max_calls']) is int and value['approved_max_calls'] == max_calls)
                 and value['billing_disabled'] is True and value['free_data_policy'] == DATA_POLICY
                 and isinstance(value['credential_binding'], str) and len(value['credential_binding']) == 64,
                 'mission_free_account_unverified')
@@ -321,13 +343,14 @@ class MissionOneStore(QualityProviderStore):
         require(body.get('mission_resume') == p.get('mission_resume'), 'mission_resume_consent_mismatch')
         require(body.get('mission_writer_resume')==p.get('mission_writer_resume'), 'mission_writer_consent_mismatch')
         require(body.get('mission_budget_writer')==p.get('mission_budget_writer'), 'mission_budget_writer_consent_mismatch')
+        require(body.get('mission_free_writer')==p.get('mission_free_writer'), 'mission_free_writer_consent_mismatch')
         if _writer_reuse(p):
             old=parse(self._grant_path(_writer_reuse(p)['previous_job']).read_text())['record']['body']
             require(body['mission_account']['account_project']==old['mission_account']['account_project']
                     and body['mission_web']['account_project']==old['mission_web']['account_project'],
                     'mission_writer_account_changed')
         self._check_mission_account(body.get('mission_account'), p['limits']['max_calls'])
-        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume','mission_budget_writer')})
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume','mission_budget_writer','mission_free_writer')})
 
 
 def validate_research(value):
@@ -475,8 +498,10 @@ class MissionOneCompany(VideoProviderQualityCompany):
                 'with original evidence IDs, topic, game and duration. Do not select a new topic, game or duration. '
                 'Start at writer; no research or new web batch is allowed. Korean narration/captions and '
                 'pending visual sources are required. Writer and editor each receive manager review. '
-                'After acceptance the system assembles a human-review handoff, not a new AI final evaluation. '
-                f'{p["limits"]["max_calls"]} new Gemini calls maximum; internal budget is not provider free quota. No retries, media or representative approval.')
+                'After acceptance the system assembles a human-review handoff, not a new AI final evaluation. '+
+                ('No arbitrary call counter; respect provider free quota/rate limits and stop on errors. '
+                 if p['limits']['max_calls'] is None else f'{p["limits"]["max_calls"]} new Gemini calls maximum. ')+
+                'Internal counters are not provider free quota. No retries, paid fallback, media or representative approval.')
         if p.get('mission_successor'):
             notice += (' The validated prior manager plan and employee research are reused with original timestamps '
                        'and receipt evidence. Research is pending your NEW structured review, not approved. '
@@ -597,7 +622,9 @@ def checked_result(job, *, allow_fixture=False):
         require(job['quality_inputs']['capabilities'].get('employee_web_research')==WEB_TOOL,GAME_RESEARCH_BLOCKER)
     attempts = job['real_ai']['attempts']
     require(job['status'] == job.get('reason_code') == 'needs_user_review' and job['final']
-            and not job['artifacts'] and not job['active_operation'] and (4 if _writer_reuse(job) else 6 if job.get('mission_successor') else 8) <= len(attempts) <= job['limits']['max_calls'],
+            and not job['artifacts'] and not job['active_operation']
+            and (4 if _writer_reuse(job) else 6 if job.get('mission_successor') else 8) <= len(attempts)
+            and (job['limits']['max_calls'] is None or len(attempts)<=job['limits']['max_calls']),
             'mission_internal_review_incomplete')
     require(all(a['status'] == 'completed' and a.get('http_status') == 200 and a['model'] == MODEL
                 and a['role_result_status'] == 'validated' and a.get('response_hash')
@@ -667,9 +694,10 @@ def main():
     from representative_workflow import RepresentativeVideoWorkflow
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
-    parser.add_argument('action', choices=('create-budget-writer-resume','create-writer-resume','create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
+    parser.add_argument('action', choices=('create-free-writer-resume','create-budget-writer-resume','create-writer-resume','create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
     parser.add_argument('project')
     parser.add_argument('--confirm-new-execution', action='store_true')
+    parser.add_argument('--explicit-max-calls',type=int,help='Optional owner-specified limit for create-free-writer-resume; default none.')
     parser.add_argument('--account-project')
     parser.add_argument('--remaining-requests', type=int, help='Observed provider balance; omit for unknown. Not the approved call cap.')
     parser.add_argument('--quota-note')
@@ -685,6 +713,10 @@ def main():
     workflow = RepresentativeVideoWorkflow(Store(args.root))
     store = MissionOneStore(workflow.store.root/'mission_one_provider')
     try:
+        if args.action=='create-free-writer-resume':
+            print(workflow.stage_mission_free_writer_resume(args.project,owner_confirmed=args.confirm_new_execution,
+                explicit_max_calls=args.explicit_max_calls))
+            return
         if args.action=='create-budget-writer-resume':
             print(workflow.stage_mission_budget_writer_resume(args.project,owner_confirmed=args.confirm_new_execution))
             return

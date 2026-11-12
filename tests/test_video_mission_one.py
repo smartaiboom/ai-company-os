@@ -253,6 +253,40 @@ class MissionOneTests(unittest.TestCase):
         self.review_error = 'inner_json'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_provider_limited_writer_has_no_arbitrary_cap_and_hands_off(self):
+        self.free_fixture=True
+        self.test_doubled_budget_writer_handoff_preserves_four_failures_and_caps()
+
+    def test_provider_limited_writer_preserves_explicit_owner_cap(self):
+        self.free_explicit_cap=3
+        self.test_provider_limited_writer_has_no_arbitrary_cap_and_hands_off()
+
+    def test_provider_limited_writer_accepts_explicit_cap_above_legacy_twenty(self):
+        self.free_explicit_cap=30
+        self.test_provider_limited_writer_has_no_arbitrary_cap_and_hands_off()
+
+    def test_generic_quality_store_keeps_its_existing_bounded_policy(self):
+        from quality_provider import QualityProviderStore
+        for cap in (None,30):
+            with self.assertRaisesRegex(CompanyError,'bounded_quality_calls_required'):
+                QualityProviderStore._limits(dict(max_calls=cap,max_revisions_per_task=1,max_total_revisions=1))
+
+    def test_provider_limited_writer_stops_on_429_without_retry(self):
+        self.free_error='429'
+        self.test_provider_limited_writer_has_no_arbitrary_cap_and_hands_off()
+
+    def test_provider_limited_writer_stops_on_quota_or_billing_without_fallback(self):
+        self.free_error='quota'
+        self.test_provider_limited_writer_has_no_arbitrary_cap_and_hands_off()
+
+    def test_provider_limited_writer_preserves_timeout_without_resend(self):
+        self.free_error='timeout'
+        self.test_provider_limited_writer_has_no_arbitrary_cap_and_hands_off()
+
+    def test_provider_limited_writer_records_validation_error_without_resend(self):
+        self.free_error='provenance'
+        self.test_provider_limited_writer_has_no_arbitrary_cap_and_hands_off()
+
     def test_doubled_budget_writer_handoff_preserves_four_failures_and_caps(self):
         self.budget_fixture=True
         self.writer_fixture=True
@@ -435,9 +469,14 @@ class MissionOneTests(unittest.TestCase):
                     result['content']=json.dumps(content,ensure_ascii=False)
                 if (role=='writer' and getattr(self,'writer_fixture',False)
                         and not self.store.load(self.job).get('mission_writer_resume')
-                        and not self.store.load(self.job).get('mission_budget_writer')):
+                        and not self.store.load(self.job).get('mission_budget_writer')
+                        and not self.store.load(self.job).get('mission_free_writer')):
                     content=json.loads(result['content'])
                     content['target_audience']='미정'
+                    result['content']=json.dumps(content,ensure_ascii=False)
+                if (role=='writer' and getattr(self,'free_error',None)=='provenance'
+                        and self.store.load(self.job).get('mission_free_writer')):
+                    content=json.loads(result['content']);content['provenance']['mock']=True
                     result['content']=json.dumps(content,ensure_ascii=False)
                 if role=='writer' and getattr(self,'script_topic_tamper',False):
                     content=json.loads(result['content'])
@@ -700,6 +739,8 @@ class MissionOneTests(unittest.TestCase):
                 self.store.check_scope(self.store.load(self.job))
 
     def finish_budget_fixture(self,project,failed,before,urls,decision,script,youtube_key,send):
+        if getattr(self,'free_fixture',False):
+            return self.finish_free_fixture(project,failed,before,urls,decision,script,youtube_key,send)
         from video_mission_one import DOUBLE_BUDGET_POLICY, MISSION_ACCOUNT
         fourth=self.job
         reference=self.store.budget_writer_reference(failed)
@@ -782,6 +823,110 @@ class MissionOneTests(unittest.TestCase):
             self.assertEqual(self.http.call_count,4)
         self.assertEqual(len(urls),4)  # Original mock observations only.
         for path,content in before.items():self.assertEqual(path.read_bytes(),content)
+
+    def finish_free_fixture(self,project,failed,before,urls,decision,script,youtube_key,send):
+        from video_mission_one import FREE_WRITER_POLICY, MISSION_ACCOUNT
+        explicit=getattr(self,'free_explicit_cap',None)
+        fourth=self.job
+        ref=self.store.free_writer_reference(failed,explicit_max_calls=explicit)
+        self.assertEqual(ref['policy'],FREE_WRITER_POLICY)
+        self.assertEqual(ref['consumed_calls'],7)
+        self.assertEqual(ref['new_max_calls'],explicit)
+        self.assertIsNone(ref['total_max_calls'])
+        self.assertIsNone(ref['total_max_searches'])
+        self.assertIsNone(ref['total_max_videos'])
+        for invalid in (True,0,-1,'20'):
+            with self.assertRaises(CompanyError):self.store.free_writer_reference(failed,explicit_max_calls=invalid)
+        with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_free_writer_resume(project)
+        self.job=self.studio.workflow.stage_mission_free_writer_resume(project,owner_confirmed=True,explicit_max_calls=explicit)
+        fresh=self.store.load(self.job)
+        self.assertEqual(fresh['limits']['max_calls'],explicit)
+        self.assertEqual(fresh['assignments'],failed['assignments'])
+        self.assertFalse(fresh['real_ai']['attempts'])
+        with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_free_writer_resume(project,owner_confirmed=True)
+        with self.assertRaises(CompanyError):self.run_job()
+        body=self.store.prepare_mission(self.job,key=self.key,account_project=MISSION_ACCOUNT,quota_note='synthetic free attestation',
+            youtube_key=youtube_key,youtube_project=MISSION_ACCOUNT,confirm_youtube_policy=True)
+        self.assertEqual(body['mission_account']['approved_max_calls'],explicit)
+        self.assertEqual(body['call_policy']['optional_technical_cap'],explicit)
+        self.assertEqual(body['mission_account']['remaining_requests'],'unknown')
+        self.assertEqual(body['mission_web']['approved_max_searches'],0)
+        self.assertEqual(body['mission_web']['approved_max_videos'],0)
+        # A new consent cannot silently enlarge an explicit limit or permit paid/changed scope.
+        for mutate in (lambda b:b['mission_account'].update(approved_max_calls=20),
+                       lambda b:b['mission_account'].update(billing_disabled=False),
+                       lambda b:b['mission_account'].update(account_project='other-account'),
+                       lambda b:b.update(free_only=False), lambda b:b.update(model='paid-other-model'),
+                       lambda b:b['mission_free_writer'].update(total_max_calls=20),
+                       lambda b:b['mission_web'].update(approved_max_searches=8)):
+            bad=deepcopy(body);mutate(bad)
+            with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+        for old in (failed['mission_writer_resume']['previous_job'],fourth):
+            old_body=json.loads(self.store._grant_path(old).read_text())['record']['body']
+            with self.assertRaises(CompanyError):self.store.approve(self.job,old_body,review_hash=digest(old_body),owner_confirmed=True)
+        self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+        # Signed constraints remain immutable after approval, including null versus explicit caps.
+        changed=deepcopy(fresh);changed['limits']['max_calls']=99
+        with self.assertRaises(CompanyError):self.store.check_scope(changed)
+        for env in ({'GEMINI35_MODEL':'other-model'},{'GEMINI35_ENDPOINT':'https://example.invalid/paid'},
+                    {'YOUTUBE_DATA_API_KEY':'changed-fixture-key'}):
+            with patch.dict('os.environ',env):
+                with self.assertRaises(CompanyError):self.run_job()
+        with self.assertRaises(CompanyError):
+            self.company._mission_call(self.store.load(self.job),self.company.employee,'execute','research',dict(assignment=dict(role='research')))
+        self.http.reset_mock(side_effect=False)
+        self.new_phases=[]
+        error=getattr(self,'free_error',None)
+        self.http.side_effect=(HTTPError(ENDPOINT,429 if error=='429' else 402,'synthetic free limit',{},None)
+            if error in ('429','quota') else TimeoutError('synthetic uncertain response') if error=='timeout' else send)
+        result=self.run_job()
+        if error or explicit is not None and explicit<4:
+            expected=('provider_rate_limit' if error=='429' else 'provider_quota_or_billing' if error=='quota' else
+                      'free_request_failed' if error=='timeout' else 'script_provenance_mismatch' if error else 'optional_technical_cap_reached')
+            self.assertEqual(result.get('reason_code'),expected)
+            count=explicit if not error else 1
+            self.assertEqual(len(result['real_ai']['attempts']),count)
+            self.assertEqual(self.http.call_count,count)
+            stopped={p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and self.job in p.name}
+            with self.assertRaises(CompanyError):self.run_job()
+            self.assertEqual(self.http.call_count,count)
+            for path,data in stopped.items():self.assertEqual(path.read_bytes(),data)
+        else:
+            self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
+            self.assertEqual(self.http.call_count,4)
+            report=self.studio.workflow.report_plan(project,provider_store=self.store,allow_fixture=True)
+            self.assertEqual(self.studio.detail('workspace',project)['stage'],'awaiting_plan_approval')
+            self.assertEqual(report['research']['manager_decision'],decision)
+            self.assertEqual(report['research']['reuse']['source_job'],fourth)
+            self.assertEqual(report['script']['target_duration'],25)
+            self.assertEqual(report['script']['target_audience'],script['target_audience'])
+            self.assertEqual(report['provenance'],'offline_http_fixture')
+            self.assertEqual(report['research']['reuse']['final_evaluation'],'not_performed_local_handoff')
+            # Only memory fixtures cross old 10/20 counts; no evidence or real usage is created.
+            boundary=deepcopy(result);entry=deepcopy(result['real_ai']['attempts'][0])
+            for count in (10,20,25):
+                boundary['real_ai']['attempts']=[{**entry,'id':'counter-fixture-'+str(i)} for i in range(count)]
+                self.company._preflight(boundary)
+            # A reserved/unknown operation still blocks even with no counter cap.
+            boundary['real_ai']['attempts'][-1]['status']='reserved'
+            with self.assertRaises(CompanyError):self.company._preflight(boundary)
+            # Provider remaining=0 is authoritative regardless of the internal counter.
+            boundary=deepcopy(result);boundary['real_ai']['attempts'][-1]['rate_limits']={'x-ratelimit-remaining-requests':0}
+            with self.assertRaisesRegex(CompanyError,'provider_rate_limit'):self.company._preflight(boundary)
+            # Same completed operation identity cannot be sent again.
+            duplicate=deepcopy(result);duplicate['active_operation']=None
+            self.company.current=dict(phase='review',context_hash=result['real_ai']['attempts'][-1]['context_hash'])
+            from autonomous_live import CONTRACTS
+            payload=self.company._prepare_payload(dict(model=MODEL,max_tokens=4096,messages=[
+                dict(role='system',content='synthetic duplicate guard'),dict(role='user',content=json.dumps(
+                    dict(phase='review',output_contract=CONTRACTS['review'],data={})))]))
+            with self.assertRaisesRegex(CompanyError,'duplicate_operation'):
+                self.company._request_json(duplicate,model=MODEL,base_url=ENDPOINT,body=json.dumps(payload).encode(),
+                    api_key=self.key,timeout=1,transport=lambda *a:self.fail('duplicate must block transport'),
+                    kind='synthetic',task_id=result['assignments'][2]['id'],goal=result['goal'])
+            self.assertEqual(self.http.call_count,4)
+        self.assertEqual(len(urls),4)  # Reused observations only: no new web request.
+        for path,data in before.items():self.assertEqual(path.read_bytes(),data)
 
     def test_unknown_quota_and_signed_caps_cannot_be_increased(self):
         body = self.store.prepare_mission(self.job, key=self.key, account_project='fixture',

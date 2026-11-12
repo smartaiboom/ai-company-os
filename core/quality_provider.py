@@ -81,7 +81,8 @@ class QualityProviderStore(Gemini35Store):
 
     def create(self, goal, *, inputs, max_calls=12, max_revisions_per_task=1, max_total_revisions=2):
         safe_text(goal,4000);validate_inputs(inputs)
-        require(type(max_calls) is int and 1<=max_calls<=20,'bounded_quality_calls_required')
+        self._limits(dict(max_calls=max_calls,max_revisions_per_task=max_revisions_per_task,
+                          max_total_revisions=max_total_revisions))
         p=super().create(goal,max_calls=max_calls,max_revisions_per_task=max_revisions_per_task,
                          max_total_revisions=max_total_revisions,internal_tool_review=False)
         p['quality_inputs']=deepcopy(inputs);p['feedback_proposals']=[]

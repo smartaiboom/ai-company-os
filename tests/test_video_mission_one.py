@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_dns_permission_successor_preserves_nine_failures_and_hands_off(self):
+        self.dns_permission_fixture=True
+        self.test_native_audience_v2_preserves_history_and_allows_only_changed_contract()
+
     def test_native_audience_v2_preserves_history_and_allows_only_changed_contract(self):
         self.audience_upgrade_fixture=True
         self.test_unified_writer_successor_preserves_seven_failures_and_hands_off()
@@ -1337,6 +1341,37 @@ class MissionOneTests(unittest.TestCase):
         bad=deepcopy(body);bad['mission_unified_successor']['writer_contract_hash']=old_failed['mission_unified_successor']['writer_contract_hash']
         with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
         self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+        if getattr(self,'dns_permission_fixture',False):
+            import socket
+            from urllib.error import URLError
+            from video_mission_one import DNS_PERMISSION_PURPOSE
+            self.http.reset_mock(side_effect=False)
+            self.http.side_effect=URLError(socket.gaierror(-3,'synthetic DNS failure'))
+            dns_failed=self.run_job()
+            self.assertEqual(dns_failed['reason_code'],'free_request_failed')
+            self.assertEqual(self.http.call_count,1)
+            ninth=self.job
+            before.update({p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and ninth in p.name})
+            with self.assertRaises(CompanyError):self.store.unified_successor_reference(dns_failed)
+            reference=self.store.unified_successor_reference(dns_failed,new_purpose=DNS_PERMISSION_PURPOSE)
+            self.assertEqual(reference['consumed_calls'],12)
+            self.assertEqual(len(reference['previous_attempt_ids']),12)
+            for mutate in (lambda j:j['real_ai']['attempts'][0].update(http_status=200),
+                           lambda j:j['real_ai']['attempts'][0].update(provider_error_diagnostics=dict(category='connect_timeout',stage='transport_open'))):
+                bad=deepcopy(dns_failed);mutate(bad)
+                with self.assertRaises(CompanyError):self.store.unified_successor_reference(bad,new_purpose=DNS_PERMISSION_PURPOSE)
+            self.job=self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True,new_purpose=DNS_PERMISSION_PURPOSE)
+            fresh=self.store.load(self.job)
+            self.assertFalse(fresh['real_ai']['attempts']);self.assertFalse(fresh['real_ai']['consent']);self.assertFalse(fresh['sessions'])
+            with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True,new_purpose=DNS_PERMISSION_PURPOSE)
+            body=self.store.prepare_mission(self.job,key=self.key,account_project=MISSION_ACCOUNT,quota_note='synthetic network permission',
+                youtube_key=youtube_key,youtube_project=MISSION_ACCOUNT,confirm_youtube_policy=True)
+            self.assertEqual(body['mission_web']['approved_max_searches'],0)
+            for mutate in (lambda b:b.update(model='other'),lambda b:b['mission_account'].update(account_project='other'),
+                           lambda b:b['mission_unified_successor'].update(writer_contract_hash='0'*64)):
+                bad=deepcopy(body);mutate(bad)
+                with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+            self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
         self.http.reset_mock(side_effect=False);self.http.side_effect=send;self.new_phases=[]
         result=self.run_job()
         self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))

@@ -24,6 +24,7 @@ GAME_SCOPE = 'game_shorts_independent_research_20261111'
 GAME_RESEARCH_BLOCKER = 'mission_independent_web_research_unavailable'
 MAX_CALLS = 10  # Historical policy; never rewrite old signed grants.
 UNIFIED_SUCCESSOR_POLICY = 'mission01_validated_writer_successor_20261112_v1'
+DNS_PERMISSION_PURPOSE = 'write_new_script_under_native_v2_with_authorized_network_permission'
 UNIFIED_PURPOSE = '구조화 writer schema에 맞는 새 대본 작성'
 WRITER_FAILURES = frozenset(('invalid_script_shot','invalid_script_source','invalid_script_fact','invalid_script_timeline',
     'invalid_script_contract','invalid_beat_time','invalid_topic_freshness','script_transcript_mismatch',
@@ -349,7 +350,9 @@ class MissionOneStore(QualityProviderStore):
         check_scope always computes the current successor contract from server facts.
         """
         text(new_purpose,400)
-        require(previous['status']=='stopped' and previous.get('reason_code') in WRITER_FAILURES
+        dns = (previous.get('reason_code') == 'free_request_failed'
+               and previous.get('mission_unified_successor') is not None)
+        require(previous['status']=='stopped' and (previous.get('reason_code') in WRITER_FAILURES or dns)
                 and (previous.get('mission_topic_successor') or previous.get('mission_unified_successor')),
                 'mission_unified_not_eligible')
         grant=parse(self._grant_path(previous['id']).read_text())
@@ -379,19 +382,32 @@ class MissionOneStore(QualityProviderStore):
         attempts=previous['real_ai']['attempts']
         require(len(attempts)==1 and attempts[0]['phase']=='execute'
                 and attempts[0]['task_id']==previous['assignments'][1]['id']
-                and attempts[0]['status']=='completed' and attempts[0].get('http_status')==200
-                and attempts[0]['model']==MODEL and attempts[0].get('response_hash')
-                and attempts[0].get('free_account_policy_verified') is True
-                and attempts[0]['role_result_status']=='json_parsed'
+                and attempts[0]['model']==MODEL
                 and previous['active_operation']==attempts[0]['id'] and not previous.get('final'),
                 'mission_unified_attempts_invalid')
+        attempt=attempts[0]
+        if dns:
+            require(attempt['status']=='failed' and attempt.get('error_code')=='free_request_failed'
+                    and attempt.get('provider_error_diagnostics')==dict(category='dns_error',stage='transport_open')
+                    and attempt.get('transport_started_at') and not attempt.get('http_status')
+                    and not attempt.get('response_hash') and not attempt.get('response_received_at')
+                    and attempt.get('role_result_status')=='unvalidated'
+                    and new_purpose==DNS_PERMISSION_PURPOSE
+                    and prior.get('new_purpose')!=DNS_PERMISSION_PURPOSE,
+                    'mission_dns_permission_scope_invalid')
+        else:
+            require(attempt['status']=='completed' and attempt.get('http_status')==200
+                    and attempt.get('response_hash') and attempt.get('free_account_policy_verified') is True
+                    and attempt['role_result_status']=='json_parsed', 'mission_unified_attempts_invalid')
         selection=validate_selection(parse(previous['assignments'][0]['reviews'][-1]['feedback']),previous['employee_web'])
         contract_hash=_history_contract_hash or digest(writer_contract(previous['quality_inputs']['target_segment'],
             selection['duration_seconds'],MODEL,selection['selected_topic']))
         require(isinstance(contract_hash,str) and len(contract_hash)==64 and all(c in '0123456789abcdef' for c in contract_hash),
                 'mission_unified_contract_invalid')
         key=digest(dict(previous_job_id=previous['id'],new_purpose=new_purpose,writer_contract_hash=contract_hash))
-        if marker=='mission_unified_successor':
+        if dns:
+            require(contract_hash==prior['writer_contract_hash'], 'mission_dns_contract_changed')
+        elif marker=='mission_unified_successor':
             require(contract_hash!=prior['writer_contract_hash'],
                     'mission_unified_unchanged_request')
         return dict(policy=UNIFIED_SUCCESSOR_POLICY,previous_job=previous['id'],previous_state_hash=previous['storage_hash'],

@@ -138,7 +138,7 @@ class Studio:
         flow=p['representative'];state=flow.get('rework')
         if not state:
             return dict(status='available',feedback=flow['decisions'][-1]['feedback']) if flow['stage']=='plan_revision' and flow['plan_versions'] else None
-        from representative_rework import ReworkStore,execution_settings,progress_view
+        from representative_rework import ReworkStore,execution_settings,progress_view,failed_plan_reference
         job=ReworkStore(self.stores[key].root/'representative_rework').load(state['job'])
         settings=execution_settings();recovery=dict(eligible=False,error=None)
         if state['status']=='stopped' and state.get('error')=='gemini_execution_disabled':
@@ -146,11 +146,19 @@ class Studio:
                 ReworkStore(self.stores[key].root/'representative_rework').verify_disabled_recovery(job,state,os.getenv('GEMINI_API_KEY',''))
                 recovery['eligible']=True
             except CompanyError as exc:recovery['error']=exc.code
+        new_attempt=None
+        if state['status']=='stopped' and p['representative']['stage']=='plan_revision':
+            try:new_attempt=failed_plan_reference(ReworkStore(self.stores[key].root/'representative_rework'),p,os.getenv('GEMINI_API_KEY',''))
+            except CompanyError:pass
+        progress=progress_view(job,state)
+        if new_attempt:
+            progress['next_action']='수정 대본 다시 생성 준비를 눌러 새 전송 범위를 검토·동의한 뒤 시작하세요. 기존 실패 업무는 다시 실행하지 않습니다.'
         return dict(status=state['status'],job=state['job'],error=state.get('error'),settings=settings,recovery=recovery,
+            new_attempt=new_attempt,history=[dict(job=x['job'],status=x['status'],error=x.get('error')) for x in flow.get('rework_history',[])],
             feedback=job['quality_inputs']['feedback_text'],proposal=state.get('proposal'),
             review_hash=digest(state['proposal']) if state.get('proposal') else None,
             job_status=job['status'],attempts=len(job['real_ai']['attempts']),
-            replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]),progress=progress_view(job,state))
+            replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]),progress=progress)
 
     def rework_action(self,pid,name,body):
         from representative_rework import prepare,ReworkStore,ReworkCompany,handoff,execution_settings
@@ -159,10 +167,10 @@ class Studio:
         config=Gemini35Config.from_env()
         require(config.model==MODEL and config.endpoint==ENDPOINT,'rework_fixed_model_required')
         _binding('rework-local',config.api_key)
-        if name=='rework-prepare':
-            exact(body,('account_project','confirm_free_account'))
+        if name in ('rework-prepare','rework-new-prepare'):
+            exact(body,('account_project','confirm_free_account','previous_job') if name=='rework-new-prepare' else ('account_project','confirm_free_account'))
             require(body['confirm_free_account'] is True and body['account_project']==MISSION_ACCOUNT,'rework_free_project_required')
-            prepare(self.workflow,pid,config.api_key,body['account_project']);return
+            prepare(self.workflow,pid,config.api_key,body['account_project'],previous_job=body['previous_job'] if name=='rework-new-prepare' else None);return
         provider=ReworkStore(self.stores['workspace'].root/'representative_rework')
         with self.stores['workspace'].lock(pid):
             project=self.project('workspace',pid);state=project['representative'].get('rework')
@@ -402,7 +410,7 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
-        if name in ('rework-prepare','rework-consent','rework-run','rework-recover'):
+        if name in ('rework-prepare','rework-new-prepare','rework-consent','rework-run','rework-recover'):
             self.rework_action(pid,name,body)
         elif name=='budget-prepare':
             self.budget_prepare(pid,body)
@@ -554,7 +562,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_new_consented_rework_after_failed_plan_to_v2_offline(self):
+        self.new_attempt_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_strict_rework_plan_contract_to_script_offline(self):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
@@ -1584,6 +1588,13 @@ class MissionOneTests(unittest.TestCase):
         def run():return company.run(pid,expected_state_hash=provider.load(pid)['storage_hash'])
         with self.assertRaises(CompanyError):run()
         body=state['proposal']
+        if getattr(self,'new_attempt_fixture',False):
+            # Historical fixture uses the old signed plan contract, not the new one.
+            body['rework_scope'].pop('plan_contract_hash')
+            project_state=self.studio.workflow.store.load(project)
+            project_state['representative']['rework']['proposal']=deepcopy(body)
+            self.studio.workflow.store.save(project_state)
+
         bad=deepcopy(body);bad['rework_scope']['reference']['plan_hash']='0'*64
         with self.assertRaises(CompanyError):provider.approve(pid,bad,review_hash=digest(bad),owner_confirmed=True)
         self.studio.action('workspace',project,'rework-consent',dict(review_hash=digest(body),confirm_free_account=True,confirm_data_policy=True))
@@ -1646,6 +1657,33 @@ class MissionOneTests(unittest.TestCase):
                 with self.assertRaises(CompanyError):provider.verify_disabled_recovery(clean,original_state,self.key)
             self.assertEqual(provider.path(pid).read_bytes(),saved_job)
             self.assertEqual(provider._grant_path(pid).read_bytes(),saved_grant)
+        if getattr(self,'new_attempt_fixture',False):
+            from autonomous_company import now
+            old_id=pid;old=provider.load(pid)
+            old.update(status='stopped',reason_code='invalid_dependencies',active_operation='fixture-completed-plan')
+            old['sessions']=[dict(id='fixture-session',at=now(),resume=False)]
+            old['real_ai']['attempts']=[dict(id='fixture-completed-plan',phase='plan',model=MODEL,status='completed',
+                http_status=200,role_result_status='json_parsed',response_hash='fixture-response',
+                transport_started_at=now(),response_received_at=now())]
+            old['events'].append(dict(at=now(),event='system_safety_stop',code='invalid_dependencies'))
+            provider.save(old)
+            with self.studio.workflow.store.lock(project):
+                current=self.studio.workflow.store.load(project)
+                current['representative']['rework'].update(status='stopped',error='invalid_dependencies')
+                self.studio.workflow.store.save(current)
+            preserved={p:p.read_bytes() for p in provider.root.glob(old_id+'.*')}
+            self.assertIsNotNone(self.studio.detail('workspace',project)['rework']['new_attempt'])
+            request=dict(account_project='gen-lang-client-0938732315',confirm_free_account=True,previous_job=old_id)
+            self.studio.action('workspace',project,'rework-new-prepare',request)
+            pending=self.studio.detail('workspace',project)['rework'];pid=pending['job']
+            self.assertNotEqual(pid,old_id);self.assertEqual(pending['status'],'pending')
+            self.assertEqual(provider.load(pid)['real_ai']['attempts'],[])
+            with self.assertRaises(CompanyError):self.studio.action('workspace',project,'rework-new-prepare',request)
+            with self.assertRaises(CompanyError):provider.approve(pid,body,review_hash=digest(body),owner_confirmed=True)
+            self.studio.action('workspace',project,'rework-consent',dict(review_hash=pending['review_hash'],confirm_free_account=True,confirm_data_policy=True))
+            self.assertNotEqual(provider.grant(provider.load(pid))['id'],provider.load(old_id)['real_ai']['consent']['operating_grant_id'])
+            for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)
+            self.assertEqual(self.studio.workflow.store.load(project)['representative']['rework_history'][0]['job'],old_id)
         draft=deepcopy(original['script']);draft['topic']['title']='역전 한 수의 이야기'
         for i,b in enumerate(draft['narrative_beats']):
             b.update(narration=['마지막 한 수가 보이나요?','빈칸에 놓자 길이 열렸어요.','작은 선택이 판을 뒤집었죠.'][i],caption='역전 한 수',screen='가상 보드 한 수 비교',fact_status='illustrative')
@@ -1730,6 +1768,8 @@ class MissionOneTests(unittest.TestCase):
             with self.assertRaises(CompanyError):self.studio.action('workspace',project,'rework-run',{})
         self.assertEqual(self.http.call_count,1)
         self.assertEqual(self.studio.detail('workspace',project)['rework']['status'],'stopped')
+        if getattr(self,'new_attempt_fixture',False):
+            for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)
         for path,data in original_bytes.items():self.assertEqual(path.read_bytes(),data)
 
     def test_unknown_quota_and_signed_caps_cannot_be_increased(self):

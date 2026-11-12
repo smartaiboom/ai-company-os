@@ -175,6 +175,12 @@ class ReworkStore(QualityProviderStore):
                 and flow.get('rework',{}).get('job')==p['id'] and project['goal']==p['goal']
                 and digest(p['quality_inputs']['answers'])==ref['input_hash'],'rework_source_changed')
         require(digest({k:v for k,v in prior.items() if k!='sha256'})==prior['sha256'], 'rework_plan_tampered')
+        parent=ref.get('previous_failed_attempt')
+        if parent:
+            old=self.load(parent['job']);grant=parse(self._grant_path(parent['job']).read_text())
+            require(old['storage_hash']==parent['state_hash'] and digest(grant)==parent['grant_hash']
+                    and hmac.compare_digest(grant['signature'],self._sign(grant['record'])), 'rework_parent_changed')
+
 
     def prepare(self,pid,*,key,account_project,**kwargs):
         require(account_project==MISSION_ACCOUNT,'rework_free_project_required')
@@ -313,20 +319,56 @@ class ReworkCompany(MissionOneCompany):
         return ['needs_user_review']
 
 
-def prepare(workflow,pid,key,account):
+def failed_plan_reference(store,project,key):
+    state=project['representative']['rework'];old=store.load(state['job'])
+    require(state['status']=='stopped' and old['status']=='stopped'
+            and old.get('reason_code') in ('invalid_dependencies','rework_plan_invalid')
+            and state.get('error')==old.get('reason_code')
+            and old['phase']=='plan' and not old['plan'] and not old['assignments'] and not old['final'],
+            'rework_new_attempt_not_eligible')
+    store.check_binding(old)
+    attempts=old['real_ai']['attempts']
+    require(len(attempts)==1 and len(old['sessions'])==1,'rework_new_attempt_uncertain')
+    attempt=attempts[0]
+    require(attempt['phase']=='plan' and attempt['status']=='completed' and attempt.get('http_status')==200
+            and attempt.get('role_result_status')=='json_parsed' and attempt.get('response_hash')
+            and attempt.get('transport_started_at') and attempt.get('response_received_at')
+            and attempt['model']==MODEL and old['active_operation'] in (None,attempt['id']),
+            'rework_new_attempt_uncertain')
+    grant=parse(store._grant_path(old['id']).read_text());record=grant['record'];body=record['body'];scope=body['rework_scope']
+    require(hmac.compare_digest(grant['signature'],store._sign(record)) and record['revoked_at'] is None
+            and old['real_ai']['consent'].get('operating_grant_id')==record['id']
+            and state['proposal']==body and scope['reference']==old['rework_reference']
+            and body['quality_contract']['inputs']==old['quality_inputs'] and body['model']==MODEL and body['endpoint']==ENDPOINT
+            and body['free_only'] is True and scope['account_project']==MISSION_ACCOUNT and scope['data_policy']==DATA_POLICY,
+            'rework_history_signature_invalid')
+    require(scope.get('plan_contract_hash')!=digest(PLAN_RULES),'rework_same_contract_new_attempt_forbidden')
+    require(hmac.compare_digest(scope['credential_binding'],_binding(old['id'],key)),'rework_key_changed')
+    # Expired historical consent proves history only; it never authorizes this new request.
+    return dict(job=old['id'],state_hash=old['storage_hash'],grant_hash=digest(grant),
+                attempt_id=attempt['id'],contract_hash=digest(PLAN_RULES))
+
+
+def prepare(workflow,pid,key,account,*,previous_job=None):
     with workflow.store.lock(pid):
         project=workflow.store.load(pid);flow=project['representative']
         require(flow['stage']=='plan_revision','rework_stage')
         store=ReworkStore(workflow.store.root/'representative_rework')
-        if flow.get('rework'):
+        parent=None
+        if previous_job is not None:
+            require(flow.get('rework',{}).get('job')==previous_job,'rework_stale_new_attempt')
+            parent=failed_plan_reference(store,project,key)
+            flow.setdefault('rework_history',[]).append(deepcopy(flow['rework']))
+        elif flow.get('rework'):
             if flow['rework']['decision_hash']==digest(flow['decisions'][-1]):return
             require(flow['rework']['status']=='completed','rework_already_exists')
             flow.setdefault('rework_history',[]).append(deepcopy(flow['rework']))
         # Refuse an orphan left after a partially saved preparation instead of recreating it.
+        archived={item['job'] for item in flow.get('rework_history',[])}
         for path in store.root.glob('qualityprovider-*.json'):
             if '.consent.' not in path.name:
                 existing=store.load(path.stem)
-                require(existing.get('rework_reference',{}).get('decision_hash')!=digest(flow['decisions'][-1]),'rework_orphan_exists')
+                require(existing['id'] in archived or existing.get('rework_reference',{}).get('decision_hash')!=digest(flow['decisions'][-1]),'rework_orphan_exists')
         answers=snapshot(project)
         job=store.create(project['goal'],inputs=dict(domain='video',target_segment=flow['audience'],answers=answers,
             constraints=dict(aspect='9:16',language='한국어',platform='YouTube Shorts'),
@@ -335,6 +377,7 @@ def prepare(workflow,pid,key,account):
         prior=flow['plan_versions'][-1]
         job['rework_reference']=dict(project=pid,version=prior['version'],plan_hash=prior['sha256'],
             decision_hash=digest(flow['decisions'][-1]),input_hash=digest(answers))
+        if parent:job['rework_reference']['previous_failed_attempt']=parent
         store.save(job)
         flow['rework']=dict(job=job['id'],status='pending',decision_hash=job['rework_reference']['decision_hash'])
         workflow.store.save(project)

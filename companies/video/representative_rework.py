@@ -34,6 +34,65 @@ def execution_settings():
     return dict(ready=not missing,missing=missing)
 
 
+def progress_view(job,state):
+    """Read-only projection: transport completion never implies server acceptance."""
+    from datetime import datetime,timezone,timedelta
+    stages=[('consent','전송 동의','대표'),('plan','재기획','AI 관리자'),
+            ('writer','대본 작성','대본 직원'),('writer_review','대본 검토','AI 관리자'),
+            ('editor','스토리보드 작성','편집 직원'),('editor_review','스토리보드 검토','AI 관리자'),
+            ('approval','새 기획 대표 승인 대기','대표')]
+    tasks={t['role']:t for t in job.get('assignments',[])}
+    completed={'consent':job['real_ai']['consent'].get('approved') is True,'plan':bool(job.get('plan')),
+               'approval':state['status']=='completed'}
+    for role in ('writer','editor'):
+        task=tasks.get(role,{})
+        completed[role]=bool(task.get('versions')) and task.get('state')!='revision_requested'
+        completed[role+'_review']=task.get('state')=='accepted_by_ai_manager'
+    attempts=job['real_ai']['attempts'];latest=attempts[-1] if attempts else None
+    current=next((key for key,_,_ in stages if not completed.get(key)), 'approval')
+    if state['status']=='running' and latest and latest.get('status')=='reserved':
+        role=next((t['role'] for t in tasks.values() if t['id']==latest.get('task_id')),None)
+        current='plan' if latest['phase']=='plan' else role+('_review' if latest['phase']=='review' else '') if role else current
+    terminal=state['status']=='stopped' or job['status'] in ('stopped','paused','needs_operational_permission')
+    error=(state.get('error') or job.get('reason_code')) if terminal else None
+    messages={
+        'invalid_dependencies':('AI 관리자가 작성한 업무 순서나 참조 관계가 유효하지 않아 기획안 검증에서 중단됐습니다. 새 대본은 아직 생성되지 않았습니다.','담당 개발 점검이 필요합니다. 다시 실행하지 마세요.'),
+        'gemini_execution_disabled':('Gemini 실행 설정이 꺼져 있어 시작하지 못했습니다.','서버 실행 설정을 확인하고 재시작하세요. 전송 0 검증을 통과한 경우에만 재개할 수 있습니다.'),
+        'consent_expired':('외부 전송 동의의 유효기간이 지났습니다.','새 동의 범위를 확인해야 합니다. 기존 실행을 반복하지 마세요.'),
+        'provider_unavailable':('AI 제공자 서비스 오류로 중단됐습니다.','기존 시도를 보존했습니다. 담당자 확인 전 다시 실행하지 마세요.'),
+        'provider_rate_limit':('AI 제공자의 요청 한도에 도달했습니다.','한도와 기존 시도 기록 확인이 필요합니다. 자동 재시도하지 않습니다.'),
+        'provider_quota_or_billing':('제공자 이용 한도 또는 무료 조건을 확인해야 합니다.','유료 전환 없이 담당자에게 이용 조건 확인을 요청하세요.'),
+        'free_request_failed':('연결 오류 또는 응답 미확정으로 중단됐습니다.','수신 여부 확인 전 다시 실행하지 마세요.'),
+        'known_script_defects':('대본의 품질 결함이 남아 서버가 수락을 막았습니다.','검토 결과를 보존했습니다. 추가 수정 범위 확인이 필요합니다.'),
+        'rework_goal_not_met':('대표 피드백 또는 원 목표 충족 검토를 통과하지 못했습니다.','담당자에게 의미 검토 결과와 추가 수정 범위를 확인해 주세요.')}
+    message,action=messages.get(error,('AI 작업 검증 또는 실행 중 문제가 발견되어 중단됐습니다.','기존 기록을 보존했습니다. 담당자 점검 전 다시 실행하지 마세요.')) if terminal else (
+        ('새 기획·대본·스토리보드의 검토가 완료됐습니다.','새 버전과 이전 버전을 비교하고 승인 또는 수정 요청을 선택하세요.') if state['status']=='completed' else
+        ('승인된 범위의 AI 작업을 진행하고 있습니다.','상태 새로고침으로 진행 상황을 확인하세요. 새로고침은 실행하지 않습니다.') if state['status']=='running' else
+        ('외부 전송 동의와 실행 준비를 확인해 주세요.','동의 준비·검토 후 명시적으로 시작하세요.'))
+    timestamps=[x.get(k) for x in job.get('events',[])+attempts+state.get('recovery_events',[])
+                for k in ('at','finished_at','response_received_at','reserved_at') if x.get(k)]
+    updated=None
+    for value in timestamps:
+        try:
+            parsed=datetime.fromisoformat(value)
+            if parsed.tzinfo and (updated is None or parsed>updated):updated=parsed
+        except (ValueError,TypeError):pass
+    cards=[dict(id=key,label=label,actor=actor,state='완료' if completed.get(key) else
+                '중단' if terminal and key==current else '진행 중' if state['status']=='running' and key==current else '대기')
+           for key,label,actor in stages]
+    selected=next(c for c in cards if c['id']==current)
+    return dict(title='재작업 중단 · 새 결과 미완료' if terminal else '새 기획 대표 승인 대기' if state['status']=='completed' else
+                     selected['label']+(' 진행 중' if state['status']=='running' else ' 대기'),
+        actor=selected['actor'],current=selected['label'],cards=cards,message=message,next_action=action,
+        updated_at=updated.astimezone(timezone(timedelta(hours=9))).isoformat() if updated else None,
+        counts=dict(attempts=len(attempts),transport_started=sum(bool(a.get('transport_started_at')) for a in attempts),
+            http_ok=sum(a.get('http_status')==200 for a in attempts),
+            server_validated=sum(a.get('role_result_status')=='validated' for a in attempts),
+            failed=sum(a.get('status')=='failed' for a in attempts)),
+        ledger=[{k:a.get(k) for k in ('phase','task_id','status','http_status','role_result_status','reserved_at',
+                'finished_at','response_hash','request_hash','transport_started_at')} for a in attempts])
+
+
 def snapshot(project):
     flow=project['representative'];prior=flow['plan_versions'][-1];decision=flow['decisions'][-1]
     require(decision['stage']=='plan' and decision['action']=='request_revision'

@@ -221,18 +221,26 @@ function reworkPanel(p) {
   const r=p.rework;
   if (!r) return '';
   const labels={available:'실행 동의 준비',pending:'새 외부 전송 동의 대기',approved:'동의 완료 · 실행 대기',running:'AI 재기획·재작업 실행 중',stopped:'재작업 중단 · 자동 재호출 없음',completed:'새 기획 대표 재승인 대기'};
-  return `<section class="panel"><h3>대표 피드백 AI 재작업</h3><p>${h(labels[r.status]||r.status)}</p><p>${h(r.feedback)}</p>
+  const progress=r.progress;
+  return `<section class="panel"><h3>대표 피드백 AI 재작업</h3><h3>${h(progress?.title||labels[r.status]||'상태 확인 필요')}</h3>
+    <p class="muted">프로젝트는 대표의 기획 수정 요청을 유지합니다. 아래는 그 요청에 대한 최신 AI 재작업 현황입니다. 이전 수락 기획과는 별도입니다.</p>
+    ${progress?`${facts([['현재 단계',progress.current],['담당',progress.actor],['최종 갱신',progress.updated_at?time(progress.updated_at):'기록 없음']])}
+      <ol class="beats" aria-label="AI 재작업 단계">${progress.cards.map(c=>`<li class="beat"><strong>${h(c.label)}</strong><p>${h(c.actor)} · ${h(c.state)}</p></li>`).join('')}</ol>
+      <p class="${r.status==='stopped'?'warning':'muted'}">${h(progress.message)}</p><p><strong>다음 행동:</strong> ${h(progress.next_action)}</p>
+      ${facts([['기록된 요청 시도',progress.counts.attempts],['전송 시작 기록',progress.counts.transport_started],['정상 HTTP 응답',progress.counts.http_ok],['서버 검증 완료',progress.counts.server_validated],['전송 실패 기록',progress.counts.failed],['무료 quota / 청구','미확인 / 독립 검증 안 됨']])}
+      <p class="muted">HTTP 응답 완료와 결과물 수락은 다릅니다. 시도에는 실패·수신 불명 요청도 포함됩니다.</p>
+      <details><summary>기술 진단·호출 기록</summary><p>${h(r.error||r.recovery?.error||'현재 오류 코드 없음')}</p><pre>${h(JSON.stringify(progress.ledger,null,2))}</pre></details>`:''}
+    <details><summary>저장된 대표 수정 요청</summary><p>${h(r.feedback)}</p></details>
     <p class="muted">이전 버전은 보존됩니다. 관리자 재기획 → 대본/스토리보드 → 의미·형식 검토 후 같은 컷룸에 새 버전을 제출합니다. 웹 조회·음성·렌더·게시 없음.</p>
-    ${r.error?`<p class="warning">${h(r.error)}</p>`:''}
     ${r.settings&&!r.settings.ready?`<p class="warning">Gemini 실행 설정 확인 필요: ${h(r.settings.missing.join(', '))}. 서버 환경에 설정 후 서버를 재시작하세요. 키 값은 입력하거나 공유하지 마세요.</p>`:''}
-    ${r.recovery?.error?`<p class="warning">재개 차단: ${h(r.recovery.error)}. 만료 동의는 새 동의 검토가 필요하며 반복 클릭하지 마세요.</p>`:''}
-    ${r.recovery?.eligible?`<p>과거 중단 기록과 시도 0은 보존됩니다. 현재 승인 범위로 명시적으로 한 번 재개할 수 있습니다.</p>${r.settings?.ready?'<button class="button" data-action="rework-recover">설정 확인 후 AI 재작업 재개</button>':''}`:''}
+    ${r.recovery?.error?`<p class="warning">재개 차단: 동의·서명·전송 이력 확인이 필요합니다. 만료 동의는 새 동의 검토가 필요하며 반복 클릭하지 마세요.</p>`:''}
+    ${r.recovery?.eligible&&r.attempts===0?`<p>과거 중단 기록과 시도 0은 보존됩니다. 현재 승인 범위로 명시적으로 한 번 재개할 수 있습니다.</p>${r.settings?.ready?'<button class="button" data-action="rework-recover">설정 확인 후 AI 재작업 재개</button>':''}`:''}
     ${r.proposal?facts([['모델',r.proposal.model],['프로젝트',r.proposal.rework_scope.account_project],['무료 quota / 청구','unknown / unverified'],['시도',r.attempts]]):''}
     ${r.proposal?`<details><summary>전송 범위·재기획·검토 기록</summary><p>${h(r.proposal.rework_scope.data_policy)}</p><p>원 목표·저장된 대표 피드백·이전 대본/스토리보드·공개 관측을 Google에 전송합니다. 입출력 개선 활용·인적 검토 가능. 무료 여부는 소유자 확인이며 독립 검증되지 않았습니다.</p><pre>${h(JSON.stringify({inputs:r.proposal.quality_contract.inputs,replan:r.replan,reviews:r.reviews},null,2))}</pre></details>`:''}
     ${r.status==='available'?'<button class="button secondary" data-action="rework-prepare">AI 재작업 동의 준비</button>':''}
     ${r.status==='pending'?'<button class="button secondary" data-action="rework-consent">새 외부 전송 동의</button>':''}
     ${r.status==='approved'&&r.settings?.ready?'<button class="button" data-action="rework-run">AI 재작업 시작</button>':''}
-    ${r.status==='running'?'<p class="muted">중복 시작은 차단됩니다. 페이지를 닫아도 서버에서 진행됩니다. 서버 종료로 상태가 불명확하면 자동 재시작하지 않습니다.</p><button class="button ghost" data-action="refresh">상태 새로고침</button>':''}</section>`;
+    ${r.status==='running'?'<p class="muted">중복 시작은 차단됩니다. 서버 종료로 상태가 불명확하면 자동 재시작하지 않습니다.</p>':''}<button class="button ghost" data-action="refresh">상태 새로고침 · 조회만</button></section>`;
 }
 
 function budgetSetupPanel(p) {
@@ -283,7 +291,7 @@ function projectPage(p, chosen={}) {
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
   <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
   <aside class="stack"><section class="panel"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['다음 행동',s[2]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
-  ${operations(p)}${p.stage!=='plan_revision'?reworkPanel(p):''}${missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
+  ${operations(p)}${p.stage!=='plan_revision'?reworkPanel(p):''}${p.rework&&p.mission?`<details class="subpanel"><summary>이전 미션 기획 보존 · 참고용 (최신 재작업 아님)</summary><p>아래 내부 수락은 이전 버전의 기록입니다. 최신 진행 상황은 위 AI 재작업 현황을 확인하세요.</p>${missionStatus(p.mission)}</details>`:missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
   <section class="panel"><h2>${icon('clock')} 진행 타임라인</h2><ol class="timeline">${[...f.events].reverse().map(e=>`<li><strong>${h(statuses[e.stage]?.[0] || e.stage)}</strong><p class="muted">${h(time(e.at))}</p></li>`).join('')}</ol></section></aside></div>`;
 }

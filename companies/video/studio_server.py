@@ -138,7 +138,7 @@ class Studio:
         flow=p['representative'];state=flow.get('rework')
         if not state:
             return dict(status='available',feedback=flow['decisions'][-1]['feedback']) if flow['stage']=='plan_revision' and flow['plan_versions'] else None
-        from representative_rework import ReworkStore,execution_settings
+        from representative_rework import ReworkStore,execution_settings,progress_view
         job=ReworkStore(self.stores[key].root/'representative_rework').load(state['job'])
         settings=execution_settings();recovery=dict(eligible=False,error=None)
         if state['status']=='stopped' and state.get('error')=='gemini_execution_disabled':
@@ -150,7 +150,7 @@ class Studio:
             feedback=job['quality_inputs']['feedback_text'],proposal=state.get('proposal'),
             review_hash=digest(state['proposal']) if state.get('proposal') else None,
             job_status=job['status'],attempts=len(job['real_ai']['attempts']),
-            replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]))
+            replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]),progress=progress_view(job,state))
 
     def rework_action(self,pid,name,body):
         from representative_rework import prepare,ReworkStore,ReworkCompany,handoff,execution_settings

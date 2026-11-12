@@ -4,7 +4,7 @@ import hmac
 import json
 import re
 import os
-from autonomous_company import Store, digest, parse, require, text
+from autonomous_company import CompanyError, Store, digest, parse, require, text, validate_plan
 from autonomous_gemini35 import Gemini35Store, Gemini35Config, MODEL, ENDPOINT
 from autonomous_live import LiveManagerProvider, LiveEmployeeProvider
 from quality_provider import QualityProviderStore
@@ -22,6 +22,45 @@ NOTICE=('원 목표와 representative_feedback을 이전 초안과 비교해 재
         'review에는 goal_review의 goal_fit/feedback_applied/subject_story/concrete_hook/claims_supported 각각 '
         '{met:boolean,evidence:string}를 추가하세요. evidence는 대본/스토리보드 원문 인용이어야 합니다. '
         '대표 피드백 핵심과 목표 충족을 검토하고 미충족이면 accept 금지. 미확인 권리/성과는 미확인으로 유지.')
+
+
+PLAN_RULES = (
+    'Rework plan contract v2: exactly TWO tasks in order: writer then editor. '
+    'Choose your own unique task IDs and criterion IDs. writer.depends_on MUST be []; '
+    'editor.depends_on MUST be [the exact writer task ID]. No self, forward, missing or duplicate references. '
+    'criteria contains unique IDs. Each task.criteria_ids is a nonempty unique subset of those criterion IDs; '
+    'together both tasks use ALL criteria. Do not put task IDs into criteria_ids or criterion IDs into depends_on. '
+    'replan.selected_topic must serve the ORIGINAL user goal and representative feedback, not the previous off-goal topic. '
+    'Explain duration_seconds (4–180) in duration_reason and the concrete feedback changes in feedback_response. '
+    'Keep all eight script criteria; game-story content is required, never video-making tips. '
+    'No correction call or automatic retry is authorized by this contract.'
+)
+
+
+def validate_rework_plan(plan):
+    """Diagnose relationships without rewriting any AI-generated content."""
+    def fail(index,field,detail):
+        error=CompanyError('rework_plan_invalid')
+        error.diagnostics=dict(task_index=index,field=field,detail=detail)
+        raise error
+    tasks=plan.get('tasks',[]);criteria=plan.get('criteria',[])
+    if len(tasks)!=2:fail(None,'tasks','exactly_two_required')
+    ids=[t.get('id') for t in tasks]
+    if len(set(ids))!=2:fail(None,'id','duplicate_task_id')
+    criterion_ids=[c.get('id') for c in criteria]
+    if len(set(criterion_ids))!=len(criterion_ids):fail(None,'criteria','duplicate_criterion_id')
+    for index,task in enumerate(tasks):
+        if task.get('role')!=('writer','editor')[index]:fail(index,'role','writer_then_editor_required')
+        if task.get('depends_on')!= ([] if index==0 else [ids[0]]):
+            fail(index,'depends_on','empty_for_writer_exact_writer_id_for_editor')
+        refs=task.get('criteria_ids',[])
+        if not refs or len(set(refs))!=len(refs) or any(ref not in criterion_ids for ref in refs):
+            fail(index,'criteria_ids','nonempty_unique_existing_criterion_ids_required')
+    if set(criterion_ids)!={ref for task in tasks for ref in task['criteria_ids']}:
+        fail(None,'criteria_ids','every_criterion_must_be_used')
+    try:validate_plan(plan)
+    except CompanyError as exc:fail(None,'plan',exc.code)
+    return plan
 
 
 def execution_settings():
@@ -143,7 +182,7 @@ class ReworkStore(QualityProviderStore):
         b=super().prepare(pid,confirm_free_account=True,valid_hours=1)
         return dict(b,rework_scope=dict(reference=p['rework_reference'],account_project=account_project,
             credential_binding=_binding(pid,key),data_policy=DATA_POLICY,billing='unverified',quota='unknown',
-            new_youtube_calls=0,automatic_retry=False,instructions_hash=digest(NOTICE)))
+            new_youtube_calls=0,automatic_retry=False,instructions_hash=digest(NOTICE),plan_contract_hash=digest(PLAN_RULES)))
 
     def _check_contract(self,p,b):
         self.check_binding(p);scope=b.get('rework_scope',{})
@@ -151,6 +190,8 @@ class ReworkStore(QualityProviderStore):
                 and scope.get('data_policy')==DATA_POLICY and scope.get('new_youtube_calls')==0
                 and scope.get('automatic_retry') is False and scope.get('instructions_hash')==digest(NOTICE),
                 'rework_consent_scope')
+        if 'plan_contract_hash' in scope:
+            require(scope['plan_contract_hash']==digest(PLAN_RULES),'rework_plan_contract_changed')
         super()._check_contract(p,{k:v for k,v in b.items() if k!='rework_scope'})
 
 
@@ -164,12 +205,13 @@ class ReworkCompany(MissionOneCompany):
 
     def _quality_transport_allowed(self,p):
         record=self.store.grant(p)
+        require(record['body']['rework_scope'].get('plan_contract_hash')==digest(PLAN_RULES),'rework_new_plan_consent_required')
         require(hmac.compare_digest(record['body']['rework_scope']['credential_binding'],_binding(p['id'],self.config.api_key)),
                 'rework_key_changed')
         return True
 
     def _tool_notice(self,p):
-        return VideoProviderQualityCompany._tool_notice(self,p).replace('target_duration=60','target_duration=replan.duration_seconds')+NOTICE
+        return VideoProviderQualityCompany._tool_notice(self,p).replace('target_duration=60','target_duration=replan.duration_seconds')+NOTICE+PLAN_RULES
 
     def _manager_selection(self,p):
         return p.get('rework_plan')
@@ -183,6 +225,8 @@ class ReworkCompany(MissionOneCompany):
             target=schema['properties']['result']['anyOf'][0]
             target['properties']['replan']=obj(selected_topic=S,duration_seconds={'type':'integer','minimum':4,'maximum':180},duration_reason=S,feedback_response=S)
             target['required'].append('replan')
+            target['properties']['tasks'].update(minItems=2,maxItems=2)
+            target['properties']['tasks']['items']['description']=PLAN_RULES
         elif phase=='review':
             target=schema['properties']['result']
             target['properties']['goal_review']=obj(**{k:obj(met={'type':'boolean'},evidence=S) for k in CHECKS})
@@ -214,6 +258,18 @@ class ReworkCompany(MissionOneCompany):
             result=value['result']
             if phase=='plan' and 'tasks' in result:
                 self._decision=result.pop('replan')
+                try:
+                    for field in ('selected_topic','duration_reason','feedback_response'):text(self._decision[field],4000)
+                    require(type(self._decision['duration_seconds']) is int and 4<=self._decision['duration_seconds']<=180,
+                            'rework_duration_invalid')
+                    validate_rework_plan(result)
+                except CompanyError as exc:
+                    state=self._rework_state
+                    entry=state['real_ai']['attempts'][-1]
+                    entry['plan_validation_diagnostics']=dict(stage='rework_plan_relations',
+                        **getattr(exc,'diagnostics',dict(task_index=None,field='replan',detail=exc.code)),response_hash=entry.get('response_hash'))
+                    self.store.save(state)
+                    raise
             elif phase=='review':
                 self._semantic=result.pop('goal_review')
                 if result['action']=='accept':
@@ -241,8 +297,9 @@ class ReworkCompany(MissionOneCompany):
         if contract:context={**context,'quality':{**context['quality'],'writer_contract':contract}}
         self._research_review_state=None
         self._writer_wire_contract=contract;self._writer_wire_state=p if contract else None
+        self._rework_state=p
         try:result=VideoProviderQualityCompany._call(self,p,provider,phase,task_id,context)
-        finally:self._writer_wire_contract=None;self._writer_wire_state=None
+        finally:self._writer_wire_contract=None;self._writer_wire_state=None;self._rework_state=None
         if contract:validate_writer_contract(parse(result['content']),contract)
         if phase=='plan' and 'tasks' in result:
             require([t['role'] for t in result['tasks']]==['writer','editor'],'rework_roles_required')

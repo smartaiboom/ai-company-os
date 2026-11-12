@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_strict_rework_plan_contract_to_script_offline(self):
+        self.strict_plan_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_disabled_zero_send_recovery_requires_explicit_click(self):
         self.disabled_recovery_fixture=True
         self.test_rework_consent_size_limit_and_approved_start()
@@ -1648,11 +1652,31 @@ class MissionOneTests(unittest.TestCase):
         draft.update(hook_0_3s=draft['narrative_beats'][0]['narration'],close=draft['narrative_beats'][-1]['narration'],
             transcript='\n'.join(b['narration'] for b in draft['narrative_beats']))
         manager,_=script_callbacks(draft,draft)
+        if getattr(self,'strict_plan_fixture',False):
+            from representative_rework import validate_rework_plan,PLAN_RULES
+            self.assertEqual(body['rework_scope']['plan_contract_hash'],digest(PLAN_RULES))
+            valid=json.loads(manager('plan',{}));original_plan=deepcopy(valid)
+            self.assertEqual(validate_rework_plan(valid),original_plan)
+            for change,field in (
+                (lambda p:p['tasks'][0].update(depends_on=[p['tasks'][1]['id']]),'depends_on'),
+                (lambda p:p['tasks'][1].update(depends_on=[]),'depends_on'),
+                (lambda p:p['tasks'][1].update(criteria_ids=['missing']),'criteria_ids'),
+                (lambda p:p['tasks'][1].update(criteria_ids=['hook','hook']),'criteria_ids')):
+                bad=deepcopy(valid);change(bad);before_bad=deepcopy(bad)
+                with self.assertRaisesRegex(CompanyError,'rework_plan_invalid') as caught:validate_rework_plan(bad)
+                self.assertEqual(caught.exception.diagnostics['field'],field)
+                self.assertEqual(bad,before_bad)
+            self.assertEqual(valid,original_plan)
         def send(request,timeout):
             wire=json.loads(request.data);message=json.loads(wire['contents'][0]['parts'][0]['text']);phase=message['phase'];context=message['data']
             self.assertEqual(context['quality']['feedback_text'],feedback)
             self.assertEqual(context['quality']['answers']['previous_plan']['sha256'],original['sha256'])
             if phase=='plan':
+                if getattr(self,'strict_plan_fixture',False):
+                    from representative_rework import PLAN_RULES
+                    self.assertIn(PLAN_RULES,wire['systemInstruction']['parts'][0]['text'])
+                    tasks_schema=wire['generationConfig']['responseJsonSchema']['properties']['result']['anyOf'][0]['properties']['tasks']
+                    self.assertEqual((tasks_schema['minItems'],tasks_schema['maxItems']),(2,2))
                 result=json.loads(manager(phase,context));result['replan']=dict(selected_topic=draft['topic']['title'],duration_seconds=25,
                     duration_reason='기존25초 유지, 최적값 주장은 하지 않음',feedback_response='제작법 대신 게임 장면으로 재기획')
             elif phase=='execute':

@@ -224,11 +224,14 @@ function reworkPanel(p) {
   return `<section class="panel"><h3>대표 피드백 AI 재작업</h3><p>${h(labels[r.status]||r.status)}</p><p>${h(r.feedback)}</p>
     <p class="muted">이전 버전은 보존됩니다. 관리자 재기획 → 대본/스토리보드 → 의미·형식 검토 후 같은 컷룸에 새 버전을 제출합니다. 웹 조회·음성·렌더·게시 없음.</p>
     ${r.error?`<p class="warning">${h(r.error)}</p>`:''}
+    ${r.settings&&!r.settings.ready?`<p class="warning">Gemini 실행 설정 확인 필요: ${h(r.settings.missing.join(', '))}. 서버 환경에 설정 후 서버를 재시작하세요. 키 값은 입력하거나 공유하지 마세요.</p>`:''}
+    ${r.recovery?.error?`<p class="warning">재개 차단: ${h(r.recovery.error)}. 만료 동의는 새 동의 검토가 필요하며 반복 클릭하지 마세요.</p>`:''}
+    ${r.recovery?.eligible?`<p>과거 중단 기록과 시도 0은 보존됩니다. 현재 승인 범위로 명시적으로 한 번 재개할 수 있습니다.</p>${r.settings?.ready?'<button class="button" data-action="rework-recover">설정 확인 후 AI 재작업 재개</button>':''}`:''}
     ${r.proposal?facts([['모델',r.proposal.model],['프로젝트',r.proposal.rework_scope.account_project],['무료 quota / 청구','unknown / unverified'],['시도',r.attempts]]):''}
     ${r.proposal?`<details><summary>전송 범위·재기획·검토 기록</summary><p>${h(r.proposal.rework_scope.data_policy)}</p><p>원 목표·저장된 대표 피드백·이전 대본/스토리보드·공개 관측을 Google에 전송합니다. 입출력 개선 활용·인적 검토 가능. 무료 여부는 소유자 확인이며 독립 검증되지 않았습니다.</p><pre>${h(JSON.stringify({inputs:r.proposal.quality_contract.inputs,replan:r.replan,reviews:r.reviews},null,2))}</pre></details>`:''}
     ${r.status==='available'?'<button class="button secondary" data-action="rework-prepare">AI 재작업 동의 준비</button>':''}
     ${r.status==='pending'?'<button class="button secondary" data-action="rework-consent">새 외부 전송 동의</button>':''}
-    ${r.status==='approved'?'<button class="button" data-action="rework-run">AI 재작업 시작</button>':''}
+    ${r.status==='approved'&&r.settings?.ready?'<button class="button" data-action="rework-run">AI 재작업 시작</button>':''}
     ${r.status==='running'?'<p class="muted">중복 시작은 차단됩니다. 페이지를 닫아도 서버에서 진행됩니다. 서버 종료로 상태가 불명확하면 자동 재시작하지 않습니다.</p><button class="button ghost" data-action="refresh">상태 새로고침</button>':''}</section>`;
 }
 
@@ -398,9 +401,9 @@ main.addEventListener('click',async event=>{
     modal('새 외부 전송 동의',`<p>원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,
       '이 범위에 동의',async data=>{await api(detailApi(detail)+'/rework-consent',{review_hash:detail.rework.review_hash,confirm_free_account:data.has('free'),confirm_data_policy:data.has('policy')});return {message:'동의 저장. AI 재작업 시작을 눌러 실행하세요.'};});
   }
-  else if (button.dataset.action==='rework-run') {
+  else if (['rework-run','rework-recover'].includes(button.dataset.action)) {
     button.disabled=true;
-    try {await api(detailApi(detail)+'/rework-run',{});await route();notice('AI 재작업을 시작했습니다. 상태 새로고침으로 진행을 확인하세요.');}
+    try {await api(detailApi(detail)+'/'+button.dataset.action,{});await route();notice('AI 재작업을 시작했습니다. 상태 새로고침으로 진행을 확인하세요.');}
     catch(error){notice(error.message,true);button.disabled=false;}
   }
   else if (['budget-prepare','budget-reprepare'].includes(button.dataset.action)) {

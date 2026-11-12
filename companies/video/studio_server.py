@@ -138,16 +138,22 @@ class Studio:
         flow=p['representative'];state=flow.get('rework')
         if not state:
             return dict(status='available',feedback=flow['decisions'][-1]['feedback']) if flow['stage']=='plan_revision' and flow['plan_versions'] else None
-        from representative_rework import ReworkStore
+        from representative_rework import ReworkStore,execution_settings
         job=ReworkStore(self.stores[key].root/'representative_rework').load(state['job'])
-        return dict(status=state['status'],job=state['job'],error=state.get('error'),
+        settings=execution_settings();recovery=dict(eligible=False,error=None)
+        if state['status']=='stopped' and state.get('error')=='gemini_execution_disabled':
+            try:
+                ReworkStore(self.stores[key].root/'representative_rework').verify_disabled_recovery(job,state,os.getenv('GEMINI_API_KEY',''))
+                recovery['eligible']=True
+            except CompanyError as exc:recovery['error']=exc.code
+        return dict(status=state['status'],job=state['job'],error=state.get('error'),settings=settings,recovery=recovery,
             feedback=job['quality_inputs']['feedback_text'],proposal=state.get('proposal'),
             review_hash=digest(state['proposal']) if state.get('proposal') else None,
             job_status=job['status'],attempts=len(job['real_ai']['attempts']),
             replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]))
 
     def rework_action(self,pid,name,body):
-        from representative_rework import prepare,ReworkStore,ReworkCompany,handoff
+        from representative_rework import prepare,ReworkStore,ReworkCompany,handoff,execution_settings
         from autonomous_gemini35 import Gemini35Config,MODEL,ENDPOINT
         from video_mission_one import MISSION_ACCOUNT,_binding
         config=Gemini35Config.from_env()
@@ -169,9 +175,18 @@ class Studio:
                 provider.approve(state['job'],state['proposal'],review_hash=body['review_hash'],owner_confirmed=True)
                 state['status']='approved';self.stores['workspace'].save(project);return
             exact(body,())
-            require(name=='rework-run' and state['status']=='approved','rework_duplicate_or_unapproved')
-            job=provider.load(state['job']);provider.grant(job)
-            require(not job['real_ai']['attempts'] and not job['sessions'],'rework_restart_forbidden')
+            recovery=name=='rework-recover'
+            require(recovery or name=='rework-run' and state['status']=='approved','rework_duplicate_or_unapproved')
+            require(execution_settings()['ready'],'rework_execution_settings_required')
+            job=provider.load(state['job'])
+            if recovery:
+                grant=provider.verify_disabled_recovery(job,state,config.api_key)
+                state.setdefault('recovery_events',[]).append(dict(at=now(),reason='gemini_execution_disabled_zero_send',
+                    previous_status=state['status'],previous_error=state['error'],job_hash=job['storage_hash'],
+                    grant_id=grant['id'],scope_hash=digest(grant['body'])))
+            else:
+                provider.grant(job);provider.require_unstarted(job)
+            require(state['proposal']['rework_scope']['credential_binding']==_binding(job['id'],config.api_key),'rework_key_changed')
             state['status']='running';self.stores['workspace'].save(project)
         def worker():
             try:
@@ -387,7 +402,7 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
-        if name in ('rework-prepare','rework-consent','rework-run'):
+        if name in ('rework-prepare','rework-consent','rework-run','rework-recover'):
             self.rework_action(pid,name,body)
         elif name=='budget-prepare':
             self.budget_prepare(pid,body)
@@ -539,7 +554,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

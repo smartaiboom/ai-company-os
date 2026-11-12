@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_disabled_zero_send_recovery_requires_explicit_click(self):
+        self.disabled_recovery_fixture=True
+        self.test_rework_consent_size_limit_and_approved_start()
+
     def test_rework_consent_size_limit_and_approved_start(self):
         self.consent_size_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
@@ -1604,6 +1608,40 @@ class MissionOneTests(unittest.TestCase):
             path.write_bytes(saved+b' '*(65536-len(saved)))
             with self.assertRaisesRegex(CompanyError,'operating_consent_required'):provider.grant(provider.load(pid))
             path.write_bytes(padded)
+        if getattr(self,'disabled_recovery_fixture',False):
+            saved_job=provider.path(pid).read_bytes();saved_grant=provider._grant_path(pid).read_bytes()
+            with patch.dict('os.environ',GEMINI35_AUTONOMOUS_FREE_ENABLED='0'):
+                with self.assertRaisesRegex(CompanyError,'gemini_execution_disabled'):run()
+                self.assertEqual(provider.path(pid).read_bytes(),saved_job)
+                # Reproduce the legacy worker's UI failure record without altering the provider ledger.
+                with self.studio.workflow.store.lock(project):
+                    actual=self.studio.workflow.store.load(project)
+                    actual['representative']['rework'].update(status='stopped',error='gemini_execution_disabled')
+                    self.studio.workflow.store.save(actual)
+                view=self.studio.detail('workspace',project)['rework']
+                self.assertFalse(view['settings']['ready']);self.assertTrue(view['recovery']['eligible'])
+                with self.assertRaisesRegex(CompanyError,'rework_execution_settings_required'):
+                    self.studio.action('workspace',project,'rework-recover',{})
+            original_state=self.studio.workflow.store.load(project)['representative']['rework']
+            clean=provider.load(pid)
+            for change in (dict(active_operation='uncertain'),dict(sessions=[dict(id='uncertain')]),
+                           dict(run_started_at='uncertain'),dict(attempts=[dict(status='reserved')])):
+                bad=deepcopy(clean);bad.update(change)
+                with self.assertRaises(CompanyError):provider.verify_disabled_recovery(bad,original_state,self.key)
+            bad=deepcopy(clean);bad['real_ai']['attempts']=[dict(status='reserved')]
+            with self.assertRaises(CompanyError):provider.verify_disabled_recovery(bad,original_state,self.key)
+            with self.assertRaises(CompanyError):provider.verify_disabled_recovery(clean,dict(status='stopped',error='provider_unavailable'),self.key)
+            with self.assertRaisesRegex(CompanyError,'rework_key_changed'):provider.verify_disabled_recovery(clean,original_state,'different-fixture-key-123')
+            broken=json.loads(saved_grant);broken['signature']='0'*64
+            provider._grant_path(pid).write_text(json.dumps(broken))
+            with self.assertRaisesRegex(CompanyError,'invalid_consent_signature'):provider.verify_disabled_recovery(clean,original_state,self.key)
+            provider._grant_path(pid).write_bytes(saved_grant)
+            from autonomous_company import now
+            future=(datetime.fromisoformat(now())+timedelta(hours=2)).isoformat()
+            with patch('autonomous_free.now',return_value=future):
+                with self.assertRaises(CompanyError):provider.verify_disabled_recovery(clean,original_state,self.key)
+            self.assertEqual(provider.path(pid).read_bytes(),saved_job)
+            self.assertEqual(provider._grant_path(pid).read_bytes(),saved_grant)
         draft=deepcopy(original['script']);draft['topic']['title']='역전 한 수의 이야기'
         for i,b in enumerate(draft['narrative_beats']):
             b.update(narration=['마지막 한 수가 보이나요?','빈칸에 놓자 길이 열렸어요.','작은 선택이 판을 뒤집었죠.'][i],caption='역전 한 수',screen='가상 보드 한 수 비교',fact_status='illustrative')
@@ -1631,10 +1669,15 @@ class MissionOneTests(unittest.TestCase):
             def start(self):queued.append(self.target)
         original_handoff=handoff
         def offline_handoff(*args,**kwargs):return original_handoff(*args,allow_fixture=True,**kwargs)
+        action='rework-recover' if getattr(self,'disabled_recovery_fixture',False) else 'rework-run'
         with patch('threading.Thread',QueuedThread),patch('representative_rework.ReworkCompany',OfflineRework),patch('representative_rework.handoff',offline_handoff):
-            self.studio.action('workspace',project,'rework-run',{})
-            with self.assertRaises(CompanyError):self.studio.action('workspace',project,'rework-run',{})
+            self.studio.action('workspace',project,action,{})
+            with self.assertRaises(CompanyError):self.studio.action('workspace',project,action,{})
             self.assertEqual(self.http.call_count,0)
+            if getattr(self,'disabled_recovery_fixture',False):
+                state=self.studio.workflow.store.load(project)['representative']['rework']
+                self.assertEqual(state['recovery_events'][0]['previous_error'],'gemini_execution_disabled')
+                self.assertEqual(provider._grant_path(pid).read_bytes(),saved_grant)
             queued.pop()()
         result=provider.load(pid);self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
         self.assertEqual(self.http.call_count,5)

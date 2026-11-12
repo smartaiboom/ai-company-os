@@ -3,6 +3,7 @@ from copy import deepcopy
 import hmac
 import json
 import re
+import os
 from autonomous_company import Store, digest, parse, require, text
 from autonomous_gemini35 import Gemini35Store, Gemini35Config, MODEL, ENDPOINT
 from autonomous_live import LiveManagerProvider, LiveEmployeeProvider
@@ -23,6 +24,16 @@ NOTICE=('원 목표와 representative_feedback을 이전 초안과 비교해 재
         '대표 피드백 핵심과 목표 충족을 검토하고 미충족이면 accept 금지. 미확인 권리/성과는 미확인으로 유지.')
 
 
+def execution_settings():
+    missing=[]
+    for ok,label in ((os.getenv('GEMINI35_AUTONOMOUS_FREE_ENABLED')=='1','GEMINI35_AUTONOMOUS_FREE_ENABLED=1'),
+                     (os.getenv('GEMINI35_MODEL')==MODEL,'GEMINI35_MODEL'),
+                     (os.getenv('GEMINI35_ENDPOINT')==ENDPOINT,'GEMINI35_ENDPOINT'),
+                     (bool(os.getenv('GEMINI_API_KEY')),'GEMINI_API_KEY 존재')):
+        if not ok:missing.append(label)
+    return dict(ready=not missing,missing=missing)
+
+
 def snapshot(project):
     flow=project['representative'];prior=flow['plan_versions'][-1];decision=flow['decisions'][-1]
     require(decision['stage']=='plan' and decision['action']=='request_revision'
@@ -37,6 +48,26 @@ def snapshot(project):
 class ReworkStore(QualityProviderStore):
     max_consent_bytes = 65536
     _limits=staticmethod(Gemini35Store._limits)
+
+    def require_unstarted(self,p):
+        # The provider reservation in real_ai.attempts is the sole durable send ledger.
+        require(self.valid_mode(p) and p.get('simulation') is False
+                and p['status']=='ready' and p['phase']=='plan' and not p.get('reason_code')
+                and not p['real_ai']['attempts'] and not p.get('attempts')
+                and not p['sessions'] and not p['active_operation']
+                and not p.get('run_started_at') and not p.get('next_request_at') and not p.get('providers')
+                and not p['plan'] and not p['assignments'] and not p['artifacts'] and not p['final']
+                and len(p['events'])==1 and p['events'][0]['event']=='operating_scope_approved',
+                'rework_zero_send_not_proven')
+
+    def verify_disabled_recovery(self,p,state,key):
+        require(state.get('status')=='stopped' and state.get('error')=='gemini_execution_disabled',
+                'rework_disabled_recovery_forbidden')
+        self.require_unstarted(p)
+        grant=self.grant(p)
+        require(hmac.compare_digest(grant['body']['rework_scope']['credential_binding'],_binding(p['id'],key)),
+                'rework_key_changed')
+        return grant
 
     def check_binding(self,p):
         ref=p['rework_reference'];project=Store(self.root.parent).load(ref['project'])

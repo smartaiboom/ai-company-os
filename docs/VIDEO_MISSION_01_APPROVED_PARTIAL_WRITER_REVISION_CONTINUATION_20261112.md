@@ -1,0 +1,27 @@
+# 미션 01 — 실제 부분 대본·관리자 피드백 보존 후 안전한 수정 작업 재개
+작성일: 2026-11-12 KST
+
+## 사용자 승인과 최우선 목적
+사용자가 직전 실제 결과를 보고 "**응 이어서 진행해줘**"라고 승인했다. 범위는 **기존 유효한 25초 writer v1 산출물과 실제 AI 관리자 'revise' 피드백을 그대로 이용하여, 새 독립적으로 승인된 작업에서 대본 수정→AI 관리자 재검토→편집 AI 스토리보드→AI 관리자 검토→원 컷룸 대표 기획 승인 대기**까지 이어가는 것이다. 기존 1차 대본을 버리고 처음부터 생성하지 않는다. 이번 목표는 영상 제작 전체 시스템의 첫 구현이 아니라, 과거 영상 생성 전체 사이클 및 음성 품질 개선 후 진행 중인 **주제 선정·대본 품질 고도화**다.
+
+**Codex 주간 사용량 절약 최우선**: 이미 확인된 내용 장시간 재검증·테스트 전체 재실행·예산/UI/리팩터링·새 조사 금지. 오직 이번 부분 인계에 필요한 최소 코드와 표적 테스트 1묶음, 실제 실행, 간결한 결과 보고.
+
+## 반드시 확인할 실제 상태
+- `AGENTS.md`, `reports/VIDEO_MISSION_01_DNS_PERMISSION_REAL_PRODUCTION_RESULT_20261112.md`, 현재 `qualityprovider-da3dcacd66e147318ad83a9634547667` 원장과 컷룸만 우선 읽기. GitHub main 최신 반영. 원장은 `status=paused, reason_code=provider_unavailable`, 초도 writer HTTP200/validated/versions1, 관리자 writer review HTTP200/action=revise, writer state=revision_requested, reviews1, editor pending. 수정 호출 HTTP503, attempt `e6410d2c059c40a78ef9bc6a2f0d8e8c`, response hash 없음, 요청 SHA `b0e9a0eb7d9f6bf20dd3b0d1e0ba1a0870b43590c303e925e2c28ce6b9c6b307`. 응답 수신/과금 불명. 이 원장을 고치거나 재실행하지 않는다.
+- 원 컷룸 `company-aba553f29cfb454c8c05bad4abb49969` `research_planning`, 이 미션의 AI 관리자 선정 소재 롤토체스/모바일 퍼즐 관련, 정확한 선정 topic·25초·실제 YouTube metadata 10건과 evidence/서명 원본 재사용. 원본 history의 9 stopped 업무 + 이 paused 업무 불변. 누적 Gemini **15회** (과거 미수신 포함), YouTube search2/videos2.
+- 원 writer 1차 결과는 **실제 모델이 만든 검증 통과 산출물**이지만 관리자가 caption_width/dense_narration을 이유로 revise를 요청했으므로 accepted로 표시하지 않는다. `assignments[writer].versions[0]` 전체 내용/원본 해시·이력과 `reviews[0]`의 관리자 수정 피드백/검사 근거를 **그대로** 인계해야 한다. 모델 출력에 자동으로 오류를 덮어써서 accepted로 위장 금지.
+- 새 writer contract native **v2** SHA `4b1f627165a8398e3e47549563f8588708bf9066bde6bfd14c980953906355ff`, Google 프로젝트 `gen-lang-client-0938732315` / 모델 `gemini-3.5-flash-lite`, 기존 endpoint·키 바인딩·Google 무료 서비스 데이터 정책(입력/출력 개선 활용·인적 검토 가능) 및 기존 개인정보 범위만 유지.
+- 호출 정책: `max_calls=None` = 임의 내부 한도 없음, 자동 재시도는 금지. 신규 YouTube 조회/검색 0회. 실제 공급자 quota=unknown, 독립 billing verification=unverified(기존 사용자의 무료/결제 미연결 진술). 유료 전환/계정·키/모델 변경·fallback/쿼터 회피 절대 금지.
+
+## 한 번의 Codex 작업으로 실행
+1. 최종 원장·직전 결과·관련 `video_mission_one.py`, `representative_workflow.py`, 연결된 quality provider/engine의 **부분 산출물 수정 요청 인계** 경로만 확인한다. 원 paused job의 기존 run을 재시도하지 않고, 별도 목적 `revise_accepted_format_writer_v1_from_preserved_manager_feedback_after_503`의 새로운 consent/proposal/grant·시도·세션을 갖는 **신규 독립 continuation 한 건**을 안전하게 생성한다. 기존 공통 signed successor 검증/중복 방지/컷룸 잠금 재사용. old job state/hash + old grant/attempt + 원 research/manager selection + writer v1 hash/review hash + revision_requested + editor 미진행 + HTTP503/미수신 + 계정·키·모델/무료 데이터 조건을 정확히 확인해야 적격. 다른 paused/stopped, 데이터 변조, 중복 생성, 이전 grant 재사용은 거부. history는 읽기 전용. 실제 첫 대본을 다시 만들지 않는다.
+2. 부분 인계에서 **원 writer v1 및 관리자 revise feedback을 원문/해시 변경 없이 다음 writer 수정 입력으로 전달**한다. 기존 engine revision counting·revision_feedback·writer_ref 및 v2 schema를 가능한 재사용하고, history만 새 작업으로 이어지는 최소한의 adapter를 만든다. 과거 수정 실패 503을 현재 작업의 정상 새 시도로 오인하거나 과거 시도를 지우지 말 것. 기존 관리자 검토는 'revision_requested'이지 'accepted'가 아님. 수정한 새 대본이 서버 검사 통과 후 관리자 재검토를 거쳐야 한다. 엔진이 기존 revision state의 직접 인수를 허용하지 않는다면 서명된 원본/버전/피드백 참조를 새 업무에 명시적으로 연결하는 최소한의 안전한 변환만 허용하며 audit/history에 어디서 왔는지 남길 것. 임의로 새 대본 전체를 작성하는 경로로 대체 금지.
+3. `max_revisions_per_task` 등 실제 signed 범위의 제한을 확인한다. **단순 구현상 수치 한도 때문에 기존 승인 범위를 우회하거나 기존 grant를 수정하지 말 것.** 새 작업에서 필요한 정상 수정 1건만 허용, 추가 수정은 새로운 승인 또는 정상 정책에 따라 결정. 해당 변경에 새 대표 승인이 더 필요하다고 판단되면 불필요한 작업을 시작하지 말고 보고.
+4. 합성 오프라인 **표적 테스트 1묶음만**: 원 paused/503 불명 attempt·초도 대본 v1·관리자 revise feedback 및 서명 원본 불변, 원본 잘못 연결/중복/모델·키 불일치 거부, 새 수정 요청에 실제 원 v1/피드백 전달, 새 revision v2 객체→manager accept→editor→manager accept→임시 원 컷룸 awaiting_plan_approval, YouTube0/무료 고정·권한 가드. fixture는 실제 성과가 아니다. 이미 통과한 전체 50여 테스트 반복 금지.
+5. 필수 경로 검증 후 **신규 독립 continuation 정확히1건** 생성. 신규 proposal prepare/검토 SHA/독립 consent+operating grant approve, 원본 보호, 호출 목적·실제 데이터 범위를 사용자 승인에 대조. 기존 원초도 대본을 신규 업무의 **검증된 '과거 실제 버전'**으로 인계하고 feedback/revision_requested를 기록하되 accepted 아님. 원 accepted 연구·선정25초/원 evidence 인계. 이전 구 grant는 read-only history proof.
+6. **기존 DNS 진단상 정상 권한 확대 실행 경로(`require_escalated`)의 정식 승인 방식**으로 실제 Gemini를 호출. 권한이 없으면 우회하지 말고 중단; DNS/HTTP 시험 중복 금지. 첫 실전 요청은 **초도 대본 생성이 아닌 관리자 caption_width/dense_narration 수정 지시를 반영하는 writer revision**이다. 수정 결과 25초, topic.title 원 선정 정확 복사, AI 제안 대상/미확정 이유, mock=false/provenance, enum/화면/자막/나레이션 압축/타임라인/transcript/권리 한계의 실제 검증 유지. 관리자 writer review가 수락하면 editor 스토리보드 실전 작업 및 manager editor review 수행. 관리자 revise는 실제 검사·피드백으로 보존하고 자동 수정/무음 acceptance 금지.
+7. 양쪽 AI 관리자 review가 실제 accept된 경우에만 같은 컷룸 `awaiting_plan_approval` 카드에 대본·스토리보드/기획 정보 인수 확인. `accepted_review_handoff`, `final_evaluation=not_performed_local_handoff` 유지, 인간 대표 승인/반려, TTS, 영상/MP4 렌더·게시·과거 음성/영상 자산 변경 금지.
+8. 무료 provider HTTP503/429, DNS, timeout/미수신, schema/검증 실패 시 즉시 중단. 503 실패 원본 요청 replay 및 동일 새 요청 자동 retry 금지; fallback/계정 우회/유료 전환 금지. 정상 수정 단계는 이전 실패를 재전송하는 게 아니라 이전 실제 대본·피드백을 근거로 별도 새 목적/서명을 가진 요청임을 기록.
+9. 결과 보고서 `reports/VIDEO_MISSION_01_PARTIAL_WRITER_REVISION_CONTINUATION_RESULT_20261112.md`를 **성공·실패 여부 무관하게 간결하게** 작성·GitHub commit/push·main 확인 후 중단. 반드시 실제 신규 job / proposal review hash / grant / 원본 v1·manager revise preserved hash / 원 503 미수신 보존 / 실제 권한/HTTP 단계별 사용량 및 누적 Gemini15+이번, YouTube 신규0 / 실제 수정 대본·관리자 수락·편집 스토리보드·컷룸 단계 확인 / blocker와 필요한 다음 행동 하나 포함. 키/원문 응답 전문/비밀/개인정보·과거 완성 영상 자료는 보고서에 복제 금지.
+
+시간 KST(UTC+9). `git clean`, `git reset --hard`, force push, 이전 데이터/미추적/키/미디어 삭제·초기화 금지.

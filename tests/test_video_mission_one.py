@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_caption_revision_new_signed_budget_and_cutroom(self):
+        self.caption_revision_fixture=True
+        self.test_partial_writer_revision_continuation_preserves_feedback_and_hands_off()
+
     def test_partial_writer_revision_continuation_preserves_feedback_and_hands_off(self):
         self.partial_revision_fixture=True
         self.test_dns_permission_successor_preserves_nine_failures_and_hands_off()
@@ -1436,11 +1440,72 @@ class MissionOneTests(unittest.TestCase):
                     envelope=json.loads(response.getvalue())
                     value=json.loads(envelope['candidates'][0]['content']['parts'][0]['text'])
                     value['result']['content']['narrative_beats'][0]['caption']='수정 예시'
+                    if getattr(self,'caption_revision_fixture',False):
+                        value['result']['content']['narrative_beats'][1]['caption']='가'*19+'A'
+                    envelope['candidates'][0]['content']['parts'][0]['text']=json.dumps(value,ensure_ascii=False)
+                    return FixtureResponse(json.dumps(envelope).encode())
+                if (getattr(self,'caption_revision_fixture',False) and message['phase']=='review'
+                        and message['data']['assignment']['role']=='writer'):
+                    # Reproduce the real model's invalid accept, then let the server reject it.
+                    envelope=json.loads(response.getvalue())
+                    value=json.loads(envelope['candidates'][0]['content']['parts'][0]['text'])
+                    value['result'].update(action='accept',feedback='')
+                    for check in value['result']['checks']:check['status']='met'
                     envelope['candidates'][0]['content']['parts'][0]['text']=json.dumps(value,ensure_ascii=False)
                     return FixtureResponse(json.dumps(envelope).encode())
                 return response
         self.http.reset_mock(side_effect=False);self.http.side_effect=send;self.new_phases=[]
         result=self.run_job()
+        if getattr(self,'caption_revision_fixture',False):
+            from video_mission_one import CAPTION_REVISION_PURPOSE
+            self.assertEqual(result['reason_code'],'known_script_defects')
+            blocked=result;old_id=self.job
+            from production_video import units
+            self.assertEqual(units(json.loads(blocked['assignments'][1]['versions'][-1]['content'])['narrative_beats'][1]['caption']),39)
+            self.assertEqual(blocked['assignments'][1]['revisions'],1)
+            self.assertEqual(len(blocked['assignments'][1]['versions']),2)
+            self.assertEqual(len(blocked['assignments'][1]['reviews']),2)
+            before.update({p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and old_id in p.name})
+            ref=self.store.unified_successor_reference(blocked,new_purpose=CAPTION_REVISION_PURPOSE)
+            self.assertEqual(ref['consumed_calls'],17)
+            self.assertEqual(len(ref['previous_attempt_ids']),17)
+            self.assertEqual(ref['writer_v2_hash'],digest(blocked['assignments'][1]['versions'][-1]))
+            for mutate in (lambda j:j['assignments'][1].update(revisions=0),
+                           lambda j:j['assignments'][1]['reviews'][-1].update(action='revise')):
+                bad=deepcopy(blocked);mutate(bad)
+                with self.assertRaises(CompanyError):self.store.unified_successor_reference(bad,new_purpose=CAPTION_REVISION_PURPOSE)
+            self.job=self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True,new_purpose=CAPTION_REVISION_PURPOSE)
+            fresh=self.store.load(self.job)
+            self.assertEqual(fresh['assignments'][1]['versions'],blocked['assignments'][1]['versions'])
+            self.assertEqual(fresh['assignments'][1]['reviews'],blocked['assignments'][1]['reviews'])
+            self.assertEqual(fresh['assignments'][1]['revisions'],2)
+            self.assertEqual(fresh['limits']['max_revisions_per_task'],2)
+            with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_validated_successor(project,owner_confirmed=True,new_purpose=CAPTION_REVISION_PURPOSE)
+            body=self.store.prepare_mission(self.job,key=self.key,account_project=MISSION_ACCOUNT,quota_note='synthetic caption revision',
+                youtube_key=youtube_key,youtube_project=MISSION_ACCOUNT,confirm_youtube_policy=True)
+            for mutate in (lambda b:b.update(model='other'),lambda b:b['mission_account'].update(account_project='other'),
+                           lambda b:b['mission_unified_successor'].update(new_signed_revisions=2),
+                           lambda b:b['mission_unified_successor'].update(writer_v2_hash='0'*64)):
+                bad=deepcopy(body);mutate(bad)
+                with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+            self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+            with patch.object(self.company,'config',Gemini35Config('different-key')):
+                with self.assertRaises(CompanyError):self.run_job()
+            def caption_send(request,timeout):
+                wire=json.loads(request.data);message=json.loads(wire['contents'][0]['parts'][0]['text'])
+                if message['phase']=='execute' and message['data']['assignment']['role']=='writer':
+                    context=message['data']
+                    self.assertEqual(context['version_history'],blocked['assignments'][1]['versions'])
+                    self.assertIn('caption_width',context['revision_feedback'])
+                    self.assertIn('W 또는 F',wire['systemInstruction']['parts'][0]['text'])
+                    value=json.loads(context['version_history'][-1]['content'])
+                    value['narrative_beats'][1]['caption']='자막 수정'
+                    return FixtureResponse(json.dumps(dict(candidates=[dict(content=dict(role='model',parts=[dict(text=json.dumps(
+                        dict(result=dict(content=value,evidence='offline fixture',uncertainty='unassessed')),ensure_ascii=False))]),
+                        finishReason='STOP')],usageMetadata=dict(promptTokenCount=20,candidatesTokenCount=30,totalTokenCount=50))).encode())
+                return original_send(request,timeout)
+            self.http.reset_mock(side_effect=False);self.http.side_effect=caption_send
+            result=self.run_job()
         self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
         self.assertEqual(self.http.call_count,4)
         report=self.studio.workflow.report_plan(project,provider_store=self.store,allow_fixture=True)

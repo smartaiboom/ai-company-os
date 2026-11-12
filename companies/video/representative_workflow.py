@@ -323,6 +323,10 @@ class RepresentativeVideoWorkflow:
                 job=store.create(previous['goal'],inputs=deepcopy(previous['quality_inputs']),max_calls=None,max_total_revisions=1)
                 job.update(mission_unified_successor=reference,plan=deepcopy(previous['plan']),assignments=deepcopy(previous['assignments']),
                     employee_web=deepcopy(previous['employee_web']),phase='work')
+                if reference.get('new_signed_revisions')==1:
+                    # Preserve history's 1 spent revision, reserve exactly 1 newly signed revision.
+                    job['limits'].update(max_revisions_per_task=2,max_total_revisions=2)
+                    job['assignments'][1].update(state='revision_requested',revisions=2)
                 store.save(job)
                 keys[reference['duplicate_key']]=job['id']
                 flow.setdefault('mission_one_job_history',[]).append(previous['id']);flow['mission_one_job']=job['id']

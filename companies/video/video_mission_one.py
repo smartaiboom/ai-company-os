@@ -24,6 +24,7 @@ GAME_SCOPE = 'game_shorts_independent_research_20261111'
 GAME_RESEARCH_BLOCKER = 'mission_independent_web_research_unavailable'
 MAX_CALLS = 10  # Historical policy; never rewrite old signed grants.
 UNIFIED_SUCCESSOR_POLICY = 'mission01_validated_writer_successor_20261112_v1'
+CAPTION_REVISION_PURPOSE = 'revise_preserved_writer_v2_caption_width_under_new_signed_revision_grant'
 PARTIAL_REVISION_PURPOSE = 'revise_accepted_format_writer_v1_from_preserved_manager_feedback_after_503'
 DNS_PERMISSION_PURPOSE = 'write_new_script_under_native_v2_with_authorized_network_permission'
 UNIFIED_PURPOSE = '구조화 writer schema에 맞는 새 대본 작성'
@@ -344,6 +345,54 @@ class MissionOneStore(QualityProviderStore):
             next_request_purpose='write_new_script_with_exact_manager_selected_topic_copy_contract')
         return ref
 
+    def caption_revision_reference(self, previous, new_purpose):
+        require(new_purpose==CAPTION_REVISION_PURPOSE and previous==self.load(previous['id'])
+                and previous['status']=='stopped' and previous.get('reason_code')=='known_script_defects',
+                'mission_caption_not_eligible')
+        prior=previous.get('mission_unified_successor',{})
+        require(prior.get('new_purpose')==PARTIAL_REVISION_PURPOSE,'mission_caption_not_eligible')
+        parent=self.load(prior['previous_job'])
+        expected=self.unified_successor_reference(parent,new_purpose=PARTIAL_REVISION_PURPOSE)
+        grant=parse(self._grant_path(previous['id']).read_text());record=grant['record'];body=record['body']
+        require(hmac.compare_digest(str(grant['signature']),self._sign(record))
+                and record['id']==previous['real_ai']['consent'].get('operating_grant_id')
+                and record['revoked_at'] is None and body['mission_unified_successor']==prior
+                and prior==expected,'mission_caption_history_invalid')
+        require(all(previous[k]==parent[k] for k in ('goal','quality_inputs','plan','employee_web','limits'))
+                and body['model']==MODEL and body['endpoint']==ENDPOINT and body['free_only'] is True
+                and body['mission_account']['account_project']==body['mission_web']['account_project']==MISSION_ACCOUNT
+                and body['mission_account']['billing_disabled'] is True
+                and body['mission_account']['free_data_policy']==DATA_POLICY, 'mission_caption_scope_invalid')
+        tasks=previous['assignments'];writer=tasks[1];old=parent['assignments'][1]
+        require(tasks[0]==parent['assignments'][0] and tasks[2]==parent['assignments'][2]
+                and all(writer[k]==old[k] for k in ('id','role','title','depends_on','criteria_ids','instructions'))
+                and writer['versions'][:1]==old['versions'] and writer['reviews'][:1]==old['reviews']
+                and len(writer['versions'])==len(writer['reviews'])==2
+                and writer['state']=='awaiting_ai_review' and writer['revisions']==1
+                and writer['reviews'][-1]['action']=='accept' and not previous.get('final'), 'mission_caption_artifacts_invalid')
+        attempts=previous['real_ai']['attempts']
+        require(len(attempts)==2 and previous['active_operation']==attempts[-1]['id'], 'mission_caption_attempts_invalid')
+        for attempt,phase,status in zip(attempts,('execute','review'),('validated','json_parsed')):
+            require(attempt['phase']==phase and attempt['task_id']==writer['id'] and attempt['model']==MODEL
+                    and attempt['status']=='completed' and attempt.get('http_status')==200
+                    and attempt.get('response_hash') and attempt.get('free_account_policy_verified') is True
+                    and attempt['role_result_status']==status,'mission_caption_attempts_invalid')
+        inspection=inspect_script(parse(writer['versions'][-1]['content']),previous['quality_inputs']['target_segment'],
+                                  mock=False,target_duration=25)
+        require(inspection['defects'] and all(d['issue']=='caption_width' for d in inspection['defects']),
+                'mission_caption_defects_invalid')
+        ref=deepcopy(prior)
+        ref.update(previous_job=previous['id'],previous_state_hash=previous['storage_hash'],previous_grant_hash=digest(grant),
+            previous_reference_hash=digest(prior),new_purpose=new_purpose,
+            duplicate_key=digest(dict(previous_job_id=previous['id'],new_purpose=new_purpose,writer_contract_hash=prior['writer_contract_hash'])),
+            previous_attempt_ids=prior['previous_attempt_ids']+[a['id'] for a in parent['real_ai']['attempts'][1:]]+[a['id'] for a in attempts],
+            consumed_calls=prior['consumed_calls']+len(attempts),writer_v2_hash=digest(writer['versions'][-1]),
+            manager_latest_hash=digest(writer['reviews'][-1]),writer_history_hash=digest(writer['versions']),
+            manager_history_hash=digest(writer['reviews']),historical_revisions=1,new_signed_revisions=1,
+            revision_feedback='caption_width: '+__import__('json').dumps(inspection['defects'],ensure_ascii=False)+
+                ' Server rejected the latest model accept. Revise the second scene caption (beat index 1, 39 width units) only as needed; preserve topic, narration, transcript, timeline and provenance. Follow the exact caption width system instructions.')
+        return ref
+
     def unified_successor_reference(self, previous, *, new_purpose=UNIFIED_PURPOSE, _history_contract_hash=None):
         """A signed new-purpose receipt, never a replay or mutation of a stopped job.
 
@@ -351,6 +400,8 @@ class MissionOneStore(QualityProviderStore):
         check_scope always computes the current successor contract from server facts.
         """
         text(new_purpose,400)
+        if new_purpose==CAPTION_REVISION_PURPOSE:
+            return self.caption_revision_reference(previous,new_purpose)
         partial = previous.get('status')=='paused' and previous.get('reason_code')=='provider_unavailable'
         dns = (previous.get('reason_code') == 'free_request_failed'
                and previous.get('mission_unified_successor') is not None)
@@ -482,6 +533,10 @@ class MissionOneStore(QualityProviderStore):
                 inherited=previous['assignments'][1];current=p['assignments'][1]
                 require(current['versions'][:1]==inherited['versions'] and current['reviews'][:1]==inherited['reviews']
                         and current['revisions']==1, 'mission_partial_inheritance_changed')
+            if unified and writer['new_purpose']==CAPTION_REVISION_PURPOSE:
+                inherited=previous['assignments'][1];current=p['assignments'][1]
+                require(current['versions'][:2]==inherited['versions'] and current['reviews'][:2]==inherited['reviews']
+                        and current['revisions']==2, 'mission_caption_inheritance_changed')
             studio=Store(self.root.parent).load(p['quality_inputs']['answers']['representative_project'])
             require(studio['representative']['mission_one_job']==p['id'], 'mission_resume_detached')
         successor = p.get('mission_successor')
@@ -516,7 +571,8 @@ class MissionOneStore(QualityProviderStore):
                             dict(aspect='9:16', language='한국어', platform='YouTube Shorts').items()),
                     'mission_game_scope_mismatch')
         require(quality['capabilities'] == capabilities
-                and p['limits'] == dict(max_calls=None if unified or topic or audience else free['explicit_max_calls'] if free else 13 if expanded else 4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
+                and p['limits'] == dict(max_calls=None if unified or topic or audience else free['explicit_max_calls'] if free else 13 if expanded else 4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=2 if unified and unified['new_purpose']==CAPTION_REVISION_PURPOSE else 1,
+                    max_total_revisions=2 if unified and unified['new_purpose']==CAPTION_REVISION_PURPOSE else 1)
                 and not p.get('local_tools'), 'mission_scope_mismatch')
 
     @staticmethod
@@ -845,6 +901,10 @@ class MissionOneCompany(VideoProviderQualityCompany):
         if p.get('mission_successor') or _writer_reuse(p):
             require(not (phase=='execute' and context['assignment']['role']=='research'),
                     'mission_cached_research_revision_requires_new_approval')
+        continuation=p.get('mission_unified_successor',{})
+        if (continuation.get('new_purpose')==CAPTION_REVISION_PURPOSE and phase=='execute'
+                and context['assignment']['role']=='writer'):
+            context={**context,'revision_feedback':continuation['revision_feedback']}
         selection = self._manager_selection(p)
         if selection:
             context = {**context,'quality':{**context['quality'],'manager_selection':selection}}

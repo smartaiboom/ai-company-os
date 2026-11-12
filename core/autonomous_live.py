@@ -25,6 +25,7 @@ urlopen = ai_safety.guarded_urlopen
 
 
 class LiveStore(Store):
+    max_consent_bytes = 16384
     mode = MODE
     simulation = False
     marker_name = '.autonomous-live-store'
@@ -115,7 +116,7 @@ class LiveStore(Store):
 
     def grant(self, p):
         path=self._grant_path(p['id'])
-        require(path.is_file() and not path.is_symlink() and path.stat().st_size<16384,'operating_consent_required')
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size<self.max_consent_bytes,'operating_consent_required')
         try:g=parse(path.read_text())
         except (OSError,ValueError):raise CompanyError('invalid_operating_consent') from None
         exact(g,('record','signature'));r=g['record']

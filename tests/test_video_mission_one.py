@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_rework_consent_size_limit_and_approved_start(self):
+        self.consent_size_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_representative_feedback_rework_end_to_end_offline(self):
         self.representative_rework_fixture=True
         self.test_cli_local_handoff_uses_canonical_store_and_preserves_guards()
@@ -1575,6 +1579,31 @@ class MissionOneTests(unittest.TestCase):
         bad=deepcopy(body);bad['rework_scope']['reference']['plan_hash']='0'*64
         with self.assertRaises(CompanyError):provider.approve(pid,bad,review_hash=digest(bad),owner_confirmed=True)
         self.studio.action('workspace',project,'rework-consent',dict(review_hash=digest(body),confirm_free_account=True,confirm_data_policy=True))
+        if getattr(self,'consent_size_fixture',False):
+            from autonomous_live import LiveStore
+            self.assertEqual(LiveStore.max_consent_bytes,16384)
+            self.assertEqual(MissionOneStore.max_consent_bytes,16384)
+            path=provider._grant_path(pid);saved=path.read_bytes()
+            # Legal serialization padding leaves the signed record untouched.
+            target=max(28841,len(saved)+1)
+            self.assertLess(target,65536)
+            padded=saved+b' '*(target-len(saved));path.write_bytes(padded)
+            record=provider.grant(provider.load(pid))
+            self.assertEqual(record['id'],provider.load(pid)['real_ai']['consent']['operating_grant_id'])
+            generic=LiveStore(self.store.root.parent/'generic-consent-test')
+            generic.root.mkdir(exist_ok=True)
+            generic._grant_path(pid).write_bytes(padded)
+            with self.assertRaisesRegex(CompanyError,'operating_consent_required'):generic.grant(provider.load(pid))
+            for changed in (dict(json.loads(saved),signature='0'*64),):
+                path.write_text(json.dumps(changed))
+                with self.assertRaisesRegex(CompanyError,'invalid_consent_signature'):provider.grant(provider.load(pid))
+            changed=json.loads(saved);changed['record']['body']['rework_scope']['account_project']='tampered'
+            path.write_text(json.dumps(changed))
+            with self.assertRaisesRegex(CompanyError,'invalid_consent_signature'):provider.grant(provider.load(pid))
+            path.write_bytes(saved+b' '*(65535-len(saved)));provider.grant(provider.load(pid))
+            path.write_bytes(saved+b' '*(65536-len(saved)))
+            with self.assertRaisesRegex(CompanyError,'operating_consent_required'):provider.grant(provider.load(pid))
+            path.write_bytes(padded)
         draft=deepcopy(original['script']);draft['topic']['title']='역전 한 수의 이야기'
         for i,b in enumerate(draft['narrative_beats']):
             b.update(narration=['마지막 한 수가 보이나요?','빈칸에 놓자 길이 열렸어요.','작은 선택이 판을 뒤집었죠.'][i],caption='역전 한 수',screen='가상 보드 한 수 비교',fact_status='illustrative')

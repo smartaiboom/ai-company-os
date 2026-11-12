@@ -35,6 +35,7 @@ def snapshot(project):
 
 
 class ReworkStore(QualityProviderStore):
+    max_consent_bytes = 65536
     _limits=staticmethod(Gemini35Store._limits)
 
     def check_binding(self,p):

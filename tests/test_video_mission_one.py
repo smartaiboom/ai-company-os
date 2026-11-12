@@ -235,6 +235,14 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_selected_topic_copy_contract_25_second_handoff(self):
+        self.selected_topic_fixture='합성 관리자 선정 — 두 화면 비교 (주제 식별)'
+        self.test_audience_variant_25_second_script_reaches_human_handoff()
+
+    def test_selected_topic_whitespace_mismatch_is_diagnosed_and_rejected(self):
+        self.topic_whitespace_tamper=True
+        self.test_unspecified_audience_does_not_allow_selected_topic_tampering()
+
     def test_audience_failure_successor_preserves_five_failures_and_hands_off(self):
         self.audience_successor_fixture=True
         self.free_error='audience'
@@ -454,7 +462,7 @@ class MissionOneTests(unittest.TestCase):
             script['target_audience']='미정'
         elif getattr(self,'audience_detail',None)=='reason_missing':
             script['unknowns']=[f'AI 제안(사용자 미확정): {script["target_audience"]}']
-        script['topic']['title']='가상 게임의 두 장면'
+        script['topic']['title']=getattr(self,'selected_topic_fixture','가상 게임의 두 장면')
         script['provenance']=dict(author='fixture',model=MODEL,mock=False)
         revised = deepcopy(script)
         if getattr(self, 'exhaust_resume_budget', False):
@@ -480,6 +488,11 @@ class MissionOneTests(unittest.TestCase):
                 from role_json_schema import response_format
                 self.assertEqual(json.loads(request.data)['generationConfig']['responseJsonSchema'],
                                  response_format(phase)['json_schema']['schema'])
+            if phase=='execute' and role=='writer':
+                self.assertIn('topic.title = quality.manager_selection.selected_topic',notice)
+                self.assertIn('Copy this supplied string character-for-character',notice)
+                self.assertIn('hook_0_3s, promise or viewing_reason',notice)
+                self.assertEqual(context['quality']['manager_selection']['selected_topic'],script['topic']['title'])
             if phase=='execute' and role=='research':
                 result=dict(content=json.dumps(queries),evidence='fixture query builder',uncertainty='unverified')
             elif phase=='execute':
@@ -512,7 +525,8 @@ class MissionOneTests(unittest.TestCase):
                     result['content']=json.dumps(content,ensure_ascii=False)
                 if role=='writer' and getattr(self,'script_topic_tamper',False):
                     content=json.loads(result['content'])
-                    content['topic']['title']='관리자가 선정하지 않은 합성 주제'
+                    content['topic']['title']=(content['topic']['title'].replace(' ','  ') if getattr(self,'topic_whitespace_tamper',False)
+                                               else '관리자가 선정하지 않은 합성 주제')
                     result['content']=json.dumps(content,ensure_ascii=False)
             else:
                 result=json.loads(manager(phase,context))
@@ -697,10 +711,24 @@ class MissionOneTests(unittest.TestCase):
             return
         if getattr(self,'script_topic_tamper',False):
             self.assertEqual(result['reason_code'],'mission_selected_topic_mismatch')
+            diag=result['real_ai']['attempts'][-1]['script_validation_diagnostics']
+            self.assertEqual(diag['stage'],'writer_selected_topic_validation')
+            self.assertEqual(diag['category'],'mission_selected_topic_mismatch')
+            self.assertFalse(diag['exact_match'])
+            self.assertEqual(diag['normalized_match'],getattr(self,'topic_whitespace_tamper',False))
+            self.assertEqual(diag['expected_title_hash'],digest(decision['selected_topic']))
+            self.assertEqual(diag['expected_length'],len(decision['selected_topic']))
+            self.assertEqual(diag['response_hash'],result['real_ai']['attempts'][-1]['response_hash'])
+            self.assertNotEqual(diag['expected_title_hash'],diag['returned_title_hash'])
+            for secret_or_text in (self.key,script['target_audience'],script['topic']['title'],'관리자가 선정하지 않은 합성 주제'):
+                self.assertNotIn(secret_or_text,json.dumps(diag,ensure_ascii=False))
+            self.assertEqual(result['assignments'][1]['versions'],[])
+            preserved={p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and self.job in p.name}
             self.assertEqual(self.http.call_count,4)
             with self.assertRaises(CompanyError):
                 self.run_job()
             self.assertEqual(self.http.call_count,4)
+            for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)
             return
         if getattr(self,'audience_case',None) in ('concrete_mismatch','missing_inference'):
             expected = 'script_audience_mismatch' if self.audience_case=='concrete_mismatch' else 'script_audience_inference_required'

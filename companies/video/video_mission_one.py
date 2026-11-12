@@ -3,6 +3,7 @@ import argparse
 import hmac
 import json
 import os
+import unicodedata
 from pathlib import Path
 from copy import deepcopy
 
@@ -536,6 +537,14 @@ class MissionOneCompany(VideoProviderQualityCompany):
 
     def _tool_notice(self, p):
         notice = super()._tool_notice(p) + AUDIENCE_INSTRUCTIONS
+        if p['goal']==GAME_GOAL:
+            notice += (' Writer field binding: topic.title = quality.manager_selection.selected_topic. '
+                'Copy this supplied string character-for-character, including whitespace and punctuation; '
+                'it identifies the AI manager-approved topic, not a viewer-facing headline. '
+                'Do not shorten, paraphrase, translate or reselect it. Write creative viewer-facing copy '
+                'in the existing hook_0_3s, promise or viewing_reason fields, never in topic.title. '
+                'The exact dynamic selected_topic is supplied in the quality.manager_selection context; '
+                'do not infer it from the game name or research summary.')
         if _writer_reuse(p):
             return (notice.replace('60초','목표 길이').replace('target_duration=60','target_duration=quality.manager_selection.duration_seconds')+
                 ' Writer-stage successor: reuse the authenticated original plan, research and manager_selection '
@@ -650,8 +659,18 @@ class MissionOneCompany(VideoProviderQualityCompany):
             elif role == 'writer':
                 research = next(r for r in context['previous_results'] if r['role'] == 'research')
                 chosen = selection if game else validate_research(parse(research['content']))
-                require(content['topic']['title'] == chosen['selected_topic'],
-                        'mission_selected_topic_mismatch')
+                title,expected=content['topic']['title'],chosen['selected_topic']
+                if title!=expected:
+                    normalize=lambda v:' '.join(unicodedata.normalize('NFKC',v).split()).casefold()
+                    entry=p['real_ai']['attempts'][-1]
+                    entry['script_validation_diagnostics']=dict(stage='writer_selected_topic_validation',
+                        category='mission_selected_topic_mismatch',exact_match=False,
+                        normalized_match=normalize(title)==normalize(expected),
+                        expected_length=len(expected),returned_length=len(title),
+                        expected_title_hash=digest(expected),returned_title_hash=digest(title),
+                        response_hash=entry.get('response_hash'))
+                    self.store.save(p)
+                    require(False,'mission_selected_topic_mismatch')
                 require(all(beat['source_status'] == 'pending' for beat in content['narrative_beats']),
                         'mission_visual_source_unverified')
         return result

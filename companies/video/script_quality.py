@@ -7,6 +7,9 @@ from production_video import units
 
 MAX_SHORTS_SECONDS = 180
 SCRIPT_CONTRACT = 'short_script_v1'
+SHOT_TYPES = ('demo','detail','card')
+SOURCE_STATUSES = ('pending','local_example')
+FACT_STATUSES = ('illustrative','verification_pending')
 CRITERIA = {
     'hook': '첫 3초 관심', 'message': '한 가지 메시지', 'utility': '구체적인 시청자 효용',
     'density': '중복과 군더더기', 'demo': '구체 사례와 실제 시연 가능성',
@@ -40,8 +43,8 @@ SCRIPT_INSTRUCTIONS = (
     'contract=short_script_v1; target_duration=60; topic={title,freshness}, freshness=evergreen|current; '
     'unknowns=list of strings; provenance={author,model,mock}; use actual invocation provenance. '
     'Use contiguous integer seconds, a 0–3s opening, transcript joined with newlines, and close as the last narration. '
-    'Give a concrete screen action and caption per beat; shot_type=demo|detail|card, source_status=pending|local_example, '
-    'fact_status=illustrative|verification_pending. Local examples are demonstrations prepared as text. '
+    'Give a concrete screen action and caption per beat; shot_type='+'|'.join(SHOT_TYPES)+', source_status='+'|'.join(SOURCE_STATUSES)+', '
+    'fact_status='+ '|'.join(FACT_STATUSES)+'. Local examples are demonstrations prepared as text. '
     'Editor must consume the accepted writer version and output {contract,writer_ref,shots}; writer_ref includes '
     'task_id,revision,result_hash; each shot includes start,end,narration,caption,screen,shot_type,source_ref,source_status. '
     'Review criteria: ' + ', '.join(CRITERIA.values()) + '. Cite actual passages and give severity, owner, and a concrete edit. '
@@ -138,9 +141,9 @@ def inspect_script(value, audience, *, mock, target_duration=60):
         if start != cursor:
             defect('timeline_gap_or_overlap', 'duration', quote, f'장면 시작을 직전 종료 {cursor}초에 맞춘다.')
         cursor = end
-        require(beat['shot_type'] in ('demo', 'detail', 'card'), 'invalid_script_shot')
-        require(beat['source_status'] in ('pending', 'local_example'), 'invalid_script_source')
-        require(beat['fact_status'] in ('illustrative', 'verification_pending'), 'invalid_script_fact')
+        require(beat['shot_type'] in SHOT_TYPES, 'invalid_script_shot')
+        require(beat['source_status'] in SOURCE_STATUSES, 'invalid_script_source')
+        require(beat['fact_status'] in FACT_STATUSES, 'invalid_script_fact')
         normalized = re.sub(r'[^\w]+', '', beat['narration'].casefold())
         if normalized in seen:
             defect('repeated_narration', 'density', quote, '중복 문장을 삭제하고 화면에서 새 정보를 보여준다.')
@@ -169,6 +172,90 @@ def inspect_script(value, audience, *, mock, target_duration=60):
     return dict(source='deterministic_script_check', artifact_hash=digest(value), defects=defects,
                 pending=pending, sensory_quality='unassessed', audience_appeal='unassessed',
                 retention='unassessed', previous_artifact_hash=None)
+
+
+def writer_contract(audience, duration, model, selected_topic):
+    """One source for mission writer wire schema and relational acceptance rules."""
+    from role_json_schema import obj, arr, enum
+    string={'type':'string','minLength':1}
+    beat=obj(**{k:dict(string) for k in BEAT_FIELDS})
+    beat['properties'].update(start=dict(type='integer',minimum=0,maximum=duration),
+        end=dict(type='integer',minimum=1,maximum=duration),shot_type=enum(*SHOT_TYPES),
+        source_status=enum('pending'),fact_status=enum(*FACT_STATUSES))
+    schema=obj(**{k:dict(string) for k in WRITER_FIELDS})
+    schema['properties'].update(contract=enum(SCRIPT_CONTRACT),
+        target_audience=dict(string) if audience=='미정' else enum(audience),
+        topic=obj(title=enum(selected_topic),freshness=enum('evergreen','current')),
+        narrative_beats={**arr(beat),'minItems':2,'maxItems':20},
+        target_duration=dict(type='integer',enum=[duration]),
+        unknowns={**arr(dict(string)),'minItems':1 if audience=='미정' else 0},
+        provenance=obj(author=dict(string),model=enum(model),mock=dict(type='boolean',enum=[False])))
+    return dict(version=1,schema=schema,audience=audience,duration=duration,model=model,selected_topic=selected_topic,
+        invariants=[
+            'All required text must be nonblank. Do not add or omit object keys.',
+            'topic.title copies selected_topic exactly; viewer-facing copy belongs in hook_0_3s/promise/viewing_reason.',
+            'Integer contiguous beats start at 0; first beat ends at 3; last ends at target_duration; start < end.',
+            'hook_0_3s equals first narration; close equals last narration; transcript joins narrations with newline.',
+            'For unspecified audience propose one concrete target; one unknowns entry must state AI proposal, user unconfirmed, target and actual reason.',
+            'Keep sources pending and facts illustrative or verification_pending; flag current claims verification_pending.',
+            'Include a demo; avoid repeated/dense narration; captions at most 2 lines, 28 width units per line.',
+            'Audience appeal, retention, Shorts classification and rights remain unverified; no media or publication.'])
+
+
+def validate_writer_contract(value, contract):
+    from role_json_schema import matches
+    inspection=inspect_script(value,contract['audience'],mock=False,target_duration=contract['duration'])
+    require(value['provenance']['model']==contract['model'],'script_provenance_mismatch')
+    require(value['topic']['title']==contract['selected_topic'],'mission_selected_topic_mismatch')
+    require(all(b['source_status']=='pending' for b in value['narrative_beats']),'mission_visual_source_unverified')
+    require(not any(d['issue'] in ('timeline_gap_or_overlap','total_duration','hook_window') for d in inspection['defects']),
+            'invalid_script_timeline')
+    require(matches(value,contract['schema']),'invalid_writer_schema')
+    return inspection
+
+
+def script_failure_details(value, error, contract=None):
+    """Fixed field paths/indices/types only; never return generated text."""
+    code=error.code
+    path={'script_audience_mismatch':'target_audience','script_audience_inference_required':'unknowns',
+        'script_provenance_mismatch':'provenance','mission_selected_topic_mismatch':'topic.title',
+        'invalid_topic_freshness':'topic.freshness','invalid_script_contract':'target_duration',
+        'script_transcript_mismatch':'transcript','invalid_script_unknowns':'unknowns',
+        'invalid_script_beats':'narrative_beats','invalid_beat_time':'narrative_beats','invalid_script_timeline':'narrative_beats'}.get(code,'$')
+    result=dict(stage='writer_script_validation',category=code,error_code=code,field_path=path)
+    enums={'invalid_script_shot':('shot_type',SHOT_TYPES),'invalid_script_source':('source_status',SOURCE_STATUSES),
+        'mission_visual_source_unverified':('source_status',('pending',)), 'invalid_script_fact':('fact_status',FACT_STATUSES)}
+    if isinstance(value,dict) and code=='invalid_fields':
+        missing=next((k for k in WRITER_FIELDS if k not in value),None)
+        if missing:result['field_path']=missing
+        else:
+            for field,keys in (('topic',('title','freshness')),('provenance',('author','model','mock'))):
+                item=value.get(field)
+                if not isinstance(item,dict) or set(item)!=set(keys):
+                    result['field_path']=field
+                    break
+    if isinstance(value,dict) and code=='missing_script_text':
+        for field in WRITER_FIELDS:
+            if isinstance(value.get(field),str) and not value[field].strip():
+                result['field_path']=field
+                break
+    beats=value.get('narrative_beats',[]) if isinstance(value,dict) else []
+    if code in enums and isinstance(beats,list):
+        field,allowed=enums[code]
+        for index,beat in enumerate(beats):
+            item=beat.get(field) if isinstance(beat,dict) else None
+            if not isinstance(item,str) or item not in allowed:
+                result.update(field_path=f'narrative_beats[{index}].{field}',beat_index=index,
+                    allowed_set_match=False,value_type=type(item).__name__)
+                if isinstance(item,str):result['value_length']=len(item)
+                break
+    if code=='script_audience_inference_required':result['detail_code']=getattr(error,'detail_code','inference_marker_missing')
+    if code=='mission_selected_topic_mismatch' and contract:
+        title=value['topic']['title'];expected=contract['selected_topic']
+        result.update(stage='writer_selected_topic_validation',exact_match=False,
+            normalized_match=' '.join(unicodedata.normalize('NFKC',title).split()).casefold()==' '.join(unicodedata.normalize('NFKC',expected).split()).casefold(),
+            expected_length=len(expected),returned_length=len(title),expected_title_hash=digest(expected),returned_title_hash=digest(title))
+    return result
 
 
 def script_editor_handoff(writer):

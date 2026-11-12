@@ -235,6 +235,55 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_writer_native_schema_invalid_shot_stops_with_safe_field_diagnostics(self):
+        self.writer_schema_mutation=lambda v:v['narrative_beats'][0].update(shot_type='synthetic-invalid-shot')
+        self.test_audience_variant_25_second_script_reaches_human_handoff()
+
+    def test_writer_schema_covers_required_fields_and_relational_errors(self):
+        from script_quality import writer_contract,validate_writer_contract,script_failure_details,WRITER_FIELDS,BEAT_FIELDS
+        from role_json_schema import matches
+        def beat(a,b,kind,line):
+            return dict(start=a,end=b,shot_type=kind,narration=line,caption='합성',screen='가상 비교',source_ref='미확보',
+                source_status='pending',fact_status='illustrative')
+        script=script_from_beats([beat(0,3,'card','왜 다를까요?'),beat(3,10,'detail','첫 화면을 보세요.'),beat(10,25,'demo','두 화면을 비교하세요.')])
+        script.update(target_duration=25,target_audience='합성 시연을 찾는 시청자')
+        script['topic']['title']='합성 관리자 선정 주제'
+        script['provenance']=dict(author='synthetic fixture',model=MODEL,mock=False)
+        script['unknowns']=['AI 제안(사용자 미확정): 합성 시연을 찾는 시청자. 이유: 합성 주제의 설명 난이도']
+        contract=writer_contract('미정',25,MODEL,script['topic']['title'])
+        self.assertEqual(set(contract['schema']['required']),set(WRITER_FIELDS))
+        self.assertEqual(set(contract['schema']['properties']['narrative_beats']['items']['required']),set(BEAT_FIELDS))
+        self.assertTrue(matches(script,contract['schema']))
+        original=deepcopy(script)
+        self.assertFalse(validate_writer_contract(script,contract)['defects'])
+        self.assertEqual(script,original)
+        for field in WRITER_FIELDS:
+            bad=deepcopy(script);bad.pop(field)
+            with self.subTest(missing=field), self.assertRaises(CompanyError) as caught:validate_writer_contract(bad,contract)
+            self.assertEqual(script_failure_details(bad,caught.exception,contract)['field_path'],field)
+        cases=[
+            (lambda v:v['narrative_beats'][0].update(shot_type='closeup'),'invalid_script_shot'),
+            (lambda v:v['narrative_beats'][0].update(source_status='licensed'),'invalid_script_source'),
+            (lambda v:v['narrative_beats'][0].update(source_status='local_example'),'mission_visual_source_unverified'),
+            (lambda v:v['narrative_beats'][0].update(fact_status='verified'),'invalid_script_fact'),
+            (lambda v:v['topic'].update(title='다른 주제'),'mission_selected_topic_mismatch'),
+            (lambda v:v['provenance'].update(model='other-model'),'script_provenance_mismatch'),
+            (lambda v:v['provenance'].update(mock=True),'script_provenance_mismatch'),
+            (lambda v:v.update(unknowns=[]),'script_audience_inference_required'),
+            (lambda v:v['narrative_beats'][0].update(start=1),'invalid_script_timeline'),
+            (lambda v:v.update(transcript='다른 본문'),'script_transcript_mismatch'),
+            (lambda v:v.update(target_duration=24),'invalid_script_contract')]
+        for mutate,code in cases:
+            with self.subTest(code=code):
+                bad=deepcopy(script);mutate(bad)
+                with self.assertRaisesRegex(CompanyError,code) as caught:validate_writer_contract(bad,contract)
+                diag=script_failure_details(bad,caught.exception,contract)
+                self.assertEqual(diag['error_code'],code)
+                for raw in (script['target_audience'],script['topic']['title'],self.key):self.assertNotIn(raw,json.dumps(diag,ensure_ascii=False))
+        for kind in ('demo','detail','card'):
+            valid=deepcopy(script);valid['narrative_beats'][0]['shot_type']=kind
+            self.assertFalse(validate_writer_contract(valid,contract)['defects'])
+
     def test_topic_failure_successor_preserves_six_failures_and_hands_off(self):
         self.topic_successor_fixture=True
         self.test_audience_failure_successor_preserves_five_failures_and_hands_off()
@@ -488,7 +537,7 @@ class MissionOneTests(unittest.TestCase):
             message=json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
             phase,context=message['phase'],message['data']
             role=context.get('assignment',{}).get('role')
-            if not (phase == 'review' and role == 'research'):
+            if not (phase == 'review' and role == 'research') and not (phase=='execute' and role=='writer'):
                 from role_json_schema import response_format
                 self.assertEqual(json.loads(request.data)['generationConfig']['responseJsonSchema'],
                                  response_format(phase)['json_schema']['schema'])
@@ -497,6 +546,14 @@ class MissionOneTests(unittest.TestCase):
                 self.assertIn('Copy this supplied string character-for-character',notice)
                 self.assertIn('hook_0_3s, promise or viewing_reason',notice)
                 self.assertEqual(context['quality']['manager_selection']['selected_topic'],script['topic']['title'])
+                from role_json_schema import obj, S
+                from script_quality import writer_contract
+                contract=writer_contract(self.store.load(self.job)['quality_inputs']['target_segment'],duration,MODEL,decision['selected_topic'])
+                self.assertEqual(context['quality']['writer_contract'],contract)
+                expected=obj(result=obj(content=contract['schema'],evidence=S,uncertainty=S))
+                self.assertEqual(wire['generationConfig']['responseJsonSchema'],expected)
+                self.assertEqual(message['output_contract'],expected)
+                self.assertIn('result.content MUST be a JSON object',notice)
             if phase=='execute' and role=='research':
                 result=dict(content=json.dumps(queries),evidence='fixture query builder',uncertainty='unverified')
             elif phase=='execute':
@@ -567,6 +624,10 @@ class MissionOneTests(unittest.TestCase):
                     result.update(action='deliver',content='가상 게임 기획',
                                   checks=[{**c,'status':'met'} for c in result['checks']])
                 result.pop('task_refs',None)
+            if phase=='execute' and role=='writer':
+                result['content']=json.loads(result['content'])
+                if getattr(self,'writer_schema_mutation',None):
+                    self.writer_schema_mutation(result['content'])
             response_text = json.dumps(dict(result=result),ensure_ascii=False)
             if phase == 'review' and role == 'research' and getattr(self,'review_error',None) == 'outer_json':
                 response_text = '{synthetic invalid JSON'
@@ -610,6 +671,23 @@ class MissionOneTests(unittest.TestCase):
             result=self.run_job()
         else:
             result=self.run_job()
+        if getattr(self,'writer_schema_mutation',None):
+            self.assertEqual(result['reason_code'],'invalid_script_shot')
+            self.assertEqual(self.http.call_count,4)
+            diag=result['real_ai']['attempts'][-1]['script_validation_diagnostics']
+            self.assertEqual(diag['field_path'],'narrative_beats[0].shot_type')
+            self.assertEqual(diag['beat_index'],0)
+            self.assertFalse(diag['allowed_set_match'])
+            self.assertEqual(diag['value_type'],'str')
+            self.assertEqual(diag['value_length'],len('synthetic-invalid-shot'))
+            self.assertTrue(diag['response_hash'])
+            self.assertNotIn('synthetic-invalid-shot',json.dumps(diag))
+            self.assertNotIn(self.key,json.dumps(diag))
+            before={p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and self.job in p.name}
+            with self.assertRaises(CompanyError):self.run_job()
+            self.assertEqual(self.http.call_count,4)
+            for path,data in before.items():self.assertEqual(path.read_bytes(),data)
+            return
         if getattr(self,'provenance_case',None) in ('mock_conflict','other_model'):
             self.assertEqual(result['reason_code'],'script_provenance_mismatch')
             self.assertEqual(self.http.call_count,4)
@@ -747,7 +825,7 @@ class MissionOneTests(unittest.TestCase):
             self.assertEqual(diag['audience_unspecified'],self.audience_case=='missing_inference')
             if self.audience_case=='missing_inference':
                 self.assertEqual(diag['detail_code'],getattr(self,'audience_detail','inference_marker_missing'))
-                self.assertEqual(set(diag),{'stage','category','field','audience_unspecified','response_bytes','response_hash','detail_code'})
+                self.assertTrue({'stage','category','field','audience_unspecified','response_bytes','response_hash','detail_code'}<=set(diag))
                 self.assertNotIn(script['target_audience'],json.dumps(diag,ensure_ascii=False))
                 self.assertNotIn(self.key,json.dumps(diag))
             self.assertEqual(self.http.call_count,4)

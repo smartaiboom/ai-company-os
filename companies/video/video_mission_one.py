@@ -16,7 +16,7 @@ from employee_web_research import (TOOL as WEB_TOOL, POLICY as WEB_POLICY, colle
 from role_json_schema import response_format, matches, obj, arr, S
 from quality_provider import QualityProviderStore
 from quality_workflow import VideoProviderQualityCompany
-from script_quality import SCRIPT_CONTRACT, inspect_script, AUDIENCE_INSTRUCTIONS
+from script_quality import SCRIPT_CONTRACT, inspect_script, AUDIENCE_INSTRUCTIONS, writer_contract
 
 SCOPE = 'representative_video_mission_01'
 GAME_GOAL = '요즘 인기있는 게임에 대한 흥미있는 쇼츠 영상을 만들어봐. 기본적으로 인기있는 쇼츠는 몇초인지도 확인해보고.'
@@ -487,6 +487,16 @@ class MissionOneCompany(VideoProviderQualityCompany):
             message = parse(wire['contents'][0]['parts'][0]['text'])
             message['output_contract'] = research_review_schema()
             wire['contents'][0]['parts'][0]['text'] = json.dumps(message, ensure_ascii=False)
+        contract=getattr(self,'_writer_wire_contract',None)
+        if contract is not None:
+            schema=obj(result=obj(content=deepcopy(contract['schema']),evidence=S,uncertainty=S))
+            wire['generationConfig']['responseJsonSchema']=schema
+            message=parse(wire['contents'][0]['parts'][0]['text'])
+            message['output_contract']=schema
+            wire['contents'][0]['parts'][0]['text']=json.dumps(message,ensure_ascii=False)
+            system=wire['systemInstruction']['parts'][0]
+            system['text']=system['text'].replace('Writer/editor/voice content must be a JSON string','Editor/voice content must be a JSON string')
+            system['text']+=' WRITER NATIVE CONTRACT: result.content MUST be a JSON object, not a JSON string. Follow quality.writer_contract.schema and all quality.writer_contract.invariants. These exact dynamic constraints override generic writer guidance.'
         return wire
 
     def _validate_payload(self, payload):
@@ -495,6 +505,15 @@ class MissionOneCompany(VideoProviderQualityCompany):
                     'mission_research_payload_contract')
             payload = deepcopy(payload)
             payload['generationConfig']['responseJsonSchema'] = response_format('review')['json_schema']['schema']
+        contract=getattr(self,'_writer_wire_contract',None)
+        if contract is not None:
+            schema=obj(result=obj(content=deepcopy(contract['schema']),evidence=S,uncertainty=S))
+            message=parse(payload['contents'][0]['parts'][0]['text'])
+            require(digest(payload['generationConfig']['responseJsonSchema'])==digest(schema)
+                    and digest(message['output_contract'])==digest(schema)
+                    and digest(message['data']['quality']['writer_contract'])==digest(contract), 'mission_writer_payload_contract')
+            payload=deepcopy(payload)
+            payload['generationConfig']['responseJsonSchema']=response_format('execute')['json_schema']['schema']
         return super()._validate_payload(payload)
 
     def _research_error(self, raw, stage, code):
@@ -505,6 +524,20 @@ class MissionOneCompany(VideoProviderQualityCompany):
         self.store.save(p)
 
     def _parse_role_content(self, raw, phase):
+        if getattr(self,'_writer_wire_contract',None) is not None:
+            require(phase=='execute','mission_writer_payload_contract')
+            try:
+                value=parse(raw);exact(value,('result',));result=value['result'];exact(result,('content','evidence','uncertainty'))
+                require(isinstance(result['content'],dict),'writer_object_required')
+                # Lossless serialization only: the shared engine stores content as text.
+                return {**result,'content':json.dumps(result['content'],ensure_ascii=False)}
+            except CompanyError as exc:
+                p=self._writer_wire_state
+                entry=p['real_ai']['attempts'][-1]
+                entry['script_validation_diagnostics']=dict(stage='writer_wire_contract',category=exc.code,
+                    error_code=exc.code,field_path='result.content',response_hash=digest(raw))
+                self.store.save(p)
+                raise
         if getattr(self, '_research_review_state', None) is None:
             return super()._parse_role_content(raw, phase)
         try:
@@ -661,7 +694,7 @@ class MissionOneCompany(VideoProviderQualityCompany):
                     and exc.code in ('script_audience_mismatch','script_audience_inference_required')
                     and p['real_ai']['attempts']):
                 entry = p['real_ai']['attempts'][-1]
-                entry['script_validation_diagnostics'] = dict(stage='writer_script_validation',
+                entry.setdefault('script_validation_diagnostics',{}).update(stage='writer_script_validation',
                     category=exc.code, field='target_audience',
                     audience_unspecified=p['quality_inputs']['target_segment']=='미정',
                     response_bytes=entry.get('response_diagnostics',{}).get('response_bytes'),
@@ -680,7 +713,17 @@ class MissionOneCompany(VideoProviderQualityCompany):
         selection = self._manager_selection(p)
         if selection:
             context = {**context,'quality':{**context['quality'],'manager_selection':selection}}
-        result = super()._call(p, provider, phase, task_id, context)
+        contract=(writer_contract(p['quality_inputs']['target_segment'],selection['duration_seconds'],self.bound_model,
+                    selection['selected_topic']) if selection and phase=='execute' and context['assignment']['role']=='writer' else None)
+        if contract:
+            context={**context,'quality':{**context['quality'],'writer_contract':contract}}
+        self._writer_wire_contract=contract
+        self._writer_wire_state=p if contract else None
+        try:
+            result = super()._call(p, provider, phase, task_id, context)
+        finally:
+            self._writer_wire_contract=None
+            self._writer_wire_state=None
         game = p['goal'] == GAME_GOAL
         if game and phase=='review' and context['assignment']['role']=='research' and result['action']=='accept':
             validate_selection(parse(result['feedback']),p.get('employee_web'))

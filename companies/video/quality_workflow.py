@@ -5,7 +5,7 @@ from autonomous_company import Company, CompanyError, require, exact, parse, dig
 from quality_feedback import ROLE_CONTRACTS
 from video_production_company import offline_clip_decision_context
 from topic_research import compare_topics, writer_topic_handoff
-from script_quality import CRITERIA, SCRIPT_CONTRACT, SCRIPT_INSTRUCTIONS, inspect_script, validate_script_editor
+from script_quality import CRITERIA, SCRIPT_CONTRACT, SCRIPT_INSTRUCTIONS, inspect_script, validate_script_editor, validate_writer_contract, script_failure_details
 
 RUBRIC = (
     ('hook', '대본/기획', '초반 3초 관심 유도'),
@@ -341,9 +341,17 @@ class VideoProviderQualityCompany(QualityProviderCompany):
             content=parse(result['content'])
             if script is not None and task['role'] == 'writer':
                 try:
-                    inspect_script(content, quality['target_segment'], mock=False, target_duration=duration)
+                    contract=getattr(self,'_writer_wire_contract',None)
+                    if contract is not None:
+                        validate_writer_contract(content,contract)
+                    else:
+                        inspect_script(content, quality['target_segment'], mock=False, target_duration=duration)
                     require(content['provenance']['model'] == self.bound_model, 'script_provenance_mismatch')
                 except CompanyError as exc:
+                    entry=p['real_ai']['attempts'][-1]
+                    entry['script_validation_diagnostics']={**script_failure_details(content,exc,getattr(self,'_writer_wire_contract',None)),
+                        'response_hash':entry.get('response_hash')}
+                    self.store.save(p)
                     if exc.code=='script_provenance_mismatch':
                         entry=p['real_ai']['attempts'][-1]
                         proof=content.get('provenance',{})

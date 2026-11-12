@@ -235,6 +235,10 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_topic_failure_successor_preserves_six_failures_and_hands_off(self):
+        self.topic_successor_fixture=True
+        self.test_audience_failure_successor_preserves_five_failures_and_hands_off()
+
     def test_selected_topic_copy_contract_25_second_handoff(self):
         self.selected_topic_fixture='합성 관리자 선정 — 두 화면 비교 (주제 식별)'
         self.test_audience_variant_25_second_script_reaches_human_handoff()
@@ -511,7 +515,8 @@ class MissionOneTests(unittest.TestCase):
                         and not self.store.load(self.job).get('mission_writer_resume')
                         and not self.store.load(self.job).get('mission_budget_writer')
                         and not self.store.load(self.job).get('mission_free_writer')
-                        and not self.store.load(self.job).get('mission_audience_successor')):
+                        and not self.store.load(self.job).get('mission_audience_successor')
+                        and not self.store.load(self.job).get('mission_topic_successor')):
                     content=json.loads(result['content'])
                     content['target_audience']='미정'
                     result['content']=json.dumps(content,ensure_ascii=False)
@@ -522,6 +527,10 @@ class MissionOneTests(unittest.TestCase):
                 if (role=='writer' and getattr(self,'free_error',None)=='audience'
                         and self.store.load(self.job).get('mission_free_writer')):
                     content=json.loads(result['content']);content['unknowns']=[]
+                    result['content']=json.dumps(content,ensure_ascii=False)
+                if (role=='writer' and getattr(self,'topic_successor_fixture',False)
+                        and self.store.load(self.job).get('mission_audience_successor')):
+                    content=json.loads(result['content']);content['topic']['title']='합성 여섯 번째 실패 제목'
                     result['content']=json.dumps(content,ensure_ascii=False)
                 if role=='writer' and getattr(self,'script_topic_tamper',False):
                     content=json.loads(result['content'])
@@ -1045,6 +1054,10 @@ class MissionOneTests(unittest.TestCase):
         self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
         self.http.reset_mock(side_effect=False);self.http.side_effect=send;self.new_phases=[]
         result=self.run_job()
+        if getattr(self,'topic_successor_fixture',False):
+            self.assertEqual(result['reason_code'],'mission_selected_topic_mismatch')
+            self.assertEqual(self.http.call_count,1)
+            return self.finish_topic_successor_fixture(project,result,before,urls,decision,script,youtube_key,send)
         self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
         self.assertEqual(self.http.call_count,4)
         self.assertEqual(self.new_phases,[('execute','writer'),('review','writer'),('execute','editor'),('review','editor')])
@@ -1056,6 +1069,55 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(report['script']['target_audience'],script['target_audience'])
         self.assertEqual(report['provenance'],'offline_http_fixture')
         self.assertEqual(report['research']['reuse']['final_evaluation'],'not_performed_local_handoff')
+        self.assertEqual(len(urls),4)
+        for path,data in before.items():self.assertEqual(path.read_bytes(),data)
+
+    def finish_topic_successor_fixture(self,project,failed,before,urls,decision,script,youtube_key,send):
+        from video_mission_one import TOPIC_SUCCESSOR_POLICY, MISSION_ACCOUNT
+        sixth=self.job
+        before.update({p:p.read_bytes() for p in self.store.root.iterdir() if p.is_file() and sixth in p.name})
+        reference=self.store.topic_successor_reference(failed)
+        self.assertEqual(reference['consumed_calls'],9)
+        self.assertEqual(len(reference['previous_attempt_ids']),9)
+        for invalid in (lambda p:p.update(reason_code='other'),lambda p:p.update(active_operation=None),
+                        lambda p:p['mission_audience_successor'].update(selection_hash='tampered')):
+            bad=deepcopy(failed);invalid(bad)
+            with self.assertRaises(CompanyError):self.store.topic_successor_reference(bad)
+        with self.assertRaises(CompanyError):self.store.audience_successor_reference(failed)
+        with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_topic_successor(project)
+        self.job=self.studio.workflow.stage_mission_topic_successor(project,owner_confirmed=True)
+        fresh=self.store.load(self.job)
+        self.assertIsNone(fresh['limits']['max_calls'])
+        self.assertEqual(fresh['assignments'],failed['assignments'])
+        self.assertFalse(fresh['real_ai']['attempts'])
+        self.assertFalse(fresh['real_ai']['consent'])
+        with self.assertRaises(CompanyError):self.studio.workflow.stage_mission_topic_successor(project,owner_confirmed=True)
+        with self.assertRaises(CompanyError):self.run_job()
+        body=self.store.prepare_mission(self.job,key=self.key,account_project=MISSION_ACCOUNT,quota_note='synthetic attestation',
+            youtube_key=youtube_key,youtube_project=MISSION_ACCOUNT,confirm_youtube_policy=True)
+        self.assertEqual(body['mission_topic_successor']['policy'],TOPIC_SUCCESSOR_POLICY)
+        self.assertIsNone(body['mission_account']['approved_max_calls'])
+        self.assertEqual(body['mission_web']['approved_max_searches'],0)
+        old_body=json.loads(self.store._grant_path(sixth).read_text())['record']['body']
+        with self.assertRaises(CompanyError):self.store.approve(self.job,old_body,review_hash=digest(old_body),owner_confirmed=True)
+        for mutate in (lambda b:b['mission_topic_successor'].update(selection_hash='tampered'),
+                       lambda b:b['mission_account'].update(account_project='other-account')):
+            bad=deepcopy(body);mutate(bad)
+            with self.assertRaises(CompanyError):self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
+        self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+        with patch.dict('os.environ',YOUTUBE_DATA_API_KEY='changed-key'):
+            with self.assertRaises(CompanyError):self.run_job()
+        self.http.reset_mock(side_effect=False);self.http.side_effect=send;self.new_phases=[]
+        result=self.run_job()
+        self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
+        self.assertEqual(self.http.call_count,4)
+        self.assertEqual(self.new_phases,[('execute','writer'),('review','writer'),('execute','editor'),('review','editor')])
+        report=self.studio.workflow.report_plan(project,provider_store=self.store,allow_fixture=True)
+        self.assertEqual(self.studio.detail('workspace',project)['stage'],'awaiting_plan_approval')
+        self.assertEqual(report['research']['manager_decision'],decision)
+        self.assertEqual(report['research']['reuse']['source_job'],sixth)
+        self.assertEqual(report['script']['target_duration'],25)
+        self.assertEqual(report['provenance'],'offline_http_fixture')
         self.assertEqual(len(urls),4)
         for path,data in before.items():self.assertEqual(path.read_bytes(),data)
 

@@ -23,6 +23,7 @@ GAME_GOAL = '요즘 인기있는 게임에 대한 흥미있는 쇼츠 영상을 
 GAME_SCOPE = 'game_shorts_independent_research_20261111'
 GAME_RESEARCH_BLOCKER = 'mission_independent_web_research_unavailable'
 MAX_CALLS = 10  # Historical policy; never rewrite old signed grants.
+TOPIC_SUCCESSOR_POLICY = 'mission01_topic_successor_20261112_v1'
 AUDIENCE_SUCCESSOR_POLICY = 'mission01_audience_successor_20261112_v1'
 FREE_WRITER_POLICY = 'mission01_free_provider_limits_20261112_v1'
 DOUBLE_BUDGET_POLICY = 'mission01_double_budget_20261112_v1'
@@ -33,11 +34,11 @@ DEFAULT_ROOT = Path('data/video_representative_workflow/studio')
 
 
 def _writer_reuse(p):
-    return p.get('mission_audience_successor') or p.get('mission_free_writer') or p.get('mission_budget_writer') or p.get('mission_writer_resume')
+    return p.get('mission_topic_successor') or p.get('mission_audience_successor') or p.get('mission_free_writer') or p.get('mission_budget_writer') or p.get('mission_writer_resume')
 
 
 def _web_limit(p):
-    return 0 if p.get('mission_free_writer') or p.get('mission_audience_successor') else 6 if p.get('mission_budget_writer') else 2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4
+    return 0 if p.get('mission_free_writer') or p.get('mission_audience_successor') or p.get('mission_topic_successor') else 6 if p.get('mission_budget_writer') else 2 if p.get('mission_successor') or p.get('mission_writer_resume') else 4
 
 
 def _binding(project_id, key):
@@ -88,7 +89,8 @@ class MissionOneStore(QualityProviderStore):
                 **({'mission_writer_resume':deepcopy(p['mission_writer_resume'])} if 'mission_writer_resume' in p else {}),
                 **({'mission_budget_writer':deepcopy(p['mission_budget_writer'])} if 'mission_budget_writer' in p else {}),
                 **({'mission_free_writer':deepcopy(p['mission_free_writer'])} if 'mission_free_writer' in p else {}),
-                **({'mission_audience_successor':deepcopy(p['mission_audience_successor'])} if 'mission_audience_successor' in p else {})}
+                **({'mission_audience_successor':deepcopy(p['mission_audience_successor'])} if 'mission_audience_successor' in p else {}),
+                **({'mission_topic_successor':deepcopy(p['mission_topic_successor'])} if 'mission_topic_successor' in p else {})}
 
     def resume_reference(self, previous):
         require('mission_resume' not in previous, 'mission_resume_not_eligible')
@@ -293,16 +295,57 @@ class MissionOneStore(QualityProviderStore):
             next_request_purpose='write_new_script_with_revised_explicit_audience_inference_contract')
         return ref
 
+    def topic_successor_reference(self, previous):
+        """Sixth selected-topic failure only; reuse the authenticated original selection, never a failed script."""
+        require(previous.get('mission_audience_successor') and not previous.get('mission_topic_successor')
+                and previous['status']=='stopped' and previous.get('reason_code')=='mission_selected_topic_mismatch',
+                'mission_topic_successor_not_eligible')
+        fifth=self.load(previous['mission_audience_successor']['previous_job'])
+        require(digest(previous['mission_audience_successor'])==digest(self.audience_successor_reference(fifth))
+                and previous['goal']==fifth['goal'] and previous['quality_inputs']==fifth['quality_inputs']
+                and previous['plan']==fifth['plan'] and previous['employee_web']==fifth['employee_web']
+                and previous['assignments']==fifth['assignments']
+                and previous['limits']==dict(max_calls=None,max_revisions_per_task=1,max_total_revisions=1),
+                'mission_topic_successor_history_changed')
+        grant=parse(self._grant_path(previous['id']).read_text())
+        require(hmac.compare_digest(str(grant['signature']),self._sign(grant['record']))
+                and grant['record']['id']==previous['real_ai']['consent'].get('operating_grant_id')
+                and grant['record']['revoked_at'] is None, 'invalid_consent_signature')
+        body=grant['record']['body']
+        require(body['mission_audience_successor']==previous['mission_audience_successor']
+                and body['mission_account']['account_project']==body['mission_web']['account_project']==MISSION_ACCOUNT
+                and body['mission_account']['free_data_policy']==DATA_POLICY
+                and body['mission_account']['billing_disabled'] is True
+                and body['model']==MODEL and body['endpoint']==ENDPOINT and body['free_only'] is True,
+                'mission_topic_successor_scope_changed')
+        attempts=previous['real_ai']['attempts']
+        require(len(attempts)==1 and attempts[0]['phase']=='execute'
+                and attempts[0]['task_id']==previous['assignments'][1]['id']
+                and attempts[0]['status']=='completed' and attempts[0].get('http_status')==200
+                and attempts[0]['model']==MODEL and attempts[0].get('response_hash')
+                and attempts[0].get('free_account_policy_verified') is True
+                and attempts[0]['role_result_status']=='json_parsed'
+                and previous['active_operation']==attempts[0]['id'] and not previous.get('final'),
+                'mission_topic_successor_attempts_invalid')
+        ref=deepcopy(previous['mission_audience_successor'])
+        ref.update(policy=TOPIC_SUCCESSOR_POLICY,previous_job=previous['id'],
+            previous_state_hash=previous['storage_hash'],history=deepcopy(previous['mission_audience_successor']),
+            previous_attempt_ids=ref['previous_attempt_ids']+[attempts[0]['id']],consumed_calls=9,
+            next_request_purpose='write_new_script_with_exact_manager_selected_topic_copy_contract')
+        return ref
+
     def check_scope(self, p):
         writer = _writer_reuse(p)
         expanded=p.get('mission_budget_writer')
         free=p.get('mission_free_writer')
         audience=p.get('mission_audience_successor')
+        topic=p.get('mission_topic_successor')
         if writer:
             require(not p.get('mission_successor') and not p.get('mission_resume')
-                    and sum(bool(p.get(k)) for k in ('mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor'))==1, 'mission_writer_history_changed')
+                    and sum(bool(p.get(k)) for k in ('mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor','mission_topic_successor'))==1, 'mission_writer_history_changed')
             previous=self.load(writer['previous_job'])
-            expected=(self.audience_successor_reference(previous) if audience else
+            expected=(self.topic_successor_reference(previous) if topic else
+                      self.audience_successor_reference(previous) if audience else
                       self.free_writer_reference(previous,explicit_max_calls=writer.get('explicit_max_calls')) if free else
                       self.budget_writer_reference(previous) if expanded else self.writer_reference(previous))
             require(digest(writer)==digest(expected)
@@ -346,7 +389,7 @@ class MissionOneStore(QualityProviderStore):
                             dict(aspect='9:16', language='한국어', platform='YouTube Shorts').items()),
                     'mission_game_scope_mismatch')
         require(quality['capabilities'] == capabilities
-                and p['limits'] == dict(max_calls=None if audience else free['explicit_max_calls'] if free else 13 if expanded else 4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
+                and p['limits'] == dict(max_calls=None if topic or audience else free['explicit_max_calls'] if free else 13 if expanded else 4 if writer else 6 if successor else MAX_CALLS-1 if resume else MAX_CALLS, max_revisions_per_task=1, max_total_revisions=1)
                 and not p.get('local_tools'), 'mission_scope_mismatch')
 
     @staticmethod
@@ -389,13 +432,14 @@ class MissionOneStore(QualityProviderStore):
         require(body.get('mission_budget_writer')==p.get('mission_budget_writer'), 'mission_budget_writer_consent_mismatch')
         require(body.get('mission_free_writer')==p.get('mission_free_writer'), 'mission_free_writer_consent_mismatch')
         require(body.get('mission_audience_successor')==p.get('mission_audience_successor'), 'mission_audience_successor_consent_mismatch')
+        require(body.get('mission_topic_successor')==p.get('mission_topic_successor'), 'mission_topic_successor_consent_mismatch')
         if _writer_reuse(p):
             old=parse(self._grant_path(_writer_reuse(p)['previous_job']).read_text())['record']['body']
             require(body['mission_account']['account_project']==old['mission_account']['account_project']
                     and body['mission_web']['account_project']==old['mission_web']['account_project'],
                     'mission_writer_account_changed')
         self._check_mission_account(body.get('mission_account'), p['limits']['max_calls'])
-        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor')})
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor','mission_topic_successor')})
 
 
 def validate_research(value):
@@ -759,7 +803,7 @@ def main():
     from representative_workflow import RepresentativeVideoWorkflow
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--root', type=Path, default=DEFAULT_ROOT)
-    parser.add_argument('action', choices=('create-audience-successor','create-free-writer-resume','create-budget-writer-resume','create-writer-resume','create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
+    parser.add_argument('action', choices=('create-topic-successor','create-audience-successor','create-free-writer-resume','create-budget-writer-resume','create-writer-resume','create-successor','create-resume','connect-web','prepare', 'approve', 'run'))
     parser.add_argument('project')
     parser.add_argument('--confirm-new-execution', action='store_true')
     parser.add_argument('--explicit-max-calls',type=int,help='Optional owner-specified limit for create-free-writer-resume; default none.')
@@ -778,6 +822,9 @@ def main():
     workflow = RepresentativeVideoWorkflow(Store(args.root))
     store = MissionOneStore(workflow.store.root/'mission_one_provider')
     try:
+        if args.action=='create-topic-successor':
+            print(workflow.stage_mission_topic_successor(args.project,owner_confirmed=args.confirm_new_execution))
+            return
         if args.action=='create-audience-successor':
             print(workflow.stage_mission_audience_successor(args.project,owner_confirmed=args.confirm_new_execution))
             return

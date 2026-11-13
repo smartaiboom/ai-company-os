@@ -267,5 +267,45 @@ class StoppedScriptReviewAuditTests(unittest.TestCase):
         self.assertFalse(report['review_available'])
 
 
+
+class ReuseProofAuditTests(unittest.TestCase):
+    def test_verified_plan_and_writer_allow_only_a_new_recovery_proposal(self):
+        from copy import deepcopy
+        from representative_rework import script_review_recovery_audit
+        def attempt(phase,task_id,status):
+            return dict(phase=phase,task_id=task_id,status='completed',
+                http_status=200,role_result_status=status,response_hash='hash-'+phase,
+                transport_started_at='2026-11-13T13:31:42+09:00',
+                finished_at='2026-11-13T13:31:47+09:00')
+        job=dict(id='qualityprovider-offline',status='stopped',phase='work',
+            reason_code='script_feedback_missing_defect',final=None,
+            plan=dict(tasks=[]),sessions=[dict(id='session-1')],
+            quality_inputs=dict(target_segment='게임 시청자'),
+            rework_plan=dict(duration_seconds=25),
+            assignments=[dict(role='writer',id='task_writer_v3',criteria_ids=['hook'],
+                versions=[dict(content='{"transcript":"예시 대본"}')],
+                reviews=[dict(action='revise',feedback='자막을 줄이세요')])],
+            real_ai=dict(attempts=[attempt('plan',None,'validated'),
+                attempt('execute','task_writer_v3','validated'),
+                attempt('review','task_writer_v3','json_parsed')]))
+        state=dict(status='stopped',error='script_feedback_missing_defect')
+        before=deepcopy(job)
+        inspection=dict(defects=[dict(issue='caption_width',correction='자막 수정',evidence='긴 문장')])
+        with patch('script_quality.inspect_script',return_value=inspection):
+            report=script_review_recovery_audit(job,state)
+        self.assertTrue(report['reusable_plan'])
+        self.assertTrue(report['reusable_writer'])
+        self.assertTrue(report['safe_for_recovery_proposal'])
+        self.assertFalse(report['callable_retry_allowed'])
+        self.assertFalse(report['review_committed'])
+        self.assertEqual(job,before)
+
+        job['real_ai']['attempts'][1]['role_result_status']='json_parsed'
+        with patch('script_quality.inspect_script',return_value=inspection):
+            invalid=script_review_recovery_audit(job,state)
+        self.assertFalse(invalid['reusable_writer'])
+        self.assertFalse(invalid['safe_for_recovery_proposal'])
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -245,6 +245,8 @@ class Studio:
             project=self.project('workspace',pid);state=project['representative'].get('rework')
             require(state is not None,'rework_prepare_required')
             if name=='rework-consent':
+                require(state.get('proposal',{}).get('limits',{}).get('max_calls')==7,
+                        'rework_pending_cap_required')
                 exact(body,('review_hash','confirm_free_account','confirm_data_policy'))
                 require(state['status']=='pending' and body['confirm_free_account'] is True and body['confirm_data_policy'] is True
                         and body['review_hash']==digest(state['proposal']),'rework_consent_required')
@@ -264,6 +266,9 @@ class Studio:
             else:
                 provider.grant(job);provider.require_unstarted(job)
             require(state['proposal']['rework_scope']['credential_binding']==_binding(job['id'],config.api_key),'rework_key_changed')
+            require(job['limits'].get('max_calls')==7
+                    and state['proposal']['limits'].get('max_calls')==7,
+                    'rework_pending_cap_required')
             state['status']='running';self.stores['workspace'].save(project)
         def worker():
             try:

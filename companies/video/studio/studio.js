@@ -235,9 +235,9 @@ function reworkPanel(p) {
     ${r.settings&&!r.settings.ready?`<p class="warning">Gemini 실행 설정 확인 필요: ${h(r.settings.missing.join(', '))}. 서버 환경에 설정 후 서버를 재시작하세요. 키 값은 입력하거나 공유하지 마세요.</p>`:''}
     ${r.recovery?.error?`<p class="warning">재개 차단: 동의·서명·전송 이력 확인이 필요합니다. 만료 동의는 새 동의 검토가 필요하며 반복 클릭하지 마세요.</p>`:''}
     ${r.recovery?.eligible&&r.attempts===0?`<p>과거 중단 기록과 시도 0은 보존됩니다. 현재 승인 범위로 명시적으로 한 번 재개할 수 있습니다.</p>${r.settings?.ready?'<button class="button" data-action="rework-recover">설정 확인 후 AI 재작업 재개</button>':''}`:''}
-    ${r.proposal?facts([['모델',r.proposal.model],['프로젝트',r.proposal.rework_scope.account_project],['무료 quota / 청구','unknown / unverified'],['시도',r.attempts]]):''}
+    ${r.proposal?facts([['모델',r.proposal.model],['프로젝트',r.proposal.rework_scope.account_project],['무료 quota / 청구','unknown / unverified'],['시도',r.attempts],['새 실행 한도',JSON.stringify(r.proposal.limits)]]):''}
     ${r.proposal?`<details><summary>전송 범위·재기획·검토 기록</summary><p>${h(r.proposal.rework_scope.data_policy)}</p><p>원 목표·저장된 대표 피드백·이전 대본/스토리보드·공개 관측을 Google에 전송합니다. 입출력 개선 활용·인적 검토 가능. 무료 여부는 소유자 확인이며 독립 검증되지 않았습니다.</p><pre>${h(JSON.stringify({inputs:r.proposal.quality_contract.inputs,replan:r.replan,reviews:r.reviews},null,2))}</pre></details>`:''}
-    ${r.new_attempt?'<p>이전 실패는 보존하고 강화된 기획 계약의 별도 작업을 준비합니다. 실행에는 새 동의가 필요합니다.</p><button class="button secondary" data-action="rework-new-prepare">수정 대본 다시 생성 준비</button>':''}
+    ${r.new_attempt?'<p>이전 실패·피드백은 보존합니다. 새 작업 1회와 표시된 호출·수정 한도를 별도로 검토하고 동의하세요. 기존 동의는 새 전송을 승인하지 않습니다. Gemini 503이 다시 발생할 수 있으며 자동 재시도하지 않습니다.</p><button class="button secondary" data-action="rework-new-prepare">새 AI 재작업 준비</button>':''}
     ${r.history?.length?`<details><summary>이전 재작업 시도 · 보존 기록</summary>${r.history.map(x=>`<p>이전 작업 ${h(x.job)} · 중단/완료 기록 보존</p>`).join('')}<p>현재 작업 ${h(r.job)} · 이전 동의와 별개</p></details>`:''}
     ${r.status==='available'?'<button class="button secondary" data-action="rework-prepare">AI 재작업 동의 준비</button>':''}
     ${r.status==='pending'?'<button class="button secondary" data-action="rework-consent">새 외부 전송 동의</button>':''}

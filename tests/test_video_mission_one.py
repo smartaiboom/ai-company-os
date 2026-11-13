@@ -235,6 +235,11 @@ class MissionOneTests(unittest.TestCase):
         self.audience_case = 'inferred'
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_new_consented_rework_after_final_503_to_v2_offline(self):
+        self.unavailable_fixture=True
+        self.new_attempt_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_new_consented_rework_after_failed_plan_to_v2_offline(self):
         self.new_attempt_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
@@ -1588,7 +1593,7 @@ class MissionOneTests(unittest.TestCase):
         def run():return company.run(pid,expected_state_hash=provider.load(pid)['storage_hash'])
         with self.assertRaises(CompanyError):run()
         body=state['proposal']
-        if getattr(self,'new_attempt_fixture',False):
+        if getattr(self,'new_attempt_fixture',False) and not getattr(self,'unavailable_fixture',False):
             # Historical fixture uses the old signed plan contract, not the new one.
             body['rework_scope'].pop('plan_contract_hash')
             project_state=self.studio.workflow.store.load(project)
@@ -1665,13 +1670,37 @@ class MissionOneTests(unittest.TestCase):
             old['real_ai']['attempts']=[dict(id='fixture-completed-plan',phase='plan',model=MODEL,status='completed',
                 http_status=200,role_result_status='json_parsed',response_hash='fixture-response',
                 transport_started_at=now(),response_received_at=now())]
-            old['events'].append(dict(at=now(),event='system_safety_stop',code='invalid_dependencies'))
+            if getattr(self,'unavailable_fixture',False):
+                old.update(status='paused',reason_code='provider_unavailable')
+                old['real_ai']['attempts'][0].update(status='failed',http_status=503,
+                    error_code='provider_unavailable',role_result_status='unvalidated',response_hash=None,
+                    request_hash='fixture-request-hash',finished_at=now())
+                old['real_ai']['attempts'][0].pop('response_received_at')
+            old['events'].append(dict(at=now(),event='system_safety_stop',code=old['reason_code']))
             provider.save(old)
             with self.studio.workflow.store.lock(project):
                 current=self.studio.workflow.store.load(project)
-                current['representative']['rework'].update(status='stopped',error='invalid_dependencies')
+                current['representative']['rework'].update(status='stopped',error=old['reason_code'])
                 self.studio.workflow.store.save(current)
             preserved={p:p.read_bytes() for p in provider.root.glob(old_id+'.*')}
+            if getattr(self,'unavailable_fixture',False):
+                from representative_rework import failed_plan_reference
+                # Refuse ambiguous/reserved/non-503 records and a repeated recovery scope.
+                for changes in (dict(status='reserved'),dict(http_status=502),dict(finished_at=None),
+                                dict(error_code='free_request_failed')):
+                    bad=deepcopy(old);bad['real_ai']['attempts'][0].update(changes)
+                    with patch.object(provider,'load',return_value=bad),self.assertRaises(CompanyError):
+                        failed_plan_reference(provider,self.studio.workflow.store.load(project),self.key)
+                bad=deepcopy(old);bad['active_operation']='another-reservation'
+                with patch.object(provider,'load',return_value=bad),self.assertRaises(CompanyError):
+                    failed_plan_reference(provider,self.studio.workflow.store.load(project),self.key)
+                bad=deepcopy(old)
+                bad['rework_reference']['previous_failed_attempt']=dict(
+                    failed_plan_reference(provider,self.studio.workflow.store.load(project),self.key),
+                    recovery_scope='already_used')
+                with patch.object(provider,'load',return_value=bad),self.assertRaises(CompanyError):
+                    failed_plan_reference(provider,self.studio.workflow.store.load(project),self.key)
+                preserved={p:p.read_bytes() for p in provider.root.glob(old_id+'.*')}
             self.assertIsNotNone(self.studio.detail('workspace',project)['rework']['new_attempt'])
             request=dict(account_project='gen-lang-client-0938732315',confirm_free_account=True,previous_job=old_id)
             self.studio.action('workspace',project,'rework-new-prepare',request)
@@ -1750,6 +1779,11 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(flow['stage'],'awaiting_plan_approval');self.assertEqual(len(flow['plan_versions']),2)
         self.assertEqual(flow['plan_versions'][0],original)
         self.assertEqual(flow['plan_versions'][1]['representative_feedback'],feedback)
+        if getattr(self,'unavailable_fixture',False):
+            for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)
+            for path,data in original_bytes.items():self.assertEqual(path.read_bytes(),data)
+            self.assertEqual(flow['rework_history'][0]['error'],'provider_unavailable')
+            return
         # The server rejects an explicit instructional drift even if the model calls it acceptable.
         company._review_content='쇼츠 만드는 방법'
         review=json.loads(manager('review',dict(plan_inspection={},criteria=[dict(id='hook')])) )

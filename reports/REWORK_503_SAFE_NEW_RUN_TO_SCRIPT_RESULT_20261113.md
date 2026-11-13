@@ -1,0 +1,8 @@
+# 503 이후 새 동의 재작업 연결 결과
+2026-11-13 KST. 최신 main `77c0537`에서 최소 수정.
+
+- 실제 진단: `qualityprovider-63f5d501fc34496292167736371b990c`, phase=plan, 내부 paused/provider_unavailable, 컷룸 stopped. 2026-11-12 16:41:21~23 KST 전송 1회, 최종 failed/HTTP503/unvalidated, response_hash=null. active_operation은 해당 종료 attempt ID이며 별도 미확정 예약 없음. request_hash=`bc787bb74af99b6a97cce47f3c5d4bd20a66c94c41d7136d423ba2a89439512a`.
+- 원본 plan v1과 수정 decision 참조 hash 일치: `d6f2a3283fc642a598ef90eff6a0e19c88410c4f036fe007f2b08bc7016f0ebc`. 기존 503 및 `qualityprovider-3cb52d1ab205460897e9f03fea21ca71`의 서명·키 binding 유효. 503 계약은 현재 PLAN_RULES와 일치, 이전 invalid_dependencies 계약은 구버전. 기존 동의는 만료(503 동의 11/12 17:41:10 KST)되어 새 전송 승인에 사용하지 않음. 두 job/consent/grant/attempt 및 실제 프로젝트 데이터는 변경하지 않음.
+- 변경: `representative_rework.py`의 기존 새 준비 경로에 명확히 종료된 plan HTTP503만 허용. 새 job/별도 서명 동의에 1회 복구 범위를 결합하고 그 후 같은 복구 반복은 차단. 기존 기획 계약 오류 경로와 writer→editor·관리자 검토는 재사용. `studio_server.py`, `studio/studio.js`에 새 준비 안내·실행 한도·503 재발 가능성 표시. 예산·모델·음성·영상 기능 변경 없음.
+- 검증: `PYTHONPATH=core:companies/video python -B -m unittest tests.test_video_mission_one.MissionOneTests.test_new_consented_rework_after_final_503_to_v2_offline` — 최종 OK, 1 test. 준비 코드 오류를 수정하며 동일 테스트만 재실행; 전체 회귀 실행 없음. 임시 503 원장→새 준비→독립 consent/grant/job→합성 manager/writer/editor 응답 5개→v2 awaiting_plan_approval, 원본·실패 history 보존. reserved/미확정/다른 HTTP 오류·중복 준비·과거 동의 재사용 거부 확인. 소켓/DNS 차단 및 모의 전송 사용. 실제 외부 API 호출 0회, 실제 새 대본 생성 없음.
+- 사용자 다음 단계: 서버에 기존 고정 MODEL/ENDPOINT와 `GEMINI35_AUTONOMOUS_FREE_ENABLED=1` 설정 후 재시작 필요(현재 셸은 세 값 미설정, 키 존재·binding만 확인; 키 비노출). 무료 quota/billing은 독립 확인되지 않음. 컷룸의 **새 AI 재작업 준비 → 새 외부 전송 동의 → AI 재작업 시작**에서 원래 피드백을 유지한 채 범위를 검토·선택. 준비 자체는 전송 0회. 실제 Gemini 전송은 대표의 새 동의·시작 이후에만 가능하며 503 재발 시 자동 재시도 없음.

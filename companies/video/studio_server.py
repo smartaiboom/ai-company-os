@@ -152,7 +152,7 @@ class Studio:
             except CompanyError:pass
         progress=progress_view(job,state)
         if new_attempt:
-            progress['next_action']='수정 대본 다시 생성 준비를 눌러 새 전송 범위를 검토·동의한 뒤 시작하세요. 기존 실패 업무는 다시 실행하지 않습니다.'
+            progress['next_action']='새 AI 재작업 준비를 눌러 새 전송 범위를 검토·동의한 뒤 시작하세요. 기존 실패 업무는 다시 실행하지 않습니다.'
         return dict(status=state['status'],job=state['job'],error=state.get('error'),settings=settings,recovery=recovery,
             new_attempt=new_attempt,history=[dict(job=x['job'],status=x['status'],error=x.get('error')) for x in flow.get('rework_history',[])],
             feedback=job['quality_inputs']['feedback_text'],proposal=state.get('proposal'),

@@ -321,8 +321,8 @@ class ReworkCompany(MissionOneCompany):
 
 def failed_plan_reference(store,project,key):
     state=project['representative']['rework'];old=store.load(state['job'])
-    require(state['status']=='stopped' and old['status']=='stopped'
-            and old.get('reason_code') in ('invalid_dependencies','rework_plan_invalid')
+    require(state['status']=='stopped' and old['status'] in ('stopped','paused')
+            and old.get('reason_code') in ('invalid_dependencies','rework_plan_invalid','provider_unavailable')
             and state.get('error')==old.get('reason_code')
             and old['phase']=='plan' and not old['plan'] and not old['assignments'] and not old['final'],
             'rework_new_attempt_not_eligible')
@@ -330,11 +330,21 @@ def failed_plan_reference(store,project,key):
     attempts=old['real_ai']['attempts']
     require(len(attempts)==1 and len(old['sessions'])==1,'rework_new_attempt_uncertain')
     attempt=attempts[0]
-    require(attempt['phase']=='plan' and attempt['status']=='completed' and attempt.get('http_status')==200
-            and attempt.get('role_result_status')=='json_parsed' and attempt.get('response_hash')
-            and attempt.get('transport_started_at') and attempt.get('response_received_at')
+    unavailable=old['reason_code']=='provider_unavailable'
+    completed_503=(attempt['status']=='failed' and attempt.get('http_status')==503
+        and attempt.get('error_code')=='provider_unavailable' and attempt.get('finished_at')
+        and attempt.get('request_hash') and attempt.get('role_result_status')=='unvalidated'
+        and attempt.get('response_hash') is None)
+    parsed_plan=(attempt['status']=='completed' and attempt.get('http_status')==200
+        and attempt.get('role_result_status')=='json_parsed' and attempt.get('response_hash')
+        and attempt.get('response_received_at'))
+    require(attempt['phase']=='plan' and (completed_503 if unavailable else parsed_plan)
+            and attempt.get('transport_started_at')
             and attempt['model']==MODEL and old['active_operation'] in (None,attempt['id']),
             'rework_new_attempt_uncertain')
+    if unavailable:
+        require(not old['rework_reference'].get('previous_failed_attempt',{}).get('recovery_scope'),
+                'rework_same_contract_new_attempt_forbidden')
     grant=parse(store._grant_path(old['id']).read_text());record=grant['record'];body=record['body'];scope=body['rework_scope']
     require(hmac.compare_digest(grant['signature'],store._sign(record)) and record['revoked_at'] is None
             and old['real_ai']['consent'].get('operating_grant_id')==record['id']
@@ -342,11 +352,12 @@ def failed_plan_reference(store,project,key):
             and body['quality_contract']['inputs']==old['quality_inputs'] and body['model']==MODEL and body['endpoint']==ENDPOINT
             and body['free_only'] is True and scope['account_project']==MISSION_ACCOUNT and scope['data_policy']==DATA_POLICY,
             'rework_history_signature_invalid')
-    require(scope.get('plan_contract_hash')!=digest(PLAN_RULES),'rework_same_contract_new_attempt_forbidden')
+    require(unavailable or scope.get('plan_contract_hash')!=digest(PLAN_RULES),'rework_same_contract_new_attempt_forbidden')
     require(hmac.compare_digest(scope['credential_binding'],_binding(old['id'],key)),'rework_key_changed')
     # Expired historical consent proves history only; it never authorizes this new request.
     return dict(job=old['id'],state_hash=old['storage_hash'],grant_hash=digest(grant),
-                attempt_id=attempt['id'],contract_hash=digest(PLAN_RULES))
+                attempt_id=attempt['id'],contract_hash=digest(PLAN_RULES),
+                **(dict(recovery_scope='one_new_plan_after_final_http503_no_retry') if unavailable else {}))
 
 
 def prepare(workflow,pid,key,account,*,previous_job=None):

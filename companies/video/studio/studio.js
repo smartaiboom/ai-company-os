@@ -249,12 +249,13 @@ function reworkPanel(p) {
     ${r.settings&&!r.settings.ready?`<p class="warning">Gemini 실행 설정 확인 필요: ${h(r.settings.missing.join(', '))}. 서버 환경에 설정 후 서버를 재시작하세요. 키 값은 입력하거나 공유하지 마세요.</p>`:''}
     ${r.recovery?.error?`<p class="warning">재개 차단: 동의·서명·전송 이력 확인이 필요합니다. 만료 동의는 새 동의 검토가 필요하며 반복 클릭하지 마세요.</p>`:''}
     ${r.recovery?.eligible&&r.attempts===0?`<p>과거 중단 기록과 시도 0은 보존됩니다. 현재 승인 범위로 명시적으로 한 번 재개할 수 있습니다.</p>${r.settings?.ready?'<button class="button" data-action="rework-recover">설정 확인 후 AI 재작업 재개</button>':''}`:''}
-    ${r.proposal?facts([['모델',r.proposal.model],['프로젝트',r.proposal.rework_scope.account_project],['무료 quota / 청구','unknown / unverified'],['시도',r.attempts],['새 실행 한도',JSON.stringify(r.proposal.limits)]]):''}
+    ${r.proposal?facts([['모델',r.proposal.model],['프로젝트',r.proposal.rework_scope.account_project],['무료 quota / 청구','unknown / unverified'],['시도',r.attempts],['호출 상한',r.proposal.limits.max_calls===null?'미설정 (동의 차단)':r.proposal.limits.max_calls+'회'],['수정 한도',r.proposal.limits.max_total_revisions+'회']]):''}
+    ${r.status==='pending'&&r.proposal?.limits?.max_calls===null?'<p class="warning">이전 제안은 호출 상한이 설정되지 않았습니다. 동의 전에 7회 상한을 적용하세요. 이 작업은 Gemini를 호출하지 않습니다.</p><button class="button secondary" data-action="rework-cap-prepare">7회 호출 상한 적용 · 제안 갱신</button>':''}
     ${r.proposal?`<details><summary>전송 범위·재기획·검토 기록</summary><p>${h(r.proposal.rework_scope.data_policy)}</p><p>원 목표·저장된 대표 피드백·이전 대본/스토리보드·공개 관측을 Google에 전송합니다. 입출력 개선 활용·인적 검토 가능. 무료 여부는 소유자 확인이며 독립 검증되지 않았습니다.</p><pre>${h(JSON.stringify({inputs:r.proposal.quality_contract.inputs,replan:r.replan,reviews:r.reviews},null,2))}</pre></details>`:''}
     ${r.new_attempt?'<p>이전 실패·피드백은 보존합니다. 새 작업 1회와 표시된 호출·수정 한도를 별도로 검토하고 동의하세요. 기존 동의는 새 전송을 승인하지 않습니다. Gemini 503이 다시 발생할 수 있으며 자동 재시도하지 않습니다.</p><button class="button secondary" data-action="rework-new-prepare">새 AI 재작업 준비</button>':''}
     ${r.history?.length?`<details><summary>이전 재작업 시도 · 보존 기록</summary>${r.history.map(x=>`<p>이전 작업 ${h(x.job)} · 중단/완료 기록 보존</p>`).join('')}<p>현재 작업 ${h(r.job)} · 이전 동의와 별개</p></details>`:''}
     ${r.status==='available'?'<button class="button secondary" data-action="rework-prepare">AI 재작업 동의 준비</button>':''}
-    ${r.status==='pending'?'<button class="button secondary" data-action="rework-consent">새 외부 전송 동의</button>':''}
+    ${r.status==='pending'&&r.proposal?.limits?.max_calls!==null?'<button class="button secondary" data-action="rework-consent">새 외부 전송 동의</button>':''}
     ${r.status==='approved'&&r.settings?.ready?'<button class="button" data-action="rework-run">AI 재작업 시작</button>':''}
     ${r.status==='running'?'<p class="muted">중복 시작은 차단됩니다. 서버 종료로 상태가 불명확하면 자동 재시작하지 않습니다.</p>':''}<button class="button ghost" data-action="refresh">상태 새로고침 · 조회만</button></section>`;
 }
@@ -420,6 +421,14 @@ main.addEventListener('click',async event=>{
   else if (['rework-prepare','rework-new-prepare','rework-quality-prepare'].includes(button.dataset.action)) {
     modal('AI 재작업 동의 준비',`<p>저장된 피드백을 사용합니다. 지금은 제안만 준비하며 API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
       '제안 준비',async data=>{await api(detailApi(detail)+'/'+button.dataset.action,{account_project:data.get('account_project'),confirm_free_account:data.has('free'),...(['rework-new-prepare','rework-quality-prepare'].includes(button.dataset.action)?{previous_job:detail.rework.job}:{})});return {message:'새 동의 제안을 확인하세요.'};});
+  }
+  else if (button.dataset.action==='rework-cap-prepare') {
+    button.disabled=true;
+    try {
+      await api(detailApi(detail)+'/rework-cap-prepare',{});
+      await route();
+      notice('신규 작업 호출 상한을 7회로 설정하고 동의 제안을 갱신했습니다. AI 호출은 없습니다.');
+    } catch(error) { notice(error.message,true);button.disabled=false; }
   }
   else if (['rework-quality-revise','rework-quality-hold'].includes(button.dataset.action)) {
     const revision=button.dataset.action==='rework-quality-revise';

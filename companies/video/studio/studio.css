@@ -628,6 +628,33 @@ main {
   border-top: 1px solid var(--line);
   display: grid;
   gap: 7px;
+  min-width: 0;
+}
+
+/* Long AI scripts, JSON diagnostics and CEO feedback must not widen grid columns. */
+.detail-grid > *, .panel > *, .subpanel > *, .panel details {
+  min-width: 0;
+}
+
+.panel pre, .subpanel pre {
+  max-width: 100%;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+  word-break: break-word;
+  overflow-x: auto;
+}
+
+.panel .button, .subpanel .button {
+  max-width: 100%;
+  min-width: 0;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  text-align: center;
+}
+
+.panel .panel, .panel .subpanel {
+  max-width: 100%;
+  min-width: 0;
 }
 
 .timeline {

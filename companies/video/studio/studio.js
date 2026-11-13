@@ -230,6 +230,17 @@ function reworkPanel(p) {
       ${facts([['기록된 요청 시도',progress.counts.attempts],['전송 시작 기록',progress.counts.transport_started],['정상 HTTP 응답',progress.counts.http_ok],['서버 검증 완료',progress.counts.server_validated],['전송 실패 기록',progress.counts.failed],['무료 quota / 청구','미확인 / 독립 검증 안 됨']])}
       <p class="muted">HTTP 응답 완료와 결과물 수락은 다릅니다. 시도에는 실패·수신 불명 요청도 포함됩니다.</p>
       <details><summary>기술 진단·호출 기록</summary><p>${h(r.error||r.recovery?.error||'현재 오류 코드 없음')}</p><pre>${h(JSON.stringify(progress.ledger,null,2))}</pre></details>`:''}
+    ${progress?.quality_report?`<section class="panel"><h3>AI 관리자 품질 보고 · 대표 지시 필요</h3>
+      <p class="warning">수정 한도에 도달했거나 AI 관리자가 대표 판단을 요청했습니다. 자동 재호출은 없습니다.</p>
+      <p><strong>대본 직원 산출물</strong></p><pre>${h(r.quality_script||'저장된 대본 없음')}</pre>
+      <p><strong>부족한 검토 항목</strong></p><pre>${h(JSON.stringify(progress.quality_report.failed_checks,null,2))}</pre>
+      <p><strong>AI 관리자 검토 근거</strong></p><pre>${h(JSON.stringify(progress.quality_report.evidence||{},null,2))}</pre>
+      <p><strong>수정 제안</strong></p><p>${h(progress.quality_report.feedback||'구체적인 수정 지시가 기록되지 않았습니다.')}</p>
+      ${r.quality_decision?`<p><strong>대표 결정:</strong> ${h(r.quality_decision.action==='request_revision'?'수정 지시 기록됨':'보류')} · ${h(r.quality_decision.feedback||'추가 의견 없음')}</p>
+      <p class="muted">수정 지시를 저장했지만 새 AI 작업을 시작하지는 않았습니다. 새 전송은 별도 실행 범위와 동의가 필요합니다.</p>`
+      :`<button class="button secondary" data-action="rework-quality-revise">수정 지시 남기기</button>
+       <button class="button ghost" data-action="rework-quality-hold">판단 보류</button>`}
+      </section>`:''}
     <details><summary>저장된 대표 수정 요청</summary><p>${h(r.feedback)}</p></details>
     <p class="muted">이전 버전은 보존됩니다. 관리자 재기획 → 대본/스토리보드 → 의미·형식 검토 후 같은 컷룸에 새 버전을 제출합니다. 웹 조회·음성·렌더·게시 없음.</p>
     ${r.settings&&!r.settings.ready?`<p class="warning">Gemini 실행 설정 확인 필요: ${h(r.settings.missing.join(', '))}. 서버 환경에 설정 후 서버를 재시작하세요. 키 값은 입력하거나 공유하지 마세요.</p>`:''}
@@ -406,6 +417,22 @@ main.addEventListener('click',async event=>{
   else if (['rework-prepare','rework-new-prepare'].includes(button.dataset.action)) {
     modal('AI 재작업 동의 준비',`<p>저장된 피드백을 사용합니다. 지금은 제안만 준비하며 API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
       '제안 준비',async data=>{await api(detailApi(detail)+'/'+button.dataset.action,{account_project:data.get('account_project'),confirm_free_account:data.has('free'),...(button.dataset.action==='rework-new-prepare'?{previous_job:detail.rework.job}:{})});return {message:'새 동의 제안을 확인하세요.'};});
+  }
+  else if (['rework-quality-revise','rework-quality-hold'].includes(button.dataset.action)) {
+    const revision=button.dataset.action==='rework-quality-revise';
+    const report=detail.rework;
+    const defaults=report.progress?.quality_report?.feedback||'';
+    modal(revision?'AI 관리자 품질 보고 · 수정 지시':'AI 관리자 품질 보고 · 보류',
+      `<p>현재 대본과 관리자 검토 근거를 확인한 뒤 지시를 기록합니다. 이 동작은 AI를 호출하지 않습니다.</p>
+      <label>대표 의견<textarea name="feedback" maxlength="2000" rows="5" ${revision?'required':''}>${h(revision?defaults:'')}</textarea></label>`,
+      async data=>{
+        await api(detailApi(detail)+'/rework-quality-decide',{
+          job:report.job,report_hash:report.quality_report_hash,
+          action:revision?'request_revision':'hold',
+          feedback:(data.get('feedback')||'').toString()
+        });
+        return {message:'대표 지시 저장 완료. 별도 동의 없이 AI를 다시 호출하지 않습니다.'};
+      });
   }
   else if (button.dataset.action==='rework-consent') {
     modal('새 외부 전송 동의',`<p>원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,

@@ -318,6 +318,12 @@ class ReworkCompany(MissionOneCompany):
                         check['evidence'] in content or evidence_in_artifact(check['evidence'],artifact)
                     ):
                         failed[name]='evidence_not_found'
+                if result['action']=='accept':
+                    for criterion in result['checks']:
+                        if criterion['status']!='met':
+                            failed['criterion:'+criterion['criterion_id']]='criterion_not_met'
+                    if re.search(r'골든타임|(?:쇼츠|영상)\s*(?:제작법|만드는\s*방법)|편집\s*노하우',content):
+                        failed['subject_story']='obvious_goal_drift'
                 if result['action']=='accept' and failed:
                     state=self._rework_state
                     task=next(t for t in state['assignments'] if t['id']==self._review_task_id)
@@ -339,6 +345,11 @@ class ReworkCompany(MissionOneCompany):
                         original_action=original,decision=result['action'],
                         failed_checks=failed,feedback=feedback,
                         reason='manager_accept_conflicted_with_goal_review')
+                elif result['action']=='stop':
+                    self._quality_followup=dict(task_id=self._review_task_id,
+                        original_action='stop',decision='stop',
+                        failed_checks=failed,feedback=result['feedback'],
+                        reason='manager_requested_representative_decision')
                 elif result['action']=='revise':
                     state=self._rework_state
                     task=next(t for t in state['assignments'] if t['id']==self._review_task_id)
@@ -351,9 +362,6 @@ class ReworkCompany(MissionOneCompany):
                             reason='revision_limit_reached')
                         result['action']='stop'
                         result['rationale']+=' [시스템: 수정 횟수 한도 도달, 대표 판단 필요]'
-                if result['action']=='accept':
-                    require(not re.search(r'골든타임|(?:쇼츠|영상)\s*(?:제작법|만드는\s*방법)|편집\s*노하우',content),
-                            'rework_obvious_goal_drift')
             raw=json.dumps(value,ensure_ascii=False)
         return super()._parse_role_content(raw,phase)
 

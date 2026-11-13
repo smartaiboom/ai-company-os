@@ -151,6 +151,13 @@ class Studio:
             try:new_attempt=failed_plan_reference(ReworkStore(self.stores[key].root/'representative_rework'),p,os.getenv('GEMINI_API_KEY',''))
             except CompanyError:pass
         progress=progress_view(job,state)
+        from representative_rework import legacy_quality_report
+        legacy=legacy_quality_report(job,state)
+        if legacy:
+            progress['quality_report']=legacy
+            progress['title']='대표 판단 필요 · 과거 검토 실패 보고'
+            progress['message']='마지막 관리자 검토는 HTTP 200이지만 검증되지 않았습니다. 저장된 대본은 승인된 결과가 아닙니다.'
+            progress['next_action']='저장된 대본을 읽고 대표가 새 수정 지시 또는 보류를 기록하세요. 과거 검토를 수락 처리하지 않습니다.'
         if new_attempt:
             progress['next_action']='새 AI 재작업 준비를 눌러 새 전송 범위를 검토·동의한 뒤 시작하세요. 기존 실패 업무는 다시 실행하지 않습니다.'
         return dict(status=state['status'],job=state['job'],error=state.get('error'),settings=settings,recovery=recovery,
@@ -171,7 +178,7 @@ class Studio:
         require(isinstance(body['feedback'],str) and len(body['feedback'])<=2000
                 and (body['action']=='hold' or bool(body['feedback'].strip())),
                 'invalid_quality_feedback')
-        from representative_rework import ReworkStore,progress_view
+        from representative_rework import ReworkStore,progress_view,legacy_quality_report
         with self.stores['workspace'].lock(pid):
             project=self.stores['workspace'].load(pid)
             flow=project['representative'];state=flow.get('rework')
@@ -179,7 +186,8 @@ class Studio:
                     and state['status']=='stopped' and state['job']==body['job'],
                     'quality_decision_not_pending')
             job=ReworkStore(self.stores['workspace'].root/'representative_rework').load(body['job'])
-            progress=progress_view(job,state);report=progress.get('quality_report')
+            progress=progress_view(job,state)
+            report=legacy_quality_report(job,state) or progress.get('quality_report')
             require(report is not None and report.get('decision')=='stop'
                     and body['report_hash']==digest(report),'quality_report_changed')
             prior=state.get('quality_decision')

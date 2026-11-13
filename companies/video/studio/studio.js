@@ -230,6 +230,13 @@ function reworkPanel(p) {
       ${facts([['기록된 요청 시도',progress.counts.attempts],['전송 시작 기록',progress.counts.transport_started],['정상 HTTP 응답',progress.counts.http_ok],['서버 검증 완료',progress.counts.server_validated],['전송 실패 기록',progress.counts.failed],['무료 quota / 청구','미확인 / 독립 검증 안 됨']])}
       <p class="muted">HTTP 응답 완료와 결과물 수락은 다릅니다. 시도에는 실패·수신 불명 요청도 포함됩니다.</p>
       <details><summary>기술 진단·호출 기록</summary><p>${h(r.error||r.recovery?.error||'현재 오류 코드 없음')}</p><pre>${h(JSON.stringify(progress.ledger,null,2))}</pre></details>`:''}
+    ${r.recovery_audit?`<section class="subpanel"><h3>중단된 대본 검토 · 기존 자료 분석</h3>
+      <p class="warning">이전 AI 관리자 검토는 최종 검증을 통과하지 못했습니다. 기존 작업과 API 호출 3회를 변경하지 않습니다.</p>
+      ${facts([['저장된 관리자 수정 의견',r.recovery_audit.review_available?'있음 (최종 미검증)':'검증 필요'],['대본 결함 재검사',r.recovery_audit.checks_available?'완료':'추가 확인 필요'],['발견된 결함',r.recovery_audit.defect_count??'미확인'],['수정 의견에 빠진 식별자',r.recovery_audit.missing_issue_ids?.join(', ')||'없음 또는 미확인'],['이전 요청 재사용 상태','재전송 금지 · 원본 보존']])}
+      ${r.recovery_audit.review_available?`<p><strong>저장된 AI 관리자 수정 의견</strong></p><p class="script">${h(r.recovery_audit.manager_feedback)}</p>`:''}
+      ${r.recovery_audit.missing_defects?.length?`<details><summary>시스템 검출 항목과 수정 방법</summary><pre>${h(JSON.stringify(r.recovery_audit.missing_defects,null,2))}</pre></details>`:''}
+      <p class="muted">저장된 기획과 대본은 재사용 후보입니다. 이 점검만으로 AI 관리자가 승인했거나 기존 중단 작업을 계속 실행할 수 있다는 뜻은 아닙니다.</p>
+    </section>`:''}
     ${progress?.quality_report?`<section class="panel"><h3>${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'?'과거 검토 실패 진단 · 대표 지시 필요':'AI 관리자 품질 보고 · 대표 지시 필요'}</h3>
       <p class="warning">${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'
         ?'이전 AI 관리자 응답은 HTTP 200이지만 검증에 실패했습니다. 아래 내용은 관리자 승인이나 확정 평가가 아니며, 대표가 저장된 대본을 직접 판단해야 합니다.'

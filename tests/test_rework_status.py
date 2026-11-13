@@ -9,6 +9,37 @@ from representative_rework import progress_view
 
 
 class ReworkStatusTests(unittest.TestCase):
+    def test_legacy_review_is_labeled_unvalidated_in_cutroom(self):
+        source=Path('companies/video/studio/studio.js').read_text()
+        script=r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(0,'utf8');
+const ctx={h:v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),
+           facts:rows=>JSON.stringify(rows),time:v=>v};
+vm.createContext(ctx);
+vm.runInContext(source.slice(source.indexOf('function reworkPanel('),source.indexOf('function budgetSetupPanel')),ctx);
+const quality_report={decision:'stop',reason:'legacy_unvalidated_review',
+  source:'legacy_failure_diagnostic_not_manager_review',
+  evidence:{review_status:'unvalidated',http_status:200},
+  failed_checks:{goal_fit:'historical_goal_review_failed'},
+  feedback:'대표가 저장된 대본을 직접 검토하세요'};
+const p={rework:{status:'stopped',job:'legacy-job',attempts:3,feedback:'기존 요청',error:'rework_goal_not_met',
+  progress:{title:'대표 판단 필요 · 과거 검토 실패 보고',current:'대본 검토',actor:'AI 관리자',
+   cards:[],message:'검증되지 않은 응답',next_action:'대표 확인',
+   counts:{attempts:3,transport_started:3,http_ok:3,server_validated:2,failed:0},
+   ledger:[],quality_report},quality_script:'저장된 가상 대본',quality_report_hash:'test-hash',
+  settings:{ready:false,missing:['disabled']},recovery:null,history:[]}};
+const html=ctx.reworkPanel(p);
+assert(html.includes('과거 검토 실패 진단 · 대표 지시 필요'));
+assert(html.includes('검증에 실패'));
+assert(html.includes('data-action="rework-quality-revise"'));
+assert(html.includes('data-action="rework-quality-hold"'));
+assert(!html.includes('data-action="rework-run"'));
+assert(!html.includes('data-action="rework-quality-prepare"'));
+"""
+        result=subprocess.run(['node','-e',script],input=source,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
     def test_ceo_quality_report_cutroom_render_offline(self):
         """Execute the actual panel renderer against a synthetic report, no files altered."""
         source=Path('companies/video/studio/studio.js').read_text()

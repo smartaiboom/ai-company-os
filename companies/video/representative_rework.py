@@ -459,6 +459,33 @@ def failed_plan_reference(store,project,key):
                 **(dict(recovery_scope='one_new_plan_after_final_http503_no_retry') if unavailable else {}))
 
 
+def legacy_quality_report(job,state):
+    """Historical review rejected after HTTP 200. This is NOT a validated manager review."""
+    if not (state.get('status')=='stopped' and state.get('error')=='rework_goal_not_met'
+            and job.get('status')=='stopped' and job.get('reason_code')=='rework_goal_not_met'
+            and job.get('phase')=='work' and not job.get('final')):
+        return None
+    attempts=job.get('real_ai',{}).get('attempts',[])
+    if not attempts or not all(a.get('status')=='completed' and a.get('http_status')==200
+            and a.get('transport_started_at') for a in attempts):
+        return None
+    last=attempts[-1]
+    if last.get('phase')!='review' or last.get('role_result_status')!='unvalidated':
+        return None
+    writer=next((t for t in job.get('assignments',[])
+                 if t.get('role')=='writer' and t.get('versions')),None)
+    if writer is None or writer.get('reviews'):
+        return None
+    return dict(decision='stop',reason='legacy_unvalidated_review',
+                original_action='unknown_unvalidated',
+                failed_checks=dict(goal_fit='historical_goal_review_failed'),
+                evidence=dict(review_status='unvalidated',http_status=200,
+                              attempt_id=last.get('id','')),
+                feedback=('과거 검토 응답은 서버 검증에 실패했습니다. AI 관리자의 정상 검토 의견으로 간주할 수 없습니다. '
+                          '저장된 대본을 직접 검토해 구체적인 수정 지시를 입력하세요.'),
+                source='legacy_failure_diagnostic_not_manager_review')
+
+
 def quality_decision_reference(store,project,key):
     """Allow a new job only after an explicitly recorded CEO correction request."""
     flow=project['representative'];state=flow.get('rework',{})
@@ -466,20 +493,25 @@ def quality_decision_reference(store,project,key):
     require(decision and decision.get('action')=='request_revision'
             and decision.get('job')==state.get('job'),'quality_revision_decision_required')
     old=store.load(state['job'])
-    require(state.get('status')=='stopped' and state.get('error')=='manager_stopped'
+    legacy=legacy_quality_report(old,state)
+    require((legacy is not None) or (
+            state.get('status')=='stopped' and state.get('error')=='manager_stopped'
             and old['status']=='stopped' and old.get('reason_code')=='manager_stopped'
-            and old.get('phase')=='work' and not old.get('final'),
+            and old.get('phase')=='work' and not old.get('final')),
             'quality_revision_source_not_stopped')
     store.check_binding(old)
-    report=progress_view(old,state).get('quality_report')
+    report=legacy if legacy is not None else progress_view(old,state).get('quality_report')
     require(report is not None and report.get('decision')=='stop'
             and decision.get('report_hash')==digest(report)
             and bool(decision.get('feedback','').strip()),'quality_revision_report_changed')
+    attempts=old['real_ai']['attempts']
     require(all(a.get('status')=='completed' and a.get('http_status')==200
                 and a.get('transport_started_at') and a.get('finished_at')
-                for a in old['real_ai']['attempts'])
-            and not any(a.get('status')=='reserved' for a in old['real_ai']['attempts'])
-            and not old.get('active_operation'),'quality_revision_uncertain_transport')
+                for a in attempts)
+            and not any(a.get('status')=='reserved' for a in attempts)
+            and (not old.get('active_operation') or
+                 (legacy is not None and old['active_operation']==attempts[-1].get('id'))),
+            'quality_revision_uncertain_transport')
     writer=next((t for t in old['assignments'] if t.get('role')=='writer' and t.get('versions')),None)
     require(writer is not None and len(old.get('sessions',[]))==1,'quality_revision_missing_writer')
     grant=parse(store._grant_path(old['id']).read_text())
@@ -529,8 +561,12 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False)
             answers['quality_followup']=dict(
                 representative_instruction=decision['feedback'],
                 source_job=old['id'],source_report_hash=decision['report_hash'],
-                failed_checks=deepcopy(old['quality_followups'][-1].get('failed_checks',{})),
-                manager_feedback=old['quality_followups'][-1].get('feedback',''),
+                failed_checks=deepcopy(legacy_quality_report(old,flow['rework'])['failed_checks']
+                    if legacy_quality_report(old,flow['rework']) else
+                    old['quality_followups'][-1].get('failed_checks',{})),
+                manager_feedback=(legacy_quality_report(old,flow['rework'])['feedback']
+                    if legacy_quality_report(old,flow['rework']) else
+                    old['quality_followups'][-1].get('feedback','')),
                 previous_writer=deepcopy(parse(writer['versions'][-1]['content'])))
         job=store.create(project['goal'],inputs=dict(domain='video',target_segment=flow['audience'],answers=answers,
             constraints=dict(aspect='9:16',language='한국어',platform='YouTube Shorts'),

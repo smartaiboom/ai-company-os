@@ -248,6 +248,12 @@ class MissionOneTests(unittest.TestCase):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
 
+    def test_legacy_unvalidated_review_to_ceo_new_job_offline(self):
+        self.rework_quality_escalation_fixture=True
+        self.legacy_unvalidated_rework_fixture=True
+        self.strict_plan_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_ceo_quality_instruction_prepares_new_job_without_calls_offline(self):
         self.rework_quality_escalation_fixture=True
         self.strict_plan_fixture=True
@@ -1898,13 +1904,38 @@ class MissionOneTests(unittest.TestCase):
             queued.pop()()
         result=provider.load(pid)
         if getattr(self,'rework_quality_escalation_fixture',False):
+            if getattr(self,'legacy_unvalidated_rework_fixture',False):
+                # Synthetic historical completed HTTP 200 but parser rejected review;
+                # do not change the provider transport or any actual production record.
+                legacy=provider.load(pid)
+                legacy['reason_code']='rework_goal_not_met'
+                legacy['active_operation']=legacy['real_ai']['attempts'][-1]['id']
+                legacy['real_ai']['attempts'][-1]['role_result_status']='unvalidated'
+                legacy['quality_followups']=[]
+                legacy['goal_reviews']=[]
+                writer=next(t for t in legacy['assignments'] if t['role']=='writer')
+                writer['reviews']=[]
+                writer['state']='awaiting_ai_review'
+                provider.save(legacy)
+                with self.studio.workflow.store.lock(project):
+                    saved_project=self.studio.workflow.store.load(project)
+                    saved_project['representative']['rework']['error']='rework_goal_not_met'
+                    self.studio.workflow.store.save(saved_project)
+                result=provider.load(pid)
+                self.assertEqual(result['reason_code'],'rework_goal_not_met')
             self.assertEqual(result['status'],'stopped',result.get('reason_code'))
-            self.assertEqual(result.get('reason_code'),'manager_stopped')
+            self.assertEqual(result.get('reason_code'),
+                             'rework_goal_not_met' if getattr(self,'legacy_unvalidated_rework_fixture',False)
+                             else 'manager_stopped')
             self.assertEqual(self.http.call_count,3)
             panel=self.studio.detail('workspace',project)['rework']
             report=panel['progress']['quality_report']
             self.assertEqual(report['decision'],'stop')
             self.assertIn('goal_fit',report['failed_checks'])
+            if getattr(self,'legacy_unvalidated_rework_fixture',False):
+                self.assertEqual(report['source'],'legacy_failure_diagnostic_not_manager_review')
+                self.assertEqual(report['original_action'],'unknown_unvalidated')
+                self.assertEqual(result['real_ai']['attempts'][-1]['role_result_status'],'unvalidated')
             self.assertIsNone(panel['quality_decision'])
             old_files={path:path.read_bytes() for path in provider.root.glob(pid+'.*')}
             self.studio.action('workspace',project,'rework-quality-decide',

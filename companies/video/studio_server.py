@@ -43,6 +43,8 @@ ERRORS = {
     'quality_revision_report_changed': '대표 지시의 기준이 된 이전 검토 보고서가 변경되어 새 작업 준비를 차단했습니다.',
     'rework_source_changed': '기존 작업과 원본 프로젝트의 연결 정보가 달라 새 작업을 준비할 수 없습니다.',
     'rework_parent_changed': '기존 실패 작업의 보존 기록이 달라져 새 작업을 준비할 수 없습니다.',
+    'rework_pending_cap_required': '동의 전 작업만 호출 상한을 갱신할 수 있습니다. 최신 상태를 확인해 주세요.',
+    'rework_pending_proposal_changed': '기존 동의 제안과 작업 상태가 달라져 호출 상한 갱신을 차단했습니다.',
 
     'invalid_text': '필수 입력과 글자 수를 확인해 주세요.',
     'invalid_fields': '입력 형식을 확인해 주세요.',
@@ -211,7 +213,7 @@ class Studio:
         from autonomous_gemini35 import Gemini35Config,MODEL,ENDPOINT
         from video_mission_one import MISSION_ACCOUNT,_binding
         config=Gemini35Config.from_env()
-        preparing=name in ('rework-prepare','rework-new-prepare','rework-quality-prepare')
+        preparing=name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-cap-prepare')
         if preparing:
             # Preparing a proposal does not execute Gemini. Missing runtime
             # model/endpoint env must not block drafting a fixed free-model scope.
@@ -223,6 +225,11 @@ class Studio:
             require(config.model==MODEL and config.endpoint==ENDPOINT,
                     'rework_fixed_model_required')
         _binding('rework-local',config.api_key)
+        if name=='rework-cap-prepare':
+            exact(body,())
+            from representative_rework import cap_pending_proposal
+            cap_pending_proposal(self.workflow,pid,config.api_key)
+            return
         if preparing:
             followup=name=='rework-quality-prepare'
             exact(body,('account_project','confirm_free_account','previous_job')
@@ -474,7 +481,7 @@ class Studio:
         require(key == 'workspace', 'readonly_project')
         if name=='rework-quality-decide':
             self.rework_quality_decide(pid,body)
-        elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-consent','rework-run','rework-recover'):
+        elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-cap-prepare','rework-consent','rework-run','rework-recover'):
             self.rework_action(pid,name,body)
         elif name=='budget-prepare':
             self.budget_prepare(pid,body)

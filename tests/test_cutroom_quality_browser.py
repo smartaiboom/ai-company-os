@@ -91,11 +91,14 @@ class CutroomQualityBrowserTests(unittest.TestCase):
                 try:
                     context = browser.new_context()
                     page = context.new_page()
-                    state = {"detail": fixture(), "writes": []}
+                    state = {"detail": fixture(), "writes": [], "requests": [], "page_errors": []}
+                    page.on("pageerror", lambda error: state["page_errors"].append(str(error)))
+                    page.on("console", lambda msg: state["page_errors"].append("console: "+msg.text) if msg.type=="error" else None)
 
                     def handle_api(route):
                         request = route.request
                         url = urlsplit(request.url).path
+                        state["requests"].append(request.method+" "+url)
                         if request.method == "GET" and url == "/api/studio":
                             payload = {"projects": [], "deferred": [], "token": "fixture-token"}
                         elif request.method == "GET" and url == f"/api/project/workspace/{PID}":
@@ -128,7 +131,14 @@ class CutroomQualityBrowserTests(unittest.TestCase):
 
                     page.route("**/api/**", handle_api)
                     page.goto(f"http://127.0.0.1:{server.server_port}/#project/workspace/{PID}")
-                    page.locator('[data-action="rework-quality-revise"]').wait_for()
+                    try:
+                        page.locator('[data-action="rework-quality-revise"]').wait_for(timeout=4500)
+                    except Exception as exc:
+                        body = page.locator("body").inner_text(timeout=2000)[:1000]
+                        self.fail("Cutroom fixture did not render: "+
+                                  repr(dict(requests=state["requests"],
+                                            page_errors=state["page_errors"],body=body,
+                                            current_url=page.url))+"; "+str(exc))
                     self.assertTrue(page.get_by_text("AI 관리자 품질 보고").count() >= 1)
                     self.assertTrue(page.get_by_text("goal_fit").count() >= 1)
                     self.assertEqual(len(state["writes"]), 0)

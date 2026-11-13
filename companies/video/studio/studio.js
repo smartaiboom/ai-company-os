@@ -230,12 +230,14 @@ function reworkPanel(p) {
       ${facts([['기록된 요청 시도',progress.counts.attempts],['전송 시작 기록',progress.counts.transport_started],['정상 HTTP 응답',progress.counts.http_ok],['서버 검증 완료',progress.counts.server_validated],['전송 실패 기록',progress.counts.failed],['무료 quota / 청구','미확인 / 독립 검증 안 됨']])}
       <p class="muted">HTTP 응답 완료와 결과물 수락은 다릅니다. 시도에는 실패·수신 불명 요청도 포함됩니다.</p>
       <details><summary>기술 진단·호출 기록</summary><p>${h(r.error||r.recovery?.error||'현재 오류 코드 없음')}</p><pre>${h(JSON.stringify(progress.ledger,null,2))}</pre></details>`:''}
-    ${progress?.quality_report?`<section class="panel"><h3>AI 관리자 품질 보고 · 대표 지시 필요</h3>
-      <p class="warning">수정 한도에 도달했거나 AI 관리자가 대표 판단을 요청했습니다. 자동 재호출은 없습니다.</p>
+    ${progress?.quality_report?`<section class="panel"><h3>${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'?'과거 검토 실패 진단 · 대표 지시 필요':'AI 관리자 품질 보고 · 대표 지시 필요'}</h3>
+      <p class="warning">${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'
+        ?'이전 AI 관리자 응답은 HTTP 200이지만 검증에 실패했습니다. 아래 내용은 관리자 승인이나 확정 평가가 아니며, 대표가 저장된 대본을 직접 판단해야 합니다.'
+        :'수정 한도에 도달했거나 AI 관리자가 대표 판단을 요청했습니다. 자동 재호출은 없습니다.'}</p>
       <p><strong>대본 직원 산출물</strong></p><pre>${h(r.quality_script||'저장된 대본 없음')}</pre>
       <p><strong>부족한 검토 항목</strong></p><pre>${h(JSON.stringify(progress.quality_report.failed_checks,null,2))}</pre>
-      <p><strong>AI 관리자 검토 근거</strong></p><pre>${h(JSON.stringify(progress.quality_report.evidence||{},null,2))}</pre>
-      <p><strong>수정 제안</strong></p><p>${h(progress.quality_report.feedback||'구체적인 수정 지시가 기록되지 않았습니다.')}</p>
+      <p><strong>${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'?'과거 검토 상태(미검증)':'AI 관리자 검토 근거'}</strong></p><pre>${h(JSON.stringify(progress.quality_report.evidence||{},null,2))}</pre>
+      <p><strong>${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'?'안내 및 대표 직접 검토 요청':'수정 제안'}</strong></p><p>${h(progress.quality_report.feedback||'구체적인 수정 지시가 기록되지 않았습니다.')}</p>
       ${r.quality_decision?`<p><strong>대표 결정:</strong> ${h(r.quality_decision.action==='request_revision'?'수정 지시 기록됨':'보류')} · ${h(r.quality_decision.feedback||'추가 의견 없음')}</p>
       <p class="muted">수정 지시를 저장했지만 새 AI 작업을 시작하지는 않았습니다. 새 전송은 별도 실행 범위와 동의가 필요합니다.</p>
       ${r.quality_decision.action==='request_revision'?'<button class="button secondary" data-action="rework-quality-prepare">수정 지시 기반 새 AI 작업 준비</button>':''}`

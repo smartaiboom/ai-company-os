@@ -93,9 +93,21 @@ def script_review_recovery_audit(job,state):
                 original_preserved=True,new_requests=0,automatic_resume=False,
                 callable_retry_allowed=False,review_committed=False,
                 review_available=False,checks_available=False,
+                reusable_plan=False,reusable_writer=False,
+                safe_for_recovery_proposal=False,
                 status='incomplete_evidence',missing_issue_ids=[])
     if not last or not writer:
         return report
+    plan_attempts=[a for a in attempts if a.get('phase')=='plan']
+    writer_attempts=[a for a in attempts if a.get('phase')=='execute'
+                     and a.get('task_id')==writer.get('id')]
+    def validated(attempt):
+        return (attempt.get('status')=='completed' and attempt.get('http_status')==200
+                and attempt.get('role_result_status')=='validated'
+                and attempt.get('transport_started_at') and attempt.get('finished_at')
+                and attempt.get('response_hash'))
+    report['reusable_plan']=bool(job.get('plan')) and len(plan_attempts)==1 and validated(plan_attempts[0])
+    report['reusable_writer']=bool(writer.get('versions')) and len(writer_attempts)==1 and validated(writer_attempts[0])
     report['transport']=dict(phase=last.get('phase'),task_id=last.get('task_id'),
         status=last.get('status'),http_status=last.get('http_status'),
         role_result_status=last.get('role_result_status'),
@@ -130,6 +142,11 @@ def script_review_recovery_audit(job,state):
             missing_issue_ids=[d['issue'] for d in missing],
             missing_defects=[dict(issue=d['issue'],correction=d['correction']) for d in missing])
         report['status']='saved_review_reusable_as_unvalidated_input' if missing else 'review_error_not_reproduced'
+        report['safe_for_recovery_proposal']=bool(
+            report['reusable_plan'] and report['reusable_writer'] and missing
+            and len(attempts)==3 and len(job.get('sessions',[]))==1
+            and last.get('response_hash')
+            and job.get('final') is None)
     except (CompanyError,ValueError,KeyError,TypeError):
         report['status']='inspection_failed'
     # Historical reviewer transport is NOT validated, and earlier job is immutable.

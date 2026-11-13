@@ -425,7 +425,7 @@ main.addEventListener('click',async event=>{
     modal(revision?'AI 관리자 품질 보고 · 수정 지시':'AI 관리자 품질 보고 · 보류',
       `<p>현재 대본과 관리자 검토 근거를 확인한 뒤 지시를 기록합니다. 이 동작은 AI를 호출하지 않습니다.</p>
       <label>대표 의견<textarea name="feedback" maxlength="2000" rows="5" ${revision?'required':''}>${h(revision?defaults:'')}</textarea></label>`,
-      async data=>{
+      '지시 저장',async data=>{
         await api(detailApi(detail)+'/rework-quality-decide',{
           job:report.job,report_hash:report.quality_report_hash,
           action:revision?'request_revision':'hold',

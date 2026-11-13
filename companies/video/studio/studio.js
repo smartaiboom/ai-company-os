@@ -236,6 +236,7 @@ function reworkPanel(p) {
       ${r.recovery_audit.review_available?`<p><strong>저장된 AI 관리자 수정 의견</strong></p><p class="script">${h(r.recovery_audit.manager_feedback)}</p>`:''}
       ${r.recovery_audit.missing_defects?.length?`<details><summary>시스템 검출 항목과 수정 방법</summary><pre>${h(JSON.stringify(r.recovery_audit.missing_defects,null,2))}</pre></details>`:''}
       <p class="muted">저장된 기획과 대본은 재사용 후보입니다. 이 점검만으로 AI 관리자가 승인했거나 기존 중단 작업을 계속 실행할 수 있다는 뜻은 아닙니다.</p>
+      ${r.recovery_audit.safe_for_recovery_proposal?'<p>기획·대본 원본을 보존하고, 새 작업은 대본 수정부터 시작합니다. 새 외부 전송은 별도 동의가 필요합니다.</p><button class="button secondary" data-action="rework-script-recover-prepare">기존 대본으로 수정 작업 준비</button>':''}
     </section>`:''}
     ${progress?.quality_report?`<section class="panel"><h3>${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'?'과거 검토 실패 진단 · 대표 지시 필요':'AI 관리자 품질 보고 · 대표 지시 필요'}</h3>
       <p class="warning">${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'
@@ -425,9 +426,9 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
-  else if (['rework-prepare','rework-new-prepare','rework-quality-prepare'].includes(button.dataset.action)) {
-    modal('AI 재작업 동의 준비',`<p>저장된 피드백을 사용합니다. 지금은 제안만 준비하며 API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
-      '제안 준비',async data=>{await api(detailApi(detail)+'/'+button.dataset.action,{account_project:data.get('account_project'),confirm_free_account:data.has('free'),...(['rework-new-prepare','rework-quality-prepare'].includes(button.dataset.action)?{previous_job:detail.rework.job}:{})});return {message:'새 동의 제안을 확인하세요.'};});
+  else if (['rework-prepare','rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare'].includes(button.dataset.action)) {
+    modal(button.dataset.action==='rework-script-recover-prepare'?'기존 대본 재사용 · 외부 전송 동의 준비':'AI 재작업 동의 준비',`<p>${button.dataset.action==='rework-script-recover-prepare'?'이전 기획과 대본을 복사한 새 작업을 준비하고 대본 수정부터 진행합니다. 기존 관리자의 실패한 검토는 승인으로 바꾸지 않습니다. ':'저장된 피드백을 사용합니다. '}지금은 제안만 준비하며 Gemini API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
+      '제안 준비',async data=>{await api(detailApi(detail)+'/'+button.dataset.action,{account_project:data.get('account_project'),confirm_free_account:data.has('free'),...(['rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare'].includes(button.dataset.action)?{previous_job:detail.rework.job}:{})});return {message:'새 동의 제안을 확인하세요.'};});
   }
   else if (['rework-quality-revise','rework-quality-hold'].includes(button.dataset.action)) {
     const revision=button.dataset.action==='rework-quality-revise';
@@ -461,7 +462,7 @@ main.addEventListener('click',async event=>{
       notice('작업 범위와 호출 상한을 확인할 수 없습니다. 동의하지 않았습니다.',true);
       return;
     }
-    modal('새 외부 전송 동의',`<p>이 작업에서 최대 <strong>${h(detail.rework.proposal?.limits?.max_calls??'미설정')}회</strong>의 Gemini 요청을 허용하는 별도 동의입니다. AI 관리자·대본 직원·편집 직원의 하위 작업에는 반복 동의하지 않습니다. 원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,
+    modal('새 외부 전송 동의',`<p>이 작업에서 최대 <strong>${h(detail.rework.proposal?.limits?.max_calls??'미설정')}회</strong>의 Gemini 요청을 허용하는 별도 동의입니다. ${detail.rework.proposal?.rework_scope?.reference?.previous_failed_attempt?.recovery_scope==='validated_plan_writer_reuse_new_job'?'이전 검증된 기획과 대본을 재사용하고 새 작업은 대본 수정부터 진행합니다. 과거 요청 3회는 재전송하지 않으며 새 요청은 별도 기록됩니다. ':''} AI 관리자·대본 직원·편집 직원의 하위 작업에는 반복 동의하지 않습니다. 원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,
       '이 범위에 동의',async data=>{await api(detailApi(detail)+'/rework-consent',{review_hash:detail.rework.review_hash,confirm_free_account:data.has('free'),confirm_data_policy:data.has('policy')});return {message:'동의 저장. AI 재작업 시작을 눌러 실행하세요.'};});
   }
   else if (['rework-run','rework-recover'].includes(button.dataset.action)) {

@@ -158,7 +158,34 @@ class Studio:
             feedback=job['quality_inputs']['feedback_text'],proposal=state.get('proposal'),
             review_hash=digest(state['proposal']) if state.get('proposal') else None,
             job_status=job['status'],attempts=len(job['real_ai']['attempts']),
-            replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]),progress=progress)
+            replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]),progress=progress,
+            quality_decision=state.get('quality_decision'),
+            quality_report_hash=digest(progress['quality_report']) if progress.get('quality_report') else None,
+            quality_script=next((parse(t['versions'][-1]['content']).get('transcript','')
+                 for t in job.get('assignments',[]) if t['role']=='writer' and t.get('versions')),None))
+
+    def rework_quality_decide(self,pid,body):
+        """Record an owner decision; never resume or reuse a failed transport."""
+        exact(body,('job','report_hash','action','feedback'))
+        require(body['action'] in ('request_revision','hold'),'invalid_quality_decision')
+        text(body['feedback'],2000,empty=body['action']=='hold')
+        from representative_rework import ReworkStore,progress_view
+        with self.stores['workspace'].lock(pid):
+            project=self.stores['workspace'].load(pid)
+            flow=project['representative'];state=flow.get('rework')
+            require(flow['stage']=='plan_revision' and state is not None
+                    and state['status']=='stopped' and state['job']==body['job'],
+                    'quality_decision_not_pending')
+            job=ReworkStore(self.stores['workspace'].root/'representative_rework').load(body['job'])
+            progress=progress_view(job,state);report=progress.get('quality_report')
+            require(report is not None and report.get('decision')=='stop'
+                    and body['report_hash']==digest(report),'quality_report_changed')
+            prior=state.get('quality_decision')
+            require(prior is None,'quality_decision_already_recorded')
+            state['quality_decision']=dict(action=body['action'],feedback=body['feedback'],
+                report_hash=digest(report),job=body['job'],at=now(),
+                requires_new_consent=body['action']=='request_revision')
+            self.stores['workspace'].save(project)
 
     def rework_action(self,pid,name,body):
         from representative_rework import prepare,ReworkStore,ReworkCompany,handoff,execution_settings
@@ -410,7 +437,9 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
-        if name in ('rework-prepare','rework-new-prepare','rework-consent','rework-run','rework-recover'):
+        if name=='rework-quality-decide':
+            self.rework_quality_decide(pid,body)
+        elif name in ('rework-prepare','rework-new-prepare','rework-consent','rework-run','rework-recover'):
             self.rework_action(pid,name,body)
         elif name=='budget-prepare':
             self.budget_prepare(pid,body)

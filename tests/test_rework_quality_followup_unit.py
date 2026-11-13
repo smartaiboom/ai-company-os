@@ -221,5 +221,51 @@ class LegacyUnvalidatedReviewTests(unittest.TestCase):
         self.assertIsNone(legacy_quality_report(job,dict(status='running',error='rework_goal_not_met')))
 
 
+
+class StoppedScriptReviewAuditTests(unittest.TestCase):
+    def test_saved_manager_revision_is_reported_read_only(self):
+        from copy import deepcopy
+        from representative_rework import script_review_recovery_audit
+        writer=dict(id='task_writer_v3',role='writer',criteria_ids=['hook'],
+                    versions=[dict(content='{"transcript":"예시 대본"}')],
+                    reviews=[dict(action='revise',feedback='자막을 줄이세요.')])
+        job=dict(id='qualityprovider-offline',status='stopped',phase='work',
+            reason_code='script_feedback_missing_defect',assignments=[writer],
+            rework_plan=dict(duration_seconds=25),
+            quality_inputs=dict(target_segment='게임 시청자'),
+            real_ai=dict(attempts=[
+                dict(id='review',phase='review',task_id='task_writer_v3',
+                     status='completed',http_status=200,role_result_status='json_parsed',
+                     transport_started_at='2026-11-13T13:31:52+09:00',
+                     finished_at='2026-11-13T13:31:56+09:00',
+                     response_hash='evidence-hash')]))
+        state=dict(status='stopped',error='script_feedback_missing_defect')
+        before=deepcopy(job)
+        inspection=dict(defects=[dict(issue='caption_width',
+            evidence='긴 자막',correction='2줄로 줄임')])
+        with patch('script_quality.inspect_script',return_value=inspection):
+            report=script_review_recovery_audit(job,state)
+        self.assertEqual(report['status'],'saved_review_reusable_as_unvalidated_input')
+        self.assertEqual(report['missing_issue_ids'],['caption_width'])
+        self.assertFalse(report['review_committed'])
+        self.assertFalse(report['callable_retry_allowed'])
+        self.assertEqual(report['new_requests'],0)
+        self.assertEqual(job,before)
+
+    def test_uncertain_review_transport_is_not_marked_reusable(self):
+        from copy import deepcopy
+        from representative_rework import script_review_recovery_audit
+        writer=dict(id='task_writer_v3',role='writer',criteria_ids=['hook'],
+                    versions=[dict(content='{}')],
+                    reviews=[dict(action='revise',feedback='수정')])
+        job=dict(status='stopped',phase='work',
+                 reason_code='script_feedback_missing_defect',assignments=[writer],
+                 real_ai=dict(attempts=[dict(phase='review',task_id='task_writer_v3',
+                        status='reserved',role_result_status='json_parsed')]))
+        report=script_review_recovery_audit(job,dict(status='stopped',error='script_feedback_missing_defect'))
+        self.assertEqual(report['status'],'incomplete_evidence')
+        self.assertFalse(report['review_available'])
+
+
 if __name__ == "__main__":
     unittest.main()

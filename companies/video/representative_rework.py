@@ -77,6 +77,65 @@ def execution_settings():
     return dict(ready=not missing,missing=missing)
 
 
+
+def script_review_recovery_audit(job,state):
+    """Read-only historical inspection; never validate a transport or resume a stopped job."""
+    if not (state.get('status')=='stopped' and state.get('error')=='script_feedback_missing_defect'
+            and job.get('status')=='stopped'
+            and job.get('reason_code')=='script_feedback_missing_defect'
+            and job.get('phase')=='work'):
+        return None
+    attempts=job.get('real_ai',{}).get('attempts',[])
+    writer=next((t for t in job.get('assignments',[])
+                 if t.get('role')=='writer' and t.get('versions')),None)
+    last=attempts[-1] if attempts else None
+    report=dict(kind='script_review_validation_stop',source_job=job.get('id'),
+                original_preserved=True,new_requests=0,automatic_resume=False,
+                callable_retry_allowed=False,review_committed=False,
+                review_available=False,checks_available=False,
+                status='incomplete_evidence',missing_issue_ids=[])
+    if not last or not writer:
+        return report
+    report['transport']=dict(phase=last.get('phase'),task_id=last.get('task_id'),
+        status=last.get('status'),http_status=last.get('http_status'),
+        role_result_status=last.get('role_result_status'),
+        response_hash=last.get('response_hash'))
+    if not (last.get('phase')=='review' and last.get('task_id')==writer.get('id')
+            and last.get('status')=='completed' and last.get('http_status')==200
+            and last.get('transport_started_at') and last.get('finished_at')
+            and last.get('role_result_status')=='json_parsed'
+            and not any(a.get('status')=='reserved' for a in attempts)):
+        return report
+    if len(writer.get('reviews',[]))!=1 or not writer.get('criteria_ids'):
+        return report
+    review=writer['reviews'][-1]
+    if review.get('action')!='revise' or not isinstance(review.get('feedback'),str):
+        return report
+    report['review_available']=True
+    report['manager_action']='revise'
+    report['manager_feedback']=review['feedback']
+    try:
+        from script_quality import inspect_script
+        script=parse(writer['versions'][-1]['content'])
+        duration=job.get('rework_plan',{}).get('duration_seconds')
+        require(type(duration) is int,'rework_duration_invalid')
+        inspection=inspect_script(script,job['quality_inputs']['target_segment'],
+                                  mock=False,target_duration=duration)
+        issues=inspection['defects']
+        missing=[d for d in issues if d['issue'] not in review['feedback']]
+        report.update(checks_available=True,inspection_hash=digest(inspection),
+            saved_script_hash=digest(writer['versions'][-1]),
+            saved_review_hash=digest(review),
+            defect_count=len(issues),
+            missing_issue_ids=[d['issue'] for d in missing],
+            missing_defects=[dict(issue=d['issue'],correction=d['correction']) for d in missing])
+        report['status']='saved_review_reusable_as_unvalidated_input' if missing else 'review_error_not_reproduced'
+    except (CompanyError,ValueError,KeyError,TypeError):
+        report['status']='inspection_failed'
+    # Historical reviewer transport is NOT validated, and earlier job is immutable.
+    return report
+
+
 def progress_view(job,state):
     """Read-only projection: transport completion never implies server acceptance."""
     from datetime import datetime,timezone,timedelta

@@ -248,6 +248,12 @@ class MissionOneTests(unittest.TestCase):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
 
+    def test_rework_quality_failure_revises_writer_and_hands_off_offline(self):
+        self.rework_quality_revision_fixture=True
+        self.rework_criterion_ids_fixture=True
+        self.strict_plan_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_rework_manager_criterion_ids_handoff_to_representative_offline(self):
         self.rework_criterion_ids_fixture=True
         self.strict_plan_fixture=True
@@ -1803,7 +1809,10 @@ class MissionOneTests(unittest.TestCase):
                 self.assertEqual(caught.exception.diagnostics['field'],field)
                 self.assertEqual(bad,before_bad)
             self.assertEqual(valid,original_plan)
+        review_count=0
+        revision_exec_count=0
         def send(request,timeout):
+            nonlocal review_count,revision_exec_count
             wire=json.loads(request.data);message=json.loads(wire['contents'][0]['parts'][0]['text']);phase=message['phase'];context=message['data']
             self.assertEqual(context['quality']['feedback_text'],feedback)
             self.assertEqual(context['quality']['answers']['previous_plan']['sha256'],original['sha256'])
@@ -1838,10 +1847,26 @@ class MissionOneTests(unittest.TestCase):
                         bad=deepcopy(plan);change(bad)
                         with self.assertRaises(CompanyError):company._validate_script_plan(bad)
             elif phase=='execute':
-                value=draft if context['assignment']['role']=='writer' else script_editor_handoff(context['previous_results'][0])
+                if (getattr(self,'rework_quality_revision_fixture',False)
+                        and context['assignment']['role']=='writer'):
+                    revision_exec_count+=1
+                    if revision_exec_count==2:
+                        self.assertIn('goal_fit',context['revision_feedback'])
+                        self.assertIn('subject_story',context['revision_feedback'])
+                value=deepcopy(draft) if context['assignment']['role']=='writer' else script_editor_handoff(context['previous_results'][0])
+                if (getattr(self,'rework_quality_revision_fixture',False)
+                        and context['assignment']['role']=='writer' and revision_exec_count==2):
+                    value['narrative_beats'][1]['narration']='작은 선택으로 판세가 달라지는 한 장면입니다.'
+                    value['transcript']='\n'.join(beat['narration'] for beat in value['narrative_beats'])
                 result=dict(content=value if context['assignment']['role']=='writer' else json.dumps(value),evidence='offline fixture',uncertainty='unassessed')
             else:
                 result=json.loads(manager(phase,context));result['goal_review']={k:dict(met=True,evidence='역전 한 수') for k in ('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')}
+                if getattr(self,'rework_quality_revision_fixture',False) and phase=='review' and context['assignment']['role']=='writer':
+                    review_count+=1
+                    if review_count==1:
+                        self.assertEqual(result['action'],'accept')
+                        result['goal_review']['goal_fit']['met']=False
+                        result['goal_review']['subject_story']['met']=False
             return FixtureResponse(json.dumps(dict(candidates=[dict(finishReason='STOP',content=dict(role='model',parts=[dict(text=json.dumps(dict(result=result),ensure_ascii=False))]))],
                 usageMetadata=dict(promptTokenCount=20,candidatesTokenCount=30,totalTokenCount=50))).encode())
         self.http.reset_mock(side_effect=False);self.http.side_effect=send
@@ -1862,9 +1887,22 @@ class MissionOneTests(unittest.TestCase):
                 self.assertEqual(provider._grant_path(pid).read_bytes(),saved_grant)
             queued.pop()()
         result=provider.load(pid);self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
-        self.assertEqual(self.http.call_count,5)
+        expected_calls=7 if getattr(self,'rework_quality_revision_fixture',False) else 5
+        self.assertEqual(self.http.call_count,expected_calls)
+        if getattr(self,'rework_quality_revision_fixture',False):
+            writer=next(t for t in result['assignments'] if t['role']=='writer')
+            self.assertEqual(len(writer['versions']),2)
+            self.assertEqual(writer['revisions'],1)
+            self.assertEqual(review_count,2)
+            self.assertEqual(revision_exec_count,2)
+            self.assertEqual(writer['reviews'][0]['action'],'revise')
+            self.assertEqual(writer['reviews'][1]['action'],'accept')
+            self.assertEqual(result['quality_followups'][0]['decision'],'revise')
+            self.assertEqual(result['quality_followups'][0]['original_action'],'accept')
+            self.assertEqual([t['state'] for t in result['assignments']],
+                             ['accepted_by_ai_manager','accepted_by_ai_manager'])
         with self.assertRaises(CompanyError):run()
-        self.assertEqual(self.http.call_count,5)
+        self.assertEqual(self.http.call_count,expected_calls)
         handoff(self.studio.workflow,project,provider,allow_fixture=True)
         flow=self.studio.workflow.store.load(project)['representative']
         self.assertEqual(flow['stage'],'awaiting_plan_approval');self.assertEqual(len(flow['plan_versions']),2)

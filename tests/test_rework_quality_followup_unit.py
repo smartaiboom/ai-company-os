@@ -120,5 +120,76 @@ class QualityFollowupTests(unittest.TestCase):
         self.assertIsNone(self.company._quality_followup)
 
 
+
+class OwnerQualityDecisionTests(unittest.TestCase):
+    def test_owner_instruction_is_recorded_once_without_restarting_job(self):
+        from copy import deepcopy
+        from contextlib import nullcontext
+        from unittest.mock import Mock
+        from autonomous_company import CompanyError, digest
+        from studio_server import Studio
+        project = {
+            "representative": {
+                "stage": "plan_revision",
+                "rework": {"status": "stopped", "job": "fixture-job",
+                           "error": "manager_stopped"}
+            }
+        }
+        saved = []
+        workspace = Mock()
+        workspace.root = __import__("pathlib").Path("/offline/fixture")
+        workspace.lock.side_effect = lambda _pid: nullcontext()
+        workspace.load.side_effect = lambda _pid: deepcopy(saved[-1] if saved else project)
+        workspace.save.side_effect = lambda value: saved.append(deepcopy(value))
+        studio = object.__new__(Studio)
+        studio.stores = {"workspace": workspace}
+        report = {"decision": "stop", "reason": "revision_limit_reached",
+                  "failed_checks": {"goal_fit": "not_met"},
+                  "feedback": "원 목표의 흥미로운 장면을 보여주세요."}
+        request = {"job": "fixture-job", "report_hash": digest(report),
+                   "action": "request_revision", "feedback": "게임 이야기로 수정"}
+        with patch("representative_rework.ReworkStore") as store, patch(
+            "representative_rework.progress_view",
+            return_value={"quality_report": report}
+        ):
+            store.return_value.load.return_value = {"id": "fixture-job"}
+            studio.rework_quality_decide("fixture-project", request)
+            self.assertEqual(saved[-1]["representative"]["rework"]["quality_decision"]["action"],
+                             "request_revision")
+            self.assertTrue(saved[-1]["representative"]["rework"]["quality_decision"]["requires_new_consent"])
+            self.assertEqual(saved[-1]["representative"]["rework"]["status"], "stopped")
+            with self.assertRaisesRegex(CompanyError, "quality_decision_already_recorded"):
+                studio.rework_quality_decide("fixture-project", request)
+            wrong = {**request, "report_hash": "wrong"}
+            with self.assertRaisesRegex(CompanyError, "quality_report_changed"):
+                studio.rework_quality_decide("fixture-project", wrong)
+        self.assertEqual(len(saved), 1)
+
+    def test_owner_hold_does_not_grant_execution(self):
+        from copy import deepcopy
+        from contextlib import nullcontext
+        from unittest.mock import Mock
+        from autonomous_company import digest
+        from studio_server import Studio
+        project={"representative":{"stage":"plan_revision","rework":{
+            "status":"stopped","job":"fixture-job","error":"manager_stopped"}}}
+        store=Mock()
+        store.root=__import__("pathlib").Path("/offline/fixture")
+        store.lock.side_effect=lambda _pid:nullcontext()
+        store.load.return_value=deepcopy(project)
+        saved=[]
+        store.save.side_effect=lambda value:saved.append(deepcopy(value))
+        studio=object.__new__(Studio);studio.stores={"workspace":store}
+        report={"decision":"stop","reason":"revision_limit_reached","failed_checks":{}}
+        with patch("representative_rework.ReworkStore"), patch(
+            "representative_rework.progress_view",return_value={"quality_report":report}
+        ):
+            studio.rework_quality_decide("fixture-project",{
+                "job":"fixture-job","report_hash":digest(report),"action":"hold","feedback":""})
+        self.assertEqual(saved[0]["representative"]["rework"]["quality_decision"]["action"],"hold")
+        self.assertFalse(saved[0]["representative"]["rework"]["quality_decision"]["requires_new_consent"])
+        self.assertEqual(saved[0]["representative"]["rework"]["status"],"stopped")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -248,6 +248,11 @@ class MissionOneTests(unittest.TestCase):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
 
+    def test_ceo_quality_instruction_prepares_new_job_without_calls_offline(self):
+        self.rework_quality_escalation_fixture=True
+        self.strict_plan_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_rework_quality_failure_revises_writer_and_hands_off_offline(self):
         self.rework_quality_revision_fixture=True
         self.rework_criterion_ids_fixture=True
@@ -1862,6 +1867,10 @@ class MissionOneTests(unittest.TestCase):
                 result=dict(content=value if context['assignment']['role']=='writer' else json.dumps(value),evidence='offline fixture',uncertainty='unassessed')
             else:
                 result=json.loads(manager(phase,context));result['goal_review']={k:dict(met=True,evidence='역전 한 수') for k in ('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')}
+                if getattr(self,'rework_quality_escalation_fixture',False) and phase=='review' and context['assignment']['role']=='writer':
+                    result['action']='stop'
+                    result['goal_review']['goal_fit']['met']=False
+                    result['goal_review']['subject_story']['met']=False
                 if getattr(self,'rework_quality_revision_fixture',False) and phase=='review' and context['assignment']['role']=='writer':
                     review_count+=1
                     if review_count==1:
@@ -1887,7 +1896,45 @@ class MissionOneTests(unittest.TestCase):
                 self.assertEqual(state['recovery_events'][0]['previous_error'],'gemini_execution_disabled')
                 self.assertEqual(provider._grant_path(pid).read_bytes(),saved_grant)
             queued.pop()()
-        result=provider.load(pid);self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
+        result=provider.load(pid)
+        if getattr(self,'rework_quality_escalation_fixture',False):
+            self.assertEqual(result['status'],'stopped',result.get('reason_code'))
+            self.assertEqual(result.get('reason_code'),'manager_stopped')
+            self.assertEqual(self.http.call_count,3)
+            panel=self.studio.detail('workspace',project)['rework']
+            report=panel['progress']['quality_report']
+            self.assertEqual(report['decision'],'stop')
+            self.assertIn('goal_fit',report['failed_checks'])
+            self.assertIsNone(panel['quality_decision'])
+            old_files={path:path.read_bytes() for path in provider.root.glob(pid+'.*')}
+            self.studio.action('workspace',project,'rework-quality-decide',
+                dict(job=pid,report_hash=panel['quality_report_hash'],action='request_revision',
+                     feedback='게임 공략 대신 반전 장면 이야기로 수정하세요.'))
+            self.assertEqual(self.http.call_count,3)
+            with self.assertRaisesRegex(CompanyError,'quality_decision_already_recorded'):
+                self.studio.action('workspace',project,'rework-quality-decide',
+                    dict(job=pid,report_hash=panel['quality_report_hash'],action='request_revision',
+                         feedback='중복 지시'))
+            with self.assertRaises(CompanyError):
+                self.studio.action('workspace',project,'rework-new-prepare',
+                    dict(account_project='gen-lang-client-0938732315',confirm_free_account=True,previous_job=pid))
+            self.studio.action('workspace',project,'rework-quality-prepare',
+                dict(account_project='gen-lang-client-0938732315',confirm_free_account=True,previous_job=pid))
+            pending=self.studio.detail('workspace',project)['rework']
+            self.assertEqual(pending['status'],'pending')
+            self.assertNotEqual(pending['job'],pid)
+            new=provider.load(pending['job'])
+            self.assertEqual(new['real_ai']['attempts'],[])
+            self.assertEqual(new['rework_reference']['previous_failed_attempt']['job'],pid)
+            self.assertIn('반전 장면',new['quality_inputs']['feedback_text'])
+            self.assertIn('quality_followup',new['quality_inputs']['answers'])
+            self.assertEqual(self.http.call_count,3)
+            for path,data in old_files.items():self.assertEqual(path.read_bytes(),data)
+            with self.assertRaises(CompanyError):
+                self.studio.action('workspace',project,'rework-quality-prepare',
+                    dict(account_project='gen-lang-client-0938732315',confirm_free_account=True,previous_job=pid))
+            return
+        self.assertEqual(result['status'],'needs_user_review',result.get('reason_code'))
         expected_calls=7 if getattr(self,'rework_quality_revision_fixture',False) else 5
         self.assertEqual(self.http.call_count,expected_calls)
         if getattr(self,'rework_quality_revision_fixture',False):

@@ -51,6 +51,28 @@ def inspect(root):
             print("작업 파일:", job["id"])
             print("호출 기록:", len(attempts), "/ 완료:", completed,
                   "/ 예약:", reserved, "/ 미확정:", unresolved)
+            if state.get("error") == "rework_goal_not_met":
+                tasks = job.get("assignments", [])
+                writer = next((task for task in tasks if task.get("role") == "writer"), None)
+                last = attempts[-1] if attempts else {}
+                print("기존 실패 작업 단계:", job.get("phase"),
+                      "/ 상태:", job.get("status"),
+                      "/ 내부 사유:", job.get("reason_code"))
+                print("대본 직원:", "있음" if writer else "없음",
+                      "/ 작성본 수:", len(writer.get("versions", [])) if writer else 0,
+                      "/ 검토 수:", len(writer.get("reviews", [])) if writer else 0)
+                print("마지막 요청:", last.get("phase", "없음"),
+                      "/ 전송 기록 상태:", last.get("status", "없음"),
+                      "/ 결과 검증:", last.get("role_result_status", "없음"),
+                      "/ HTTP:", last.get("http_status", "없음"))
+                print("마지막 요청 식별자:", last.get("id", "없음"))
+                print("기존 의미 검토 기록:", len(job.get("goal_reviews", [])),
+                      "/ 관리자 후속 보고 기록:", len(job.get("quality_followups", [])))
+                print("수정 예산 한도:", job.get("limits", {}).get("max_total_revisions", "확인 불가"),
+                      "/ 사용:", sum(t.get("revisions", 0) for t in tasks))
+                print("기존 실행 활성 표시:", bool(job.get("active_operation")),
+                      "/ 실행 회차:", len(job.get("sessions", [])))
+                print("주의: 마지막 모델 응답 전문과 자격 증명은 조회·출력하지 않습니다.")
             print("과거 기록:", len(history), "/ 대표 품질 보고:", "있음" if report else "없음",
                   "/ 대표 추가 지시:", decision.get("action") if decision else "없음")
             if reserved or unresolved:

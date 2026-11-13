@@ -835,6 +835,26 @@ def handoff(workflow,pid,provider,*,allow_fixture=False):
         require(all(a['status']=='completed' and a.get('http_status')==200 and a.get('role_result_status')=='validated'
                     for a in job['real_ai']['attempts']),'rework_evidence')
         require(job['plan']['source']=='provider_model_claim' or allow_fixture and job['plan']['source']=='offline_http_fixture','rework_fixture_forbidden')
+        if job.get('script_recovery'):
+            recovery=job['script_recovery']
+            old=provider.load(recovery['source_job'])
+            parent=job['rework_reference'].get('previous_failed_attempt',{})
+            archived=next((entry for entry in flow.get('rework_history',[])
+                           if entry.get('job')==old['id']),None)
+            require(archived is not None,'rework_recovery_source_changed')
+            audit=script_review_recovery_audit(old,archived)
+            original_writer=next(t for t in old['assignments'] if t['role']=='writer')
+            require(audit and audit['safe_for_recovery_proposal']
+                    and old['storage_hash']==parent.get('state_hash')
+                    and digest(old['plan'])==recovery['original_plan_hash']
+                    and digest(original_writer['versions'][-1])==recovery['original_writer_hash']
+                    and digest(original_writer['reviews'][-1])==recovery['original_review_hash']
+                    and digest(job['plan'])==recovery['original_plan_hash']
+                    and len(job['assignments'][0]['versions'])>=2
+                    and job['assignments'][0]['versions'][0].get('reused_from_job')==old['id']
+                    and all(a['role_result_status']=='validated' for a in old['real_ai']['attempts'][:2])
+                    and old['real_ai']['attempts'][-1]['role_result_status']=='json_parsed',
+                    'rework_recovery_source_changed')
         if flow['plan_versions'][-1].get('internal_job')==job['id']:return
         require(flow['stage']=='plan_revision','rework_stage')
         writer,editor=job['assignments'];script=parse(writer['versions'][-1]['content'])

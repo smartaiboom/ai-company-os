@@ -1856,8 +1856,9 @@ class MissionOneTests(unittest.TestCase):
                 value=deepcopy(draft) if context['assignment']['role']=='writer' else script_editor_handoff(context['previous_results'][0])
                 if (getattr(self,'rework_quality_revision_fixture',False)
                         and context['assignment']['role']=='writer' and revision_exec_count==2):
-                    value['narrative_beats'][1]['narration']='작은 선택으로 판세가 달라지는 한 장면입니다.'
-                    value['transcript']='\n'.join(beat['narration'] for beat in value['narrative_beats'])
+                    # Change visual detail without breaking narration/transcript/close invariants.
+                    value['narrative_beats'][1]['caption']='수정된 가상 역전 장면'
+                    value['narrative_beats'][1]['screen']='가상 보드의 역전 전후 비교'
                 result=dict(content=value if context['assignment']['role']=='writer' else json.dumps(value),evidence='offline fixture',uncertainty='unassessed')
             else:
                 result=json.loads(manager(phase,context));result['goal_review']={k:dict(met=True,evidence='역전 한 수') for k in ('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')}

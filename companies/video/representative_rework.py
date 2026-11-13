@@ -399,6 +399,29 @@ class ReworkCompany(MissionOneCompany):
                 self.store.save(p)
         return result
 
+    def _validate_review_decision(self,p,task,review):
+        # Model-generated Korean revision feedback is valid without repeating
+        # machine-only defect codes verbatim. Preserve the manager's original
+        # review event; attach deterministic issues for the writer separately.
+        if task['role']=='writer' and review['action']=='revise':
+            from script_quality import inspect_script
+            inspection=inspect_script(
+                parse(task['versions'][-1]['content']),
+                p['quality_inputs']['target_segment'],
+                mock=False,target_duration=self._script_duration(p))
+            missing=[d for d in inspection['defects'] if d['issue'] not in review['feedback']]
+            if missing:
+                original=review['feedback']
+                review['feedback']=original+'\n[시스템 자동 검출 항목 — AI 관리자 원문과 별개]\n'+\
+                    '\n'.join(d['issue']+': '+d['correction'] for d in missing)
+                p['events'].append(dict(at=__import__('autonomous_company').now(),
+                    event='system_script_defects_attached',task_id=task['id'],
+                    manager_feedback_hash=digest(original),
+                    appended_defects=[dict(issue=d['issue'],evidence=d['evidence'],
+                                           correction=d['correction']) for d in missing],
+                    approved_by_manager=False))
+        return super()._validate_review_decision(p,task,review)
+
     def _delivery_blockers(self,p):
         p['final'].update(provider='system',source='accepted_review_handoff')
         return ['needs_user_review']

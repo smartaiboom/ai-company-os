@@ -447,7 +447,7 @@ main.addEventListener('click',async event=>{
       });
   }
   else if (button.dataset.action==='rework-consent') {
-    modal('새 외부 전송 동의',`<p>원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,
+    modal('새 외부 전송 동의',`<p>이 작업에서 최대 <strong>${h(detail.rework.proposal?.limits?.max_calls??'미설정')}회</strong>의 Gemini 요청을 허용하는 별도 동의입니다. AI 관리자·대본 직원·편집 직원의 하위 작업에는 반복 동의하지 않습니다. 원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,
       '이 범위에 동의',async data=>{await api(detailApi(detail)+'/rework-consent',{review_hash:detail.rework.review_hash,confirm_free_account:data.has('free'),confirm_data_policy:data.has('policy')});return {message:'동의 저장. AI 재작업 시작을 눌러 실행하세요.'};});
   }
   else if (['rework-run','rework-recover'].includes(button.dataset.action)) {

@@ -9,6 +9,53 @@ from representative_rework import progress_view
 
 
 class ReworkStatusTests(unittest.TestCase):
+    def test_ceo_quality_report_cutroom_render_offline(self):
+        """Execute the actual panel renderer against a synthetic report, no files altered."""
+        source=Path('companies/video/studio/studio.js').read_text()
+        script=r"""
+const fs=require('fs'),vm=require('vm'),assert=require('assert');
+const source=fs.readFileSync(0,'utf8');
+const ctx={
+  h:v=>String(v??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])),
+  time:v=>v,facts:rows=>JSON.stringify(rows)
+};
+vm.createContext(ctx);
+vm.runInContext(source.slice(source.indexOf('function reworkPanel('),source.indexOf('function budgetSetupPanel')),ctx);
+const report={decision:'stop',reason:'revision_limit_reached',
+  failed_checks:{goal_fit:'not_met',subject_story:'not_met'},
+  evidence:{goal_fit:'대본의 예시'},feedback:'이야기 중심으로 고치세요'};
+const progress={title:'대표 판단 필요 · AI 품질 검토 보고',current:'대본 검토',actor:'AI 관리자',
+  cards:[],message:'목표 불일치',next_action:'대표에게 보고',counts:{
+    attempts:3,transport_started:3,http_ok:3,server_validated:2,failed:0},
+  ledger:[],quality_report:report};
+const base={rework:{status:'stopped',progress,job:'fixture-job',
+  quality_report_hash:'fixture-hash',quality_script:'<img src=x onerror=alert(1)>',
+  feedback:'대표 피드백',attempts:3,history:[],settings:{ready:true},proposal:null}};
+const html=ctx.reworkPanel(base);
+for(const label of ['AI 관리자 품질 보고','수정 지시 남기기','판단 보류','goal_fit','subject_story'])
+  assert(html.includes(label),'missing '+label);
+assert(html.includes('data-action="rework-quality-revise"'));
+assert(html.includes('data-action="rework-quality-hold"'));
+assert(!html.includes('<img src=x onerror=alert(1)>'),'unescaped writer source');
+assert(html.includes('&lt;img src=x onerror=alert(1)&gt;'));
+assert(!html.includes('data-action="rework-quality-prepare"'),'prepare before decision');
+assert(!html.includes('data-action="rework-run"'),'never automatically run');
+const revised=JSON.parse(JSON.stringify(base));
+revised.rework.quality_decision={action:'request_revision',feedback:'게임 이야기 수정'};
+const ready=ctx.reworkPanel(revised);
+assert(ready.includes('data-action="rework-quality-prepare"'),'explicit new job preparation');
+assert(!ready.includes('data-action="rework-quality-revise"'),'duplicate write forbidden');
+assert(!ready.includes('data-action="rework-run"'),'consent required');
+const held=JSON.parse(JSON.stringify(base));
+held.rework.quality_decision={action:'hold',feedback:''};
+const holdHtml=ctx.reworkPanel(held);
+assert(!holdHtml.includes('data-action="rework-quality-prepare"'),'hold never prepares');
+assert(!holdHtml.includes('data-action="rework-quality-revise"'));
+"""
+        result=subprocess.run(['node','-e',script],input=source,text=True,capture_output=True)
+        self.assertEqual(result.returncode,0,result.stderr)
+
+
     def test_stopped_running_completed_and_korean_ui_without_execution(self):
         with patch('socket.getaddrinfo',side_effect=AssertionError('DNS forbidden')),patch('socket.socket.connect',side_effect=AssertionError('network forbidden')):
             job=dict(status='stopped',reason_code='invalid_dependencies',phase='plan',plan=None,assignments=[],

@@ -213,7 +213,7 @@ class Studio:
         from autonomous_gemini35 import Gemini35Config,MODEL,ENDPOINT
         from video_mission_one import MISSION_ACCOUNT,_binding
         config=Gemini35Config.from_env()
-        preparing=name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-cap-prepare')
+        preparing=name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-cap-prepare','rework-consent')
         if preparing:
             # Preparing a proposal does not execute Gemini. Missing runtime
             # model/endpoint env must not block drafting a fixed free-model scope.
@@ -230,7 +230,7 @@ class Studio:
             from representative_rework import cap_pending_proposal
             cap_pending_proposal(self.workflow,pid,config.api_key)
             return
-        if preparing:
+        if preparing and name!='rework-consent':
             followup=name=='rework-quality-prepare'
             exact(body,('account_project','confirm_free_account','previous_job')
                   if name in ('rework-new-prepare','rework-quality-prepare')

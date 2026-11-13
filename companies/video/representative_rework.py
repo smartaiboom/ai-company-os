@@ -130,7 +130,7 @@ def progress_view(job,state):
                        and job.get('reason_code')=='manager_stopped')
     if decision_required:
         items=', '.join(latest_followup.get('failed_checks',{})) or '품질 검토 및 수정 횟수'
-        message='AI 관리자 검토 결과 추가 판단이 필요합니다. 문제 항목: '+items
+        message='AI 관리자 검토 결과 추가 판단이 필요합니다. 문제 항목: '+items+'. 수정 제안: '+latest_followup.get('feedback','')[:900]
         action='대표에게 현 대본과 관리자 수정 지시를 보고하고, 수정·보류·재기획 중 지시를 받으세요. 추가 AI 호출은 자동 실행하지 않습니다.'
     return dict(title='대표 판단 필요 · AI 품질 검토 보고' if decision_required else
                      '재작업 중단 · 새 결과 미완료' if terminal else '새 기획 대표 승인 대기' if state['status']=='completed' else
@@ -343,8 +343,9 @@ class ReworkCompany(MissionOneCompany):
                         +'; '+reasons+']')
                     self._quality_followup=dict(task_id=self._review_task_id,
                         original_action=original,decision=result['action'],
-                        failed_checks=failed,feedback=feedback,
-                        reason='manager_accept_conflicted_with_goal_review')
+                        failed_checks=failed,
+                        evidence={name:self._semantic[name]['evidence'][:200] for name in failed if name in self._semantic},
+                        feedback=feedback,reason='manager_accept_conflicted_with_goal_review')
                 elif result['action']=='stop':
                     self._quality_followup=dict(task_id=self._review_task_id,
                         original_action='stop',decision='stop',

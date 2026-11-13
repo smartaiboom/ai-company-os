@@ -43,6 +43,10 @@ ERRORS = {
     'quality_revision_report_changed': '대표 지시의 기준이 된 이전 검토 보고서가 변경되어 새 작업 준비를 차단했습니다.',
     'rework_source_changed': '기존 작업과 원본 프로젝트의 연결 정보가 달라 새 작업을 준비할 수 없습니다.',
     'rework_parent_changed': '기존 실패 작업의 보존 기록이 달라져 새 작업을 준비할 수 없습니다.',
+    'rework_script_reuse_not_proven': '이전 기획·대본·검토 기록이 안전한 재사용 기준을 충족하지 않습니다. 기존 작업을 다시 실행하지 마세요.',
+    'rework_script_reuse_changed': '원래 대본의 검사 결과가 바뀌어 복구 준비를 중단했습니다. 과거 파일을 변경하지 마세요.',
+    'rework_recovery_seed_mismatch': '대본 수정 전용 신규 작업의 자료 출처·시작 상태가 일치하지 않아 실행을 차단했습니다.',
+    'rework_recovery_source_changed': '대표 보고 전에 재사용한 원본의 검증·출처 기록이 달라져 결과 제출을 차단했습니다.',
     'rework_pending_cap_required': '동의 전 작업만 호출 상한을 갱신할 수 있습니다. 최신 상태를 확인해 주세요.',
     'rework_pending_proposal_changed': '기존 동의 제안과 작업 상태가 달라져 호출 상한 갱신을 차단했습니다.',
 

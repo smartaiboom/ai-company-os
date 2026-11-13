@@ -294,8 +294,27 @@ class ReworkCompany(MissionOneCompany):
                 self._semantic=result.pop('goal_review')
                 if result['action']=='accept':
                     content=self._review_content
-                    require(all(v['met'] is True and v['evidence'].strip() and v['evidence'] in content
-                                for v in self._semantic.values()),'rework_goal_not_met')
+                    # Compare quoted evidence with the original script's string fields too.
+                    # JSON serialization escapes newlines and quotes; a literal quote can
+                    # be present in the script yet absent from the serialized JSON string.
+                    artifact=parse(content)
+                    def evidence_in_artifact(quote,value):
+                        if isinstance(value,str):return quote in value
+                        if isinstance(value,list):return any(evidence_in_artifact(quote,v) for v in value)
+                        if isinstance(value,dict):return any(evidence_in_artifact(quote,v) for v in value.values())
+                        return False
+                    failures={name:('not_met' if check['met'] is not True else 'evidence_not_found')
+                              for name,check in self._semantic.items()
+                              if check['met'] is not True or not check['evidence'].strip()
+                              or not (check['evidence'] in content or
+                                      evidence_in_artifact(check['evidence'],artifact))}
+                    if failures:
+                        state=self._rework_state
+                        state['real_ai']['attempts'][-1]['goal_review_diagnostics']=dict(
+                            stage='semantic_review',failed_checks=failures,
+                            response_hash=state['real_ai']['attempts'][-1].get('response_hash'))
+                        self.store.save(state)
+                        raise CompanyError('rework_goal_not_met')
                     require(not re.search(r'골든타임|(?:쇼츠|영상)\s*(?:제작법|만드는\s*방법)|편집\s*노하우',content),
                             'rework_obvious_goal_drift')
             raw=json.dumps(value,ensure_ascii=False)

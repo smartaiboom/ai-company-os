@@ -49,7 +49,7 @@ def fixture():
         stage="plan_revision", audience="초보 시청자", budget=None,
         budget_setup=None, mission=None, rework=rework, jobs=[],
         flow=dict(
-            plan_versions=[], video_versions=[], decisions=[], events=[],
+            plan_versions=[], video_versions=[], render_attempts=[], decisions=[], events=[],
             constraints=dict(language="한국어", platform="YouTube Shorts",
                              duration_seconds=25, notes="가상 검증"),
         ),

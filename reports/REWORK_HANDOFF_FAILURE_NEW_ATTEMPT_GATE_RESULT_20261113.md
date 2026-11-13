@@ -1,0 +1,11 @@
+# 인계 실패 이후 새 재작업 준비 연결
+2026-11-13 KST · 기준 main `0e796e1` · 실제 API 호출 0회.
+
+- 실제 상태(읽기 전용): 프로젝트 `company-aba553f29cfb454c8c05bad4abb49969`, 실패 job `qualityprovider-0d3d8a4858f1422f8438f1eda5815aa9`. plan/stopped/script_plan_handoff_required, plan·final=null, assignments=[], sessions/attempts 각각 1. attempt `65a9c719108e4d479e5d47f2ab104f46`는 HTTP200/completed/json_parsed, response_hash=`499d626e743a93e9e04859c0e18daf388d387ab213c63bb329d9dd379499cdaf`, finished_at=11/13 10:08:36 KST. active_operation은 종료된 해당 attempt와 일치한다.
+- 최소 수정: `companies/video/representative_rework.py::failed_plan_reference`에 해당 오류만 추가했다. plan 단계·계획/배정/최종 결과 없음·session/attempt 1개·완료 HTTP200·파싱/응답 해시/전송·수신·종료 시각·종료 attempt와 active_operation 일치·기존 HMAC와 프로젝트/원본 참조 binding을 모두 통과해야 한다. 다른 오류를 새로 허용하거나 실패 job을 다시 실행하지 않는다.
+- 반복 방지: 내부 검증 버전 `rework-plan-handoff-1c024346`와 실제 재기획 검증 함수 소스 hash `43cb97ac51070cf92c033f7cd68c21ad50a6a46a4c17098ce84b4df5befefb6a`를 새 작업의 previous_failed_attempt 참조에 기록한다. 이 참조는 새 동의·서명 grant에 포함된다. 동일 검증 코드로의 반복 신규 준비는 거부하고, 전송 전에도 서명된 코드 identity와 현재 코드를 비교해 drift를 차단한다. 이후 다른 허용 경로에서도 이 표식을 이어 보존한다. 내부 validator identity를 전송 동의 참조에 추가했으므로 새 독립 동의가 필요하며 기존 consent/grant는 재사용하지 않는다. PLAN_RULES·prompt·출력 스키마·품질 검사·예산·영상/음성은 변경하지 않았다.
+- 컷룸: 기존 `rework_view → new_attempt → 새 AI 재작업 준비` 경로를 그대로 사용한다. 실제 프로젝트를 읽은 서버 뷰에서 `new_attempt_available=true` 확인. 브라우저 수동 클릭은 수행하지 않았고 UI/서버 라우트 추가는 없다. 이번 작업에서 실제 새 job·동의·전송은 생성하지 않았다.
+- 검증: `PYTHONPATH=core:companies/video python -B -m unittest tests.test_video_mission_one.MissionOneTests.test_handoff_failure_new_consent_gate_to_v2_offline` → **1 test / 7.309s / OK**. 소켓/DNS 차단. 합성 stopped HTTP200 인계 실패→새 prepare→새 독립 consent/grant/job→관리자 선택 criteria ID 계획→writer/manager review→editor/manager review→동일 컷룸 v2 awaiting_plan_approval. 실패 파일·원본 보존, 구동의 재사용·중복 준비/시작·reserved/잘못된 HTTP/응답 해시·종료 시각 누락·불명 active_operation·다른 오류·서명 변조·동일 validator 반복·전송 전 validator drift 거부를 확인했다. 모의 결과를 실전 성공으로 표시하지 않았다.
+- 보존: 실제 studio 파일 59개 검사 전후 SHA-256 목록 동일. 기존 실패 원장·동의·서명·산출물·미추적 파일 불변. data/backups/artifacts/.env 수정 없음. 실제 Gemini 호출·자동 재시도·모델 변경·유료 전환·계정 재확인 요청 없음.
+
+대표 다음 단계 하나: 수정된 서버의 같은 컷룸에서 **새 AI 재작업 준비 → 새 외부 전송 동의 → AI 재작업 시작**을 선택한다. 서버가 이전 코드를 실행 중이면 최신 코드로 재시작한 뒤 진행한다. 기존 실패 작업은 그대로 보존된다.

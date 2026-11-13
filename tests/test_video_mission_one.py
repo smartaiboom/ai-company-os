@@ -253,6 +253,12 @@ class MissionOneTests(unittest.TestCase):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
 
+    def test_handoff_failure_new_consent_gate_to_v2_offline(self):
+        self.handoff_failure_fixture=True
+        self.new_attempt_fixture=True
+        self.rework_criterion_ids_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_rework_plan_wire_and_http_error_diagnostics_offline(self):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
@@ -1615,7 +1621,8 @@ class MissionOneTests(unittest.TestCase):
             old_contract=deepcopy(body);old_contract['rework_scope']['plan_contract_hash']='old-plan-contract'
             with self.assertRaisesRegex(CompanyError,'rework_plan_contract_changed'):
                 provider.approve(pid,old_contract,review_hash=digest(old_contract),owner_confirmed=True)
-        if getattr(self,'new_attempt_fixture',False) and not getattr(self,'unavailable_fixture',False):
+        if (getattr(self,'new_attempt_fixture',False) and not getattr(self,'unavailable_fixture',False)
+                and not getattr(self,'handoff_failure_fixture',False)):
             # Historical fixture uses the old signed plan contract, not the new one.
             body['rework_scope'].pop('plan_contract_hash')
             project_state=self.studio.workflow.store.load(project)
@@ -1697,6 +1704,9 @@ class MissionOneTests(unittest.TestCase):
             old['real_ai']['attempts']=[dict(id='fixture-completed-plan',phase='plan',model=MODEL,status='completed',
                 http_status=200,role_result_status='json_parsed',response_hash='fixture-response',
                 transport_started_at=now(),response_received_at=now())]
+            if getattr(self,'handoff_failure_fixture',False):
+                old['reason_code']='script_plan_handoff_required'
+                old['real_ai']['attempts'][0]['finished_at']=now()
             if getattr(self,'unavailable_fixture',False):
                 old.update(status='paused',reason_code='provider_unavailable')
                 old['real_ai']['attempts'][0].update(status='failed',http_status=503,
@@ -1710,6 +1720,25 @@ class MissionOneTests(unittest.TestCase):
                 current['representative']['rework'].update(status='stopped',error=old['reason_code'])
                 self.studio.workflow.store.save(current)
             preserved={p:p.read_bytes() for p in provider.root.glob(old_id+'.*')}
+            if getattr(self,'handoff_failure_fixture',False):
+                from representative_rework import failed_plan_reference,handoff_validator_identity
+                project_state=self.studio.workflow.store.load(project)
+                self.assertEqual(failed_plan_reference(provider,project_state,self.key)['handoff_validator'],handoff_validator_identity())
+                for changes in (dict(status='reserved'),dict(http_status=503),dict(response_hash=None),dict(finished_at=None)):
+                    bad=deepcopy(old);bad['real_ai']['attempts'][0].update(changes)
+                    with patch.object(provider,'load',return_value=bad),self.assertRaises(CompanyError):
+                        failed_plan_reference(provider,project_state,self.key)
+                for changes in (dict(active_operation=None),dict(active_operation='uncertain'),dict(reason_code='another_error')):
+                    bad=deepcopy(old);bad.update(changes)
+                    with patch.object(provider,'load',return_value=bad),self.assertRaises(CompanyError):
+                        failed_plan_reference(provider,project_state,self.key)
+                grant_path=provider._grant_path(old_id);saved=grant_path.read_bytes()
+                broken=json.loads(saved);broken['signature']='0'*64
+                try:
+                    grant_path.write_text(json.dumps(broken))
+                    with self.assertRaisesRegex(CompanyError,'rework_history_signature_invalid'):
+                        failed_plan_reference(provider,project_state,self.key)
+                finally:grant_path.write_bytes(saved)
             if getattr(self,'unavailable_fixture',False):
                 from representative_rework import failed_plan_reference
                 # Refuse ambiguous/reserved/non-503 records and a repeated recovery scope.
@@ -1737,6 +1766,19 @@ class MissionOneTests(unittest.TestCase):
             with self.assertRaises(CompanyError):self.studio.action('workspace',project,'rework-new-prepare',request)
             with self.assertRaises(CompanyError):provider.approve(pid,body,review_hash=digest(body),owner_confirmed=True)
             self.studio.action('workspace',project,'rework-consent',dict(review_hash=pending['review_hash'],confirm_free_account=True,confirm_data_policy=True))
+            if getattr(self,'handoff_failure_fixture',False):
+                signed=provider.grant(provider.load(pid))
+                self.assertEqual(signed['body']['rework_scope']['reference']['previous_failed_attempt']['handoff_validator'],handoff_validator_identity())
+                with patch('representative_rework.handoff_validator_identity',return_value={'version':'changed','code_hash':'changed'}),self.assertRaisesRegex(CompanyError,'rework_handoff_validator_changed'):
+                    company._quality_transport_allowed(provider.load(pid))
+                repeated=deepcopy(provider.load(pid));repeated.update(status='stopped',reason_code='script_plan_handoff_required',
+                    active_operation=old['active_operation'],sessions=deepcopy(old['sessions']))
+                repeated['real_ai']['attempts']=deepcopy(old['real_ai']['attempts'])
+                current=self.studio.workflow.store.load(project)
+                current['representative']['rework'].update(status='stopped',error='script_plan_handoff_required')
+                original_load=provider.load
+                with patch.object(provider,'load',side_effect=lambda job:repeated if job==pid else original_load(job)),self.assertRaisesRegex(CompanyError,'rework_same_validator_new_attempt_forbidden'):
+                    failed_plan_reference(provider,current,self.key)
             self.assertNotEqual(provider.grant(provider.load(pid))['id'],provider.load(old_id)['real_ai']['consent']['operating_grant_id'])
             for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)
             self.assertEqual(self.studio.workflow.store.load(project)['representative']['rework_history'][0]['job'],old_id)
@@ -1833,6 +1875,9 @@ class MissionOneTests(unittest.TestCase):
             self.assertEqual([t['role'] for t in result['assignments']],['writer','editor'])
             self.assertTrue(all(t['state']=='accepted_by_ai_manager' for t in result['assignments']))
             for path,data in original_bytes.items():self.assertEqual(path.read_bytes(),data)
+            if getattr(self,'handoff_failure_fixture',False):
+                for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)
+                self.assertEqual(flow['rework_history'][0]['error'],'script_plan_handoff_required')
             return
         if getattr(self,'unavailable_fixture',False):
             for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)

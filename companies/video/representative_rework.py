@@ -4,6 +4,7 @@ import hmac
 import json
 import re
 import os
+import inspect
 from autonomous_company import CompanyError, Store, digest, parse, require, text, validate_plan
 from autonomous_gemini35 import Gemini35Store, Gemini35Config, MODEL, ENDPOINT
 from autonomous_live import LiveManagerProvider, LiveEmployeeProvider
@@ -218,6 +219,8 @@ class ReworkCompany(MissionOneCompany):
 
     def _quality_transport_allowed(self,p):
         record=self.store.grant(p)
+        validator=record['body']['rework_scope']['reference'].get('previous_failed_attempt',{}).get('handoff_validator')
+        require(validator is None or validator==handoff_validator_identity(),'rework_handoff_validator_changed')
         require(record['body']['rework_scope'].get('plan_contract_hash')==digest(PLAN_RULES),'rework_new_plan_consent_required')
         require(hmac.compare_digest(record['body']['rework_scope']['credential_binding'],_binding(p['id'],self.config.api_key)),
                 'rework_key_changed')
@@ -330,10 +333,15 @@ class ReworkCompany(MissionOneCompany):
         return ['needs_user_review']
 
 
+def handoff_validator_identity():
+    return dict(version='rework-plan-handoff-1c024346',code_hash=digest(
+        inspect.getsource(ReworkCompany._validate_script_plan)+inspect.getsource(validate_rework_plan)))
+
+
 def failed_plan_reference(store,project,key):
     state=project['representative']['rework'];old=store.load(state['job'])
     require(state['status']=='stopped' and old['status'] in ('stopped','paused')
-            and old.get('reason_code') in ('invalid_dependencies','rework_plan_invalid','provider_unavailable')
+            and old.get('reason_code') in ('invalid_dependencies','rework_plan_invalid','provider_unavailable','script_plan_handoff_required')
             and state.get('error')==old.get('reason_code')
             and old['phase']=='plan' and not old['plan'] and not old['assignments'] and not old['final'],
             'rework_new_attempt_not_eligible')
@@ -342,6 +350,12 @@ def failed_plan_reference(store,project,key):
     require(len(attempts)==1 and len(old['sessions'])==1,'rework_new_attempt_uncertain')
     attempt=attempts[0]
     unavailable=old['reason_code']=='provider_unavailable'
+    handoff_failure=old['reason_code']=='script_plan_handoff_required'
+    prior_validator=old['rework_reference'].get('previous_failed_attempt',{}).get('handoff_validator')
+    if handoff_failure:
+        require(old['status']=='stopped' and old['active_operation']==attempt['id']
+                and attempt.get('finished_at'),'rework_new_attempt_uncertain')
+        require(prior_validator!=handoff_validator_identity(),'rework_same_validator_new_attempt_forbidden')
     completed_503=(attempt['status']=='failed' and attempt.get('http_status')==503
         and attempt.get('error_code')=='provider_unavailable' and attempt.get('finished_at')
         and attempt.get('request_hash') and attempt.get('role_result_status')=='unvalidated'
@@ -364,11 +378,13 @@ def failed_plan_reference(store,project,key):
             and body['quality_contract']['inputs']==old['quality_inputs'] and body['model']==MODEL and body['endpoint']==ENDPOINT
             and body['free_only'] is True and scope['account_project']==MISSION_ACCOUNT and scope['data_policy']==DATA_POLICY,
             'rework_history_signature_invalid')
-    require(unavailable or scope.get('plan_contract_hash')!=digest(PLAN_RULES),'rework_same_contract_new_attempt_forbidden')
+    require(unavailable or handoff_failure or scope.get('plan_contract_hash')!=digest(PLAN_RULES),'rework_same_contract_new_attempt_forbidden')
     require(hmac.compare_digest(scope['credential_binding'],_binding(old['id'],key)),'rework_key_changed')
     # Expired historical consent proves history only; it never authorizes this new request.
     return dict(job=old['id'],state_hash=old['storage_hash'],grant_hash=digest(grant),
                 attempt_id=attempt['id'],contract_hash=digest(PLAN_RULES),
+                **(dict(handoff_validator=handoff_validator_identity()) if handoff_failure else
+                   dict(handoff_validator=prior_validator) if prior_validator is not None else {}),
                 **(dict(recovery_scope='one_new_plan_after_final_http503_no_retry') if unavailable else {}))
 
 

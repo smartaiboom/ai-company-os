@@ -632,7 +632,86 @@ def quality_decision_reference(store,project,key):
                 scope='new_job_after_ceo_quality_instruction')
 
 
-def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False):
+
+def script_review_recovery_reference(store,project,key):
+    """Signed and immutable source proof for a new, revision-only job."""
+    flow=project['representative'];state=flow.get('rework',{})
+    old=store.load(state['job'])
+    audit=script_review_recovery_audit(old,state)
+    require(audit and audit['safe_for_recovery_proposal'],'rework_script_reuse_not_proven')
+    store.check_binding(old)
+    grant=parse(store._grant_path(old['id']).read_text())
+    record=grant['record'];body=record['body']
+    require(hmac.compare_digest(grant['signature'],store._sign(record))
+            and record['revoked_at'] is None
+            and old['real_ai']['consent'].get('operating_grant_id')==record['id']
+            and state.get('proposal')==body
+            and body.get('model')==MODEL and body.get('endpoint')==ENDPOINT
+            and body.get('free_only') is True
+            and body.get('rework_scope',{}).get('reference')==old['rework_reference']
+            and body['quality_contract']['inputs']==old['quality_inputs']
+            and body['rework_scope'].get('account_project')==MISSION_ACCOUNT
+            and hmac.compare_digest(body['rework_scope'].get('credential_binding',''),
+                                     _binding(old['id'],key)),'rework_history_signature_invalid')
+    writer=next(t for t in old['assignments'] if t['role']=='writer')
+    require(len(old['assignments'])==2 and old['assignments'][1]['role']=='editor'
+            and not old['assignments'][1].get('versions')
+            and len(writer['versions'])==1 and writer['reviews'][0]['action']=='revise',
+            'rework_script_reuse_not_proven')
+    return dict(job=old['id'],state_hash=old['storage_hash'],
+                grant_hash=digest(grant),recovery_scope='validated_plan_writer_reuse_new_job',
+                previous_plan_hash=digest(old['plan']),
+                previous_writer_hash=digest(writer['versions'][-1]),
+                previous_review_hash=digest(writer['reviews'][-1]),
+                inspection_hash=audit['inspection_hash'],
+                previous_attempt_count=len(old['real_ai']['attempts']),
+                previous_review_unvalidated=True)
+
+
+def seed_recovered_script_job(job,old,audit):
+    """Reuse validated artifacts, never old consent, calls or a fabricated manager accept."""
+    require(audit['safe_for_recovery_proposal'],'rework_script_reuse_not_proven')
+    from script_quality import inspect_script
+    writer=next(t for t in old['assignments'] if t['role']=='writer')
+    inspection=inspect_script(parse(writer['versions'][-1]['content']),
+        old['quality_inputs']['target_segment'],mock=False,
+        target_duration=old['rework_plan']['duration_seconds'])
+    require(digest(inspection)==audit['inspection_hash'],'rework_script_reuse_changed')
+    missing=[d for d in inspection['defects'] if d['issue'] not in writer['reviews'][-1]['feedback']]
+    feedback=(writer['reviews'][-1]['feedback']+
+        ('\n[시스템 검출 결함 — 관리자 원문이 아님]\n'+
+         '\n'.join(d['issue']+': '+d['correction'] for d in missing) if missing else ''))
+    job['plan']=deepcopy(old['plan'])
+    job['rework_plan']=deepcopy(old['rework_plan'])
+    job['assignments']=[]
+    for task in old['assignments']:
+        copy=deepcopy(task)
+        copy['reviews']=[]
+        copy['versions']=[]
+        copy['revisions']=0
+        if copy['role']=='writer':
+            version=deepcopy(writer['versions'][-1])
+            version['reused_from_job']=old['id']
+            copy['versions']=[version]
+            copy['reviews']=[dict(action='revise',feedback=feedback,
+                source='system_recovery_instruction_from_unvalidated_manager_review',
+                original_review_hash=digest(writer['reviews'][-1]),
+                approved_by_manager=False)]
+            copy['state']='revision_requested'
+        else:copy['state']='pending'
+        job['assignments'].append(copy)
+    job['phase']='work'
+    job['script_recovery']=dict(source_job=old['id'],
+        original_plan_hash=digest(old['plan']),
+        original_writer_hash=digest(writer['versions'][-1]),
+        original_review_hash=digest(writer['reviews'][-1]),
+        inspection_hash=audit['inspection_hash'],manager_acceptance=False,
+        original_call_count=len(old['real_ai']['attempts']),
+        initial_task_state='revision_requested',source_request_replayed=False)
+    return job
+
+
+def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False,script_recovery=False):
     with workflow.store.lock(pid):
         project=workflow.store.load(pid);flow=project['representative']
         require(flow['stage']=='plan_revision','rework_stage')
@@ -640,7 +719,8 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False)
         parent=None
         if previous_job is not None:
             require(flow.get('rework',{}).get('job')==previous_job,'rework_stale_new_attempt')
-            parent=(quality_decision_reference(store,project,key) if quality_decision
+            parent=(script_review_recovery_reference(store,project,key) if script_recovery
+                    else quality_decision_reference(store,project,key) if quality_decision
                     else failed_plan_reference(store,project,key))
             flow.setdefault('rework_history',[]).append(deepcopy(flow['rework']))
         elif flow.get('rework'):
@@ -677,6 +757,10 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False)
         job['rework_reference']=dict(project=pid,version=prior['version'],plan_hash=prior['sha256'],
             decision_hash=digest(flow['decisions'][-1]),input_hash=digest(answers))
         if parent:job['rework_reference']['previous_failed_attempt']=parent
+        if script_recovery:
+            old=store.load(previous_job)
+            audit=script_review_recovery_audit(old,flow['rework'])
+            seed_recovered_script_job(job,old,audit)
         store.save(job)
         flow['rework']=dict(job=job['id'],status='pending',decision_hash=job['rework_reference']['decision_hash'])
         workflow.store.save(project)

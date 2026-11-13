@@ -248,6 +248,19 @@ class MissionOneTests(unittest.TestCase):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
 
+    def test_rework_plan_wire_and_http_error_diagnostics_offline(self):
+        self.strict_plan_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+        from autonomous_gemini import GeminiCompany
+        for raw,expected in ((b'{"error":{"code":503,"status":"UNAVAILABLE","code":400}}','unreadable_or_invalid'),
+                             (b'{"error":{"code":NaN}}','unreadable_or_invalid'),
+                             (b'private HTML instead of JSON','unreadable_or_invalid'),
+                             (b'x'*4097,'too_large'),(b'[]','unexpected_shape')):
+            entry={};error=HTTPError(ENDPOINT,503,'private',{},BytesIO(raw))
+            GeminiCompany._record_http_error_body(entry,error)
+            self.assertEqual(entry['provider_error_body'],{'parse':expected})
+            error.close()
+
     def test_disabled_zero_send_recovery_requires_explicit_click(self):
         self.disabled_recovery_fixture=True
         self.test_rework_consent_size_limit_and_approved_start()
@@ -1593,6 +1606,10 @@ class MissionOneTests(unittest.TestCase):
         def run():return company.run(pid,expected_state_hash=provider.load(pid)['storage_hash'])
         with self.assertRaises(CompanyError):run()
         body=state['proposal']
+        if getattr(self,'strict_plan_fixture',False):
+            old_contract=deepcopy(body);old_contract['rework_scope']['plan_contract_hash']='old-plan-contract'
+            with self.assertRaisesRegex(CompanyError,'rework_plan_contract_changed'):
+                provider.approve(pid,old_contract,review_hash=digest(old_contract),owner_confirmed=True)
         if getattr(self,'new_attempt_fixture',False) and not getattr(self,'unavailable_fixture',False):
             # Historical fixture uses the old signed plan contract, not the new one.
             body['rework_scope'].pop('plan_contract_hash')
@@ -1603,6 +1620,11 @@ class MissionOneTests(unittest.TestCase):
         bad=deepcopy(body);bad['rework_scope']['reference']['plan_hash']='0'*64
         with self.assertRaises(CompanyError):provider.approve(pid,bad,review_hash=digest(bad),owner_confirmed=True)
         self.studio.action('workspace',project,'rework-consent',dict(review_hash=digest(body),confirm_free_account=True,confirm_data_policy=True))
+        if getattr(self,'strict_plan_fixture',False):
+            grant=deepcopy(provider.grant(provider.load(pid)))
+            grant['body']['rework_scope']['plan_contract_hash']='old-plan-contract'
+            with patch.object(provider,'grant',return_value=grant),self.assertRaisesRegex(CompanyError,'rework_new_plan_consent_required'):
+                company._quality_transport_allowed(provider.load(pid))
         if getattr(self,'consent_size_fixture',False):
             from autonomous_live import LiveStore
             self.assertEqual(LiveStore.max_consent_bytes,16384)
@@ -1739,6 +1761,14 @@ class MissionOneTests(unittest.TestCase):
             self.assertEqual(context['quality']['feedback_text'],feedback)
             self.assertEqual(context['quality']['answers']['previous_plan']['sha256'],original['sha256'])
             if phase=='plan':
+                from representative_rework import PLAN_SCHEMA_REFERENCE
+                self.assertEqual(message['output_contract'],PLAN_SCHEMA_REFERENCE)
+                bad=deepcopy(wire);bad['generationConfig']['responseJsonSchema']={}
+                with self.assertRaisesRegex(CompanyError,'rework_schema_changed'):company._validate_payload(bad)
+                bad=deepcopy(wire)
+                bad_message=deepcopy(message);bad_message['output_contract']='changed'
+                bad['contents'][0]['parts'][0]['text']=json.dumps(bad_message)
+                with self.assertRaisesRegex(CompanyError,'rework_schema_reference_changed'):company._validate_payload(bad)
                 if getattr(self,'strict_plan_fixture',False):
                     from representative_rework import PLAN_RULES
                     self.assertIn(PLAN_RULES,wire['systemInstruction']['parts'][0]['text'])
@@ -1796,12 +1826,27 @@ class MissionOneTests(unittest.TestCase):
         self.studio.action('workspace',project,'rework-prepare',dict(account_project='gen-lang-client-0938732315',confirm_free_account=True))
         pending=self.studio.detail('workspace',project)['rework']
         self.studio.action('workspace',project,'rework-consent',dict(review_hash=pending['review_hash'],confirm_free_account=True,confirm_data_policy=True))
-        self.http.reset_mock(side_effect=False);self.http.side_effect=HTTPError(ENDPOINT,503,'fixture',{},None)
+        class ErrorBody(BytesIO):
+            reads=[]
+            def read(self,size=-1):
+                self.reads.append(size);return super().read(size)
+        error_body=ErrorBody(json.dumps(dict(error=dict(code=503,status='UNAVAILABLE',
+            message='PRIVATE goal feedback '+self.key,
+            details=[dict(reason='PRIVATE_ID'),dict(reason='RATE_LIMIT_EXCEEDED',metadata={'key':self.key})]))).encode())
+        self.http.reset_mock(side_effect=False)
+        self.http.side_effect=HTTPError(ENDPOINT,503,'private',{'Retry-After':'7'},error_body)
         with patch('threading.Thread',QueuedThread),patch('representative_rework.ReworkCompany',OfflineRework):
             self.studio.action('workspace',project,'rework-run',{});queued.pop()()
             with self.assertRaises(CompanyError):self.studio.action('workspace',project,'rework-run',{})
         self.assertEqual(self.http.call_count,1)
         self.assertEqual(self.studio.detail('workspace',project)['rework']['status'],'stopped')
+        self.assertTrue(error_body.closed);self.assertEqual(error_body.reads,[4097])
+        failed=provider.load(pending['job']);attempt=failed['real_ai']['attempts'][0]
+        self.assertEqual(len(failed['real_ai']['attempts']),1)
+        self.assertEqual((failed['status'],attempt['status'],attempt['http_status']),('paused','failed',503))
+        self.assertEqual(attempt['retry_after_seconds'],7)
+        self.assertEqual(attempt['provider_error_body'],dict(parse='json_error',code=503,status='UNAVAILABLE',reasons=['RATE_LIMIT_EXCEEDED']))
+        self.assertNotIn('PRIVATE',json.dumps(failed));self.assertNotIn(self.key,json.dumps(failed))
         if getattr(self,'new_attempt_fixture',False):
             for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)
         for path,data in original_bytes.items():self.assertEqual(path.read_bytes(),data)

@@ -11,6 +11,7 @@ from gemini_provider import GeminiFreeAdapter,MODEL,ENDPOINT,COST_POLICY
 from gemini_connection_once import error_category
 from groq_provider import numeric_rate_headers
 from role_json_schema import response_format,matches
+import ai_safety
 
 GEMINI_RULES={**RULES,'provider_cost_must_be_zero':False,'free_account_verification_required':True}
 TOOL_REVIEW_POLICY={'version':1,'scope':'generated_employee_results_and_manager_reviews',
@@ -145,4 +146,45 @@ class GeminiCompany(FreeCompany):
                    'response_validate' if entry.get('response_received_at') else
                    'response_read' if entry.get('http_status')==200 else 'transport_open')
             entry['provider_error_diagnostics']={'category':error_category(exception,stage),'stage':stage}
-        if isinstance(exception,HTTPError):entry['http_status']=exception.code
+        if isinstance(exception,HTTPError):
+            entry['http_status']=exception.code
+            self._record_http_error_body(entry,exception)
+
+    @staticmethod
+    def _record_http_error_body(entry,exception):
+        """One bounded read; retain only allowlisted RPC codes, never provider text."""
+        safe={'parse':'unavailable'}
+        entry['provider_error_body']=safe
+        try:
+            raw=exception.read(4097)
+            if len(raw)>4096:
+                safe['parse']='too_large';return
+            def reject_constant(value):raise ValueError()
+            value=json.loads(raw.decode('utf-8'),object_pairs_hook=ai_safety.unique_response_object,
+                             parse_constant=reject_constant)
+            error=value.get('error') if isinstance(value,dict) else None
+            if not isinstance(error,dict):
+                safe['parse']='unexpected_shape';return
+            safe['parse']='json_error'
+            code=error.get('code');status=error.get('status')
+            if type(code) is int and 400<=code<=599:safe['code']=code
+            if isinstance(status,str) and status in (
+                    'INVALID_ARGUMENT','FAILED_PRECONDITION','OUT_OF_RANGE','UNAUTHENTICATED',
+                    'PERMISSION_DENIED','NOT_FOUND','ALREADY_EXISTS','RESOURCE_EXHAUSTED',
+                    'CANCELLED','DATA_LOSS','UNKNOWN','INTERNAL','UNAVAILABLE','DEADLINE_EXCEEDED',
+                    'UNIMPLEMENTED','ABORTED'):
+                safe['status']=status
+            reasons=[]
+            details=error.get('details',[])
+            if isinstance(details,list):
+                for detail in details[:16]:
+                    if not isinstance(detail,dict):continue
+                    reason=detail.get('reason')
+                    if isinstance(reason,str) and reason in (
+                            'RATE_LIMIT_EXCEEDED','QUOTA_EXCEEDED','API_KEY_INVALID',
+                            'API_KEY_SERVICE_BLOCKED','BILLING_DISABLED','SERVICE_DISABLED') and reason not in reasons:
+                        reasons.append(reason)
+            if reasons:safe['reasons']=reasons
+        except Exception:
+            # Malformed JSON, failed reads, or diagnostics must not mask the HTTP failure.
+            safe.clear();safe['parse']='unreadable_or_invalid'

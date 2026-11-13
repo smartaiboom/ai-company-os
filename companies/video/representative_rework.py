@@ -25,7 +25,7 @@ NOTICE=('원 목표와 representative_feedback을 이전 초안과 비교해 재
 
 
 PLAN_RULES = (
-    'Rework plan contract v2: exactly TWO tasks in order: writer then editor. '
+    'Rework plan contract v3: exactly TWO tasks in order: writer then editor. '
     'Choose your own unique task IDs and criterion IDs. writer.depends_on MUST be []; '
     'editor.depends_on MUST be [the exact writer task ID]. No self, forward, missing or duplicate references. '
     'criteria contains unique IDs. Each task.criteria_ids is a nonempty unique subset of those criterion IDs; '
@@ -34,7 +34,10 @@ PLAN_RULES = (
     'Explain duration_seconds (4–180) in duration_reason and the concrete feedback changes in feedback_response. '
     'Keep all eight script criteria; game-story content is required, never video-making tips. '
     'No correction call or automatic retry is authorized by this contract.'
+    ' Plan wire contract: output_contract references generationConfig.responseJsonSchema; '
+    'the full schema is sent once there. Review wire contracts are unchanged.'
 )
+PLAN_SCHEMA_REFERENCE='Use generationConfig.responseJsonSchema for the complete result contract.'
 
 
 def validate_rework_plan(plan):
@@ -245,6 +248,7 @@ class ReworkCompany(MissionOneCompany):
         if phase in ('plan','review'):
             schema=self._schema(phase);payload['generationConfig']['responseJsonSchema']=schema
             message=parse(payload['contents'][0]['parts'][0]['text']);message['output_contract']=schema
+            if phase=='plan':message['output_contract']=PLAN_SCHEMA_REFERENCE
             payload['contents'][0]['parts'][0]['text']=json.dumps(message,ensure_ascii=False)
         return payload
 
@@ -252,6 +256,9 @@ class ReworkCompany(MissionOneCompany):
         phase=parse(payload['contents'][0]['parts'][0]['text'])['phase']
         if phase in ('plan','review'):
             require(payload['generationConfig']['responseJsonSchema']==self._schema(phase),'rework_schema_changed')
+            if phase=='plan':
+                require(parse(payload['contents'][0]['parts'][0]['text']).get('output_contract')==PLAN_SCHEMA_REFERENCE,
+                        'rework_schema_reference_changed')
             payload=deepcopy(payload);schema=response_format(phase)['json_schema']['schema']
             payload['generationConfig']['responseJsonSchema']=schema
             message=parse(payload['contents'][0]['parts'][0]['text']);message['output_contract']=schema
@@ -343,7 +350,8 @@ def failed_plan_reference(store,project,key):
             and attempt['model']==MODEL and old['active_operation'] in (None,attempt['id']),
             'rework_new_attempt_uncertain')
     if unavailable:
-        require(not old['rework_reference'].get('previous_failed_attempt',{}).get('recovery_scope'),
+        parent=old['rework_reference'].get('previous_failed_attempt',{})
+        require(not parent.get('recovery_scope') or parent.get('contract_hash')!=digest(PLAN_RULES),
                 'rework_same_contract_new_attempt_forbidden')
     grant=parse(store._grant_path(old['id']).read_text());record=grant['record'];body=record['body'];scope=body['rework_scope']
     require(hmac.compare_digest(grant['signature'],store._sign(record)) and record['revoked_at'] is None

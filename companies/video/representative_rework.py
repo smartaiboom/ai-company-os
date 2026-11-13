@@ -867,6 +867,8 @@ def handoff(workflow,pid,provider,*,allow_fixture=False):
             internal_reviews=writer['reviews'],task_history=deepcopy(job['assignments']),manager_plan=job['plan'],
             provenance=job['plan']['source'],representative_feedback=job['quality_inputs']['feedback_text'],
             rework_plan=job['rework_plan'],goal_reviews=job['goal_reviews'],final_evaluation='not_performed_local_handoff',
-            research=prior['research']),flow['plan_versions'])
+            research=prior['research'],
+            **(dict(recovery_source=deepcopy(job['script_recovery'])) if job.get('script_recovery') else {})
+            ),flow['plan_versions'])
         flow['plan_versions'].append(report);flow['rework']['status']='completed'
         workflow._transition(project,'awaiting_plan_approval')

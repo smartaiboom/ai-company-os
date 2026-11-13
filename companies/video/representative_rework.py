@@ -459,7 +459,49 @@ def failed_plan_reference(store,project,key):
                 **(dict(recovery_scope='one_new_plan_after_final_http503_no_retry') if unavailable else {}))
 
 
-def prepare(workflow,pid,key,account,*,previous_job=None):
+def quality_decision_reference(store,project,key):
+    """Allow a new job only after an explicitly recorded CEO correction request."""
+    flow=project['representative'];state=flow.get('rework',{})
+    decision=state.get('quality_decision')
+    require(decision and decision.get('action')=='request_revision'
+            and decision.get('job')==state.get('job'),'quality_revision_decision_required')
+    old=store.load(state['job'])
+    require(state.get('status')=='stopped' and state.get('error')=='manager_stopped'
+            and old['status']=='stopped' and old.get('reason_code')=='manager_stopped'
+            and old.get('phase')=='work' and not old.get('final'),
+            'quality_revision_source_not_stopped')
+    store.check_binding(old)
+    report=progress_view(old,state).get('quality_report')
+    require(report is not None and report.get('decision')=='stop'
+            and decision.get('report_hash')==digest(report)
+            and bool(decision.get('feedback','').strip()),'quality_revision_report_changed')
+    require(all(a.get('status')=='completed' and a.get('http_status')==200
+                and a.get('transport_started_at') and a.get('finished_at')
+                for a in old['real_ai']['attempts'])
+            and not any(a.get('status')=='reserved' for a in old['real_ai']['attempts'])
+            and not old.get('active_operation'),'quality_revision_uncertain_transport')
+    writer=next((t for t in old['assignments'] if t.get('role')=='writer' and t.get('versions')),None)
+    require(writer is not None and len(old.get('sessions',[]))==1,'quality_revision_missing_writer')
+    grant=parse(store._grant_path(old['id']).read_text())
+    record=grant['record'];body=record['body'];scope=body['rework_scope']
+    require(hmac.compare_digest(grant['signature'],store._sign(record))
+            and record.get('revoked_at') is None
+            and old['real_ai']['consent'].get('operating_grant_id')==record['id']
+            and state.get('proposal')==body and scope.get('reference')==old['rework_reference']
+            and body['quality_contract']['inputs']==old['quality_inputs']
+            and body.get('free_only') is True and body.get('model')==MODEL
+            and body.get('endpoint')==ENDPOINT
+            and scope.get('account_project')==MISSION_ACCOUNT
+            and scope.get('data_policy')==DATA_POLICY
+            and hmac.compare_digest(scope.get('credential_binding',''),_binding(old['id'],key)),
+            'quality_revision_history_invalid')
+    return dict(job=old['id'],state_hash=old['storage_hash'],grant_hash=digest(grant),
+                quality_decision_hash=digest(decision),quality_report_hash=digest(report),
+                writer_version_hash=digest(writer['versions'][-1]),
+                scope='new_job_after_ceo_quality_instruction')
+
+
+def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False):
     with workflow.store.lock(pid):
         project=workflow.store.load(pid);flow=project['representative']
         require(flow['stage']=='plan_revision','rework_stage')
@@ -467,7 +509,8 @@ def prepare(workflow,pid,key,account,*,previous_job=None):
         parent=None
         if previous_job is not None:
             require(flow.get('rework',{}).get('job')==previous_job,'rework_stale_new_attempt')
-            parent=failed_plan_reference(store,project,key)
+            parent=(quality_decision_reference(store,project,key) if quality_decision
+                    else failed_plan_reference(store,project,key))
             flow.setdefault('rework_history',[]).append(deepcopy(flow['rework']))
         elif flow.get('rework'):
             if flow['rework']['decision_hash']==digest(flow['decisions'][-1]):return
@@ -480,9 +523,20 @@ def prepare(workflow,pid,key,account,*,previous_job=None):
                 existing=store.load(path.stem)
                 require(existing['id'] in archived or existing.get('rework_reference',{}).get('decision_hash')!=digest(flow['decisions'][-1]),'rework_orphan_exists')
         answers=snapshot(project)
+        if quality_decision:
+            old=store.load(previous_job);decision=flow['rework']['quality_decision']
+            writer=next(t for t in old['assignments'] if t['role']=='writer' and t.get('versions'))
+            answers['quality_followup']=dict(
+                representative_instruction=decision['feedback'],
+                source_job=old['id'],source_report_hash=decision['report_hash'],
+                failed_checks=deepcopy(old['quality_followups'][-1].get('failed_checks',{})),
+                manager_feedback=old['quality_followups'][-1].get('feedback',''),
+                previous_writer=deepcopy(parse(writer['versions'][-1]['content'])))
         job=store.create(project['goal'],inputs=dict(domain='video',target_segment=flow['audience'],answers=answers,
             constraints=dict(aspect='9:16',language='한국어',platform='YouTube Shorts'),
-            capabilities=dict(script_contract=SCRIPT_CONTRACT),experiences=[],feedback_text=flow['decisions'][-1]['feedback']),
+            capabilities=dict(script_contract=SCRIPT_CONTRACT),experiences=[],
+            feedback_text=(flow['decisions'][-1]['feedback']+
+                (' | 대표 추가 수정 지시: '+flow['rework']['quality_decision']['feedback'] if quality_decision else ''))),
             max_calls=None,max_revisions_per_task=1,max_total_revisions=1)
         prior=flow['plan_versions'][-1]
         job['rework_reference']=dict(project=pid,version=prior['version'],plan_hash=prior['sha256'],

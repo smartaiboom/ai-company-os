@@ -219,7 +219,8 @@ class Studio:
         from autonomous_gemini35 import Gemini35Config,MODEL,ENDPOINT
         from video_mission_one import MISSION_ACCOUNT,_binding
         config=Gemini35Config.from_env()
-        preparing=name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-cap-prepare','rework-consent')
+        preparing=name in ('rework-prepare','rework-new-prepare','rework-quality-prepare',
+                           'rework-script-recover-prepare','rework-cap-prepare','rework-consent')
         if preparing:
             # Preparing a proposal does not execute Gemini. Missing runtime
             # model/endpoint env must not block drafting a fixed free-model scope.
@@ -238,13 +239,14 @@ class Studio:
             return
         if preparing and name!='rework-consent':
             followup=name=='rework-quality-prepare'
+            script_recovery=name=='rework-script-recover-prepare'
             exact(body,('account_project','confirm_free_account','previous_job')
-                  if name in ('rework-new-prepare','rework-quality-prepare')
+                  if name in ('rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare')
                   else ('account_project','confirm_free_account'))
             require(body['confirm_free_account'] is True and body['account_project']==MISSION_ACCOUNT,'rework_free_project_required')
             prepare(self.workflow,pid,config.api_key,body['account_project'],
                 previous_job=body['previous_job'] if name!='rework-prepare' else None,
-                quality_decision=followup)
+                quality_decision=followup,script_recovery=script_recovery)
             return
         provider=ReworkStore(self.stores['workspace'].root/'representative_rework')
         with self.stores['workspace'].lock(pid):
@@ -644,7 +646,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-cap-prepare)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

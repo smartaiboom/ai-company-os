@@ -161,14 +161,16 @@ class Studio:
             replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]),progress=progress,
             quality_decision=state.get('quality_decision'),
             quality_report_hash=digest(progress['quality_report']) if progress.get('quality_report') else None,
-            quality_script=next((parse(t['versions'][-1]['content']).get('transcript','')
+            quality_script=next((json.loads(t['versions'][-1]['content']).get('transcript','')
                  for t in job.get('assignments',[]) if t['role']=='writer' and t.get('versions')),None))
 
     def rework_quality_decide(self,pid,body):
         """Record an owner decision; never resume or reuse a failed transport."""
         exact(body,('job','report_hash','action','feedback'))
         require(body['action'] in ('request_revision','hold'),'invalid_quality_decision')
-        text(body['feedback'],2000,empty=body['action']=='hold')
+        require(isinstance(body['feedback'],str) and len(body['feedback'])<=2000
+                and (body['action']=='hold' or bool(body['feedback'].strip())),
+                'invalid_quality_feedback')
         from representative_rework import ReworkStore,progress_view
         with self.stores['workspace'].lock(pid):
             project=self.stores['workspace'].load(pid)

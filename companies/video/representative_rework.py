@@ -238,15 +238,45 @@ class ReworkStore(QualityProviderStore):
     _limits=staticmethod(Gemini35Store._limits)
 
     def require_unstarted(self,p):
-        # The provider reservation in real_ai.attempts is the sole durable send ledger.
+        # A recovered plan/writer is local provenance only, never a prior send in this job.
         require(self.valid_mode(p) and p.get('simulation') is False
-                and p['status']=='ready' and p['phase']=='plan' and not p.get('reason_code')
+                and p['status']=='ready' and not p.get('reason_code')
                 and not p['real_ai']['attempts'] and not p.get('attempts')
                 and not p['sessions'] and not p['active_operation']
                 and not p.get('run_started_at') and not p.get('next_request_at') and not p.get('providers')
-                and not p['plan'] and not p['assignments'] and not p['artifacts'] and not p['final']
+                and not p['artifacts'] and not p['final']
                 and len(p['events'])==1 and p['events'][0]['event']=='operating_scope_approved',
                 'rework_zero_send_not_proven')
+        recovery=p.get('script_recovery')
+        if not recovery:
+            require(p['phase']=='plan' and not p['plan'] and not p['assignments'],
+                    'rework_zero_send_not_proven')
+            return
+        parent=p['rework_reference'].get('previous_failed_attempt',{})
+        require(parent.get('recovery_scope')=='validated_plan_writer_reuse_new_job'
+                and parent['job']==recovery['source_job']
+                and parent['previous_plan_hash']==recovery['original_plan_hash']
+                and parent['previous_writer_hash']==recovery['original_writer_hash']
+                and parent['previous_review_hash']==recovery['original_review_hash']
+                and parent['inspection_hash']==recovery['inspection_hash']
+                and recovery['manager_acceptance'] is False
+                and recovery['source_request_replayed'] is False
+                and p['phase']=='work' and p['plan'] is not None
+                and digest(p['plan'])==recovery['original_plan_hash']
+                and len(p['assignments'])==2
+                and [t['role'] for t in p['assignments']]==['writer','editor'],
+                'rework_recovery_seed_mismatch')
+        writer,editor=p['assignments']
+        require(writer['state']=='revision_requested' and writer['revisions']==0
+                and len(writer['versions'])==1 and len(writer['reviews'])==1
+                and writer['reviews'][0].get('approved_by_manager') is False
+                and writer['reviews'][0].get('source')=='system_recovery_instruction_from_unvalidated_manager_review'
+                and editor['state']=='pending' and not editor['versions'] and not editor['reviews']
+                and not editor['revisions'],'rework_recovery_seed_mismatch')
+        original=deepcopy(writer['versions'][0]);original.pop('reused_from_job',None)
+        require(digest(original)==recovery['original_writer_hash']
+                and writer['reviews'][0]['original_review_hash']==recovery['original_review_hash'],
+                'rework_recovery_seed_mismatch')
 
     def verify_disabled_recovery(self,p,state,key):
         require(state.get('status')=='stopped' and state.get('error')=='gemini_execution_disabled',

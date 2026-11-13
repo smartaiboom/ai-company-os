@@ -202,9 +202,19 @@ class Studio:
         from autonomous_gemini35 import Gemini35Config,MODEL,ENDPOINT
         from video_mission_one import MISSION_ACCOUNT,_binding
         config=Gemini35Config.from_env()
-        require(config.model==MODEL and config.endpoint==ENDPOINT,'rework_fixed_model_required')
+        preparing=name in ('rework-prepare','rework-new-prepare','rework-quality-prepare')
+        if preparing:
+            # Preparing a proposal does not execute Gemini. Missing runtime
+            # model/endpoint env must not block drafting a fixed free-model scope.
+            # Explicitly configured mismatches remain forbidden.
+            require(os.getenv('GEMINI35_MODEL') in (None,'',MODEL)
+                    and os.getenv('GEMINI35_ENDPOINT') in (None,'',ENDPOINT),
+                    'rework_fixed_model_required')
+        else:
+            require(config.model==MODEL and config.endpoint==ENDPOINT,
+                    'rework_fixed_model_required')
         _binding('rework-local',config.api_key)
-        if name in ('rework-prepare','rework-new-prepare','rework-quality-prepare'):
+        if preparing:
             followup=name=='rework-quality-prepare'
             exact(body,('account_project','confirm_free_account','previous_job')
                   if name in ('rework-new-prepare','rework-quality-prepare')

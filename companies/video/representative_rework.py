@@ -573,7 +573,7 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False)
             capabilities=dict(script_contract=SCRIPT_CONTRACT),experiences=[],
             feedback_text=(flow['decisions'][-1]['feedback']+
                 (' | 대표 추가 수정 지시: '+flow['rework']['quality_decision']['feedback'] if quality_decision else ''))),
-            max_calls=None,max_revisions_per_task=1,max_total_revisions=1)
+            max_calls=7,max_revisions_per_task=1,max_total_revisions=1)
         prior=flow['plan_versions'][-1]
         job['rework_reference']=dict(project=pid,version=prior['version'],plan_hash=prior['sha256'],
             decision_hash=digest(flow['decisions'][-1]),input_hash=digest(answers))
@@ -583,6 +583,33 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False)
         workflow.store.save(project)
         proposal=store.prepare(job['id'],key=key,account_project=account)
         flow['rework']['proposal']=proposal
+        workflow.store.save(project)
+
+
+
+def cap_pending_proposal(workflow,pid,key):
+    """Restrict a not-yet-approved old proposal to seven calls. Never send to a provider."""
+    with workflow.store.lock(pid):
+        project=workflow.store.load(pid)
+        state=project['representative'].get('rework',{})
+        require(state.get('status')=='pending' and state.get('proposal'),'rework_pending_cap_required')
+        store=ReworkStore(workflow.store.root/'representative_rework')
+        job=store.load(state['job'])
+        require(job['status']=='ready' and job['phase']=='plan'
+                and not job.get('sessions') and not job.get('active_operation')
+                and not job['real_ai']['attempts'] and not job['real_ai']['consent']
+                and not store._grant_path(job['id']).exists(),
+                'rework_pending_cap_required')
+        store.check_binding(job)
+        require(state['proposal'].get('initial_state_hash')==job['storage_hash']
+                and state['proposal'].get('rework_scope',{}).get('credential_binding')
+                    ==_binding(job['id'],key),'rework_pending_proposal_changed')
+        cap=job['limits']['max_calls']
+        require(cap is None or cap==7,'rework_pending_cap_required')
+        if cap is None:
+            job['limits']['max_calls']=7
+            store.save(job)
+        state['proposal']=store.prepare(job['id'],key=key,account_project=MISSION_ACCOUNT)
         workflow.store.save(project)
 
 

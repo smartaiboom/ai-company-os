@@ -162,7 +162,12 @@ class Studio:
             try:new_attempt=failed_plan_reference(ReworkStore(self.stores[key].root/'representative_rework'),p,os.getenv('GEMINI_API_KEY',''))
             except CompanyError:pass
         progress=progress_view(job,state)
-        from representative_rework import legacy_quality_report
+        from representative_rework import legacy_quality_report,script_review_recovery_audit
+        audit=script_review_recovery_audit(job,state)
+        if audit:
+            progress['title']='기존 대본·관리자 검토 보존 확인'
+            progress['message']='대본 검토는 내부 검증에서 중단됐습니다. 이전 호출을 반복하지 않고 저장된 자료의 재사용 가능성을 확인합니다.'
+            progress['next_action']='실패 작업은 자동 재실행하지 않습니다. 저장된 대본과 검토 근거를 확인하고 별도 복구 경로를 검토합니다.'
         legacy=legacy_quality_report(job,state)
         if legacy:
             progress['quality_report']=legacy
@@ -178,6 +183,7 @@ class Studio:
             job_status=job['status'],attempts=len(job['real_ai']['attempts']),
             replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]),progress=progress,
             quality_decision=state.get('quality_decision'),
+            recovery_audit=audit,
             quality_report_hash=digest(progress['quality_report']) if progress.get('quality_report') else None,
             quality_script=next((json.loads(t['versions'][-1]['content']).get('transcript','')
                  for t in job.get('assignments',[]) if t['role']=='writer' and t.get('versions')),None))

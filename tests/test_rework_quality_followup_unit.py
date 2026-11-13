@@ -191,5 +191,35 @@ class OwnerQualityDecisionTests(unittest.TestCase):
         self.assertEqual(saved[0]["representative"]["rework"]["status"],"stopped")
 
 
+
+class LegacyUnvalidatedReviewTests(unittest.TestCase):
+    def test_legacy_review_report_requires_completed_but_unvalidated_review(self):
+        from copy import deepcopy
+        from representative_rework import legacy_quality_report
+        job = dict(status='stopped',reason_code='rework_goal_not_met',
+                   phase='work',final=None,assignments=[dict(
+                       role='writer',versions=[dict(content='{"transcript":"가상 대본"}')],reviews=[])],
+                   real_ai=dict(attempts=[dict(
+                       id='original-attempt',phase='review',status='completed',
+                       http_status=200,role_result_status='unvalidated',
+                       transport_started_at='2026-11-13T09:00:00+09:00',
+                       finished_at='2026-11-13T09:01:00+09:00')]))
+        state=dict(status='stopped',error='rework_goal_not_met')
+        before=deepcopy(job)
+        report=legacy_quality_report(job,state)
+        self.assertEqual(report['source'],'legacy_failure_diagnostic_not_manager_review')
+        self.assertEqual(report['original_action'],'unknown_unvalidated')
+        self.assertEqual(report['decision'],'stop')
+        self.assertEqual(job,before)
+        for field,value in [('status','reserved'),('role_result_status','validated'),
+                            ('http_status',503),('phase','execute')]:
+            changed=deepcopy(job)
+            changed['real_ai']['attempts'][-1][field]=value
+            self.assertIsNone(legacy_quality_report(changed,state))
+        changed=deepcopy(job);changed['assignments'][0]['reviews'].append({'action':'accept'})
+        self.assertIsNone(legacy_quality_report(changed,state))
+        self.assertIsNone(legacy_quality_report(job,dict(status='running',error='rework_goal_not_met')))
+
+
 if __name__ == "__main__":
     unittest.main()

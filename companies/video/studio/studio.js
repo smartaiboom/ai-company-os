@@ -237,7 +237,8 @@ function reworkPanel(p) {
       <p><strong>AI 관리자 검토 근거</strong></p><pre>${h(JSON.stringify(progress.quality_report.evidence||{},null,2))}</pre>
       <p><strong>수정 제안</strong></p><p>${h(progress.quality_report.feedback||'구체적인 수정 지시가 기록되지 않았습니다.')}</p>
       ${r.quality_decision?`<p><strong>대표 결정:</strong> ${h(r.quality_decision.action==='request_revision'?'수정 지시 기록됨':'보류')} · ${h(r.quality_decision.feedback||'추가 의견 없음')}</p>
-      <p class="muted">수정 지시를 저장했지만 새 AI 작업을 시작하지는 않았습니다. 새 전송은 별도 실행 범위와 동의가 필요합니다.</p>`
+      <p class="muted">수정 지시를 저장했지만 새 AI 작업을 시작하지는 않았습니다. 새 전송은 별도 실행 범위와 동의가 필요합니다.</p>
+      ${r.quality_decision.action==='request_revision'?'<button class="button secondary" data-action="rework-quality-prepare">수정 지시 기반 새 AI 작업 준비</button>':''}`
       :`<button class="button secondary" data-action="rework-quality-revise">수정 지시 남기기</button>
        <button class="button ghost" data-action="rework-quality-hold">판단 보류</button>`}
       </section>`:''}
@@ -414,9 +415,9 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
-  else if (['rework-prepare','rework-new-prepare'].includes(button.dataset.action)) {
+  else if (['rework-prepare','rework-new-prepare','rework-quality-prepare'].includes(button.dataset.action)) {
     modal('AI 재작업 동의 준비',`<p>저장된 피드백을 사용합니다. 지금은 제안만 준비하며 API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
-      '제안 준비',async data=>{await api(detailApi(detail)+'/'+button.dataset.action,{account_project:data.get('account_project'),confirm_free_account:data.has('free'),...(button.dataset.action==='rework-new-prepare'?{previous_job:detail.rework.job}:{})});return {message:'새 동의 제안을 확인하세요.'};});
+      '제안 준비',async data=>{await api(detailApi(detail)+'/'+button.dataset.action,{account_project:data.get('account_project'),confirm_free_account:data.has('free'),...(['rework-new-prepare','rework-quality-prepare'].includes(button.dataset.action)?{previous_job:detail.rework.job}:{})});return {message:'새 동의 제안을 확인하세요.'};});
   }
   else if (['rework-quality-revise','rework-quality-hold'].includes(button.dataset.action)) {
     const revision=button.dataset.action==='rework-quality-revise';

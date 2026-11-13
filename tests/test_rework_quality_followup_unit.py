@@ -307,5 +307,79 @@ class ReuseProofAuditTests(unittest.TestCase):
         self.assertFalse(invalid['safe_for_recovery_proposal'])
 
 
+
+class ScriptRecoverySeedTests(unittest.TestCase):
+    def test_old_job_is_not_mutated_and_new_job_starts_with_writer_revision(self):
+        from copy import deepcopy
+        from autonomous_company import digest
+        from representative_rework import seed_recovered_script_job
+        inspection=dict(defects=[dict(issue='caption_width',correction='자막을 줄이세요',evidence='긴 자막')])
+        old=dict(id='qualityprovider-old',plan=dict(source='provider_model_claim',criteria=[]),
+            rework_plan=dict(duration_seconds=25),
+            quality_inputs=dict(target_segment='게임 시청자'),
+            real_ai=dict(attempts=[dict(phase='plan'),dict(phase='execute'),dict(phase='review')]),
+            assignments=[
+                dict(id='writer',role='writer',state='awaiting_ai_review',revisions=0,
+                     versions=[dict(content='{"transcript":"게임 사건 대본"}',revision=1)],
+                     reviews=[dict(action='revise',feedback='긴 자막을 줄이세요')]),
+                dict(id='editor',role='editor',state='pending',revisions=0,
+                     versions=[],reviews=[]),
+            ])
+        audit=dict(safe_for_recovery_proposal=True,inspection_hash=digest(inspection))
+        before=deepcopy(old)
+        new=dict(plan=None,assignments=[],phase='plan')
+        with patch('script_quality.inspect_script',return_value=inspection):
+            seed_recovered_script_job(new,old,audit)
+        self.assertEqual(old,before)
+        self.assertEqual(new['phase'],'work')
+        self.assertEqual(new['plan'],old['plan'])
+        self.assertEqual(new['assignments'][0]['state'],'revision_requested')
+        self.assertEqual(new['assignments'][0]['versions'][0]['reused_from_job'],old['id'])
+        self.assertEqual(new['assignments'][0]['reviews'][0]['source'],
+                         'system_recovery_instruction_from_unvalidated_manager_review')
+        self.assertFalse(new['assignments'][0]['reviews'][0]['approved_by_manager'])
+        self.assertIn('caption_width',new['assignments'][0]['reviews'][0]['feedback'])
+        self.assertEqual(new['assignments'][1]['state'],'pending')
+        self.assertFalse(new['script_recovery']['manager_acceptance'])
+        self.assertFalse(new['script_recovery']['source_request_replayed'])
+
+    def test_recovered_job_preflight_accepts_only_proven_unstarted_state(self):
+        from copy import deepcopy
+        from representative_rework import ReworkStore
+        from autonomous_company import digest,CompanyError
+        prior=dict(content='{"transcript":"게임 사건 대본"}',revision=1)
+        review=dict(action='revise',feedback='수정')
+        plan=dict(source='provider_model_claim')
+        recovery=dict(source_job='qualityprovider-old',
+            original_plan_hash=digest(plan),original_writer_hash=digest(prior),
+            original_review_hash=digest(review),inspection_hash='inspection',
+            manager_acceptance=False,source_request_replayed=False)
+        parent=dict(job='qualityprovider-old',recovery_scope='validated_plan_writer_reuse_new_job',
+            previous_plan_hash=digest(plan),previous_writer_hash=digest(prior),
+            previous_review_hash=digest(review),inspection_hash='inspection')
+        job=dict(simulation=False,status='ready',phase='work',reason_code=None,
+            real_ai=dict(attempts=[]),attempts=[],sessions=[],active_operation=None,
+            run_started_at=None,next_request_at=None,providers=None,
+            artifacts={},final=None,plan=plan,script_recovery=recovery,
+            rework_reference=dict(previous_failed_attempt=parent),
+            events=[dict(event='operating_scope_approved')],
+            assignments=[dict(role='writer',state='revision_requested',revisions=0,
+                versions=[dict(**prior,reused_from_job='qualityprovider-old')],
+                reviews=[dict(source='system_recovery_instruction_from_unvalidated_manager_review',
+                    approved_by_manager=False,original_review_hash=digest(review),feedback='수정')]),
+                dict(role='editor',state='pending',revisions=0,versions=[],reviews=[])])
+        store=object.__new__(ReworkStore)
+        with patch.object(ReworkStore,'valid_mode',return_value=True):
+            store.require_unstarted(job)
+            invalid=deepcopy(job)
+            invalid['real_ai']['attempts'].append(dict(phase='plan',status='completed'))
+            with self.assertRaises(CompanyError):
+                store.require_unstarted(invalid)
+            tampered=deepcopy(job)
+            tampered['assignments'][0]['reviews'][0]['approved_by_manager']=True
+            with self.assertRaises(CompanyError):
+                store.require_unstarted(tampered)
+
+
 if __name__ == "__main__":
     unittest.main()

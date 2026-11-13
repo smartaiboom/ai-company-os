@@ -248,6 +248,11 @@ class MissionOneTests(unittest.TestCase):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
 
+    def test_rework_manager_criterion_ids_handoff_to_representative_offline(self):
+        self.rework_criterion_ids_fixture=True
+        self.strict_plan_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
     def test_rework_plan_wire_and_http_error_diagnostics_offline(self):
         self.strict_plan_fixture=True
         self.test_representative_feedback_rework_end_to_end_offline()
@@ -1776,6 +1781,20 @@ class MissionOneTests(unittest.TestCase):
                     self.assertEqual((tasks_schema['minItems'],tasks_schema['maxItems']),(2,2))
                 result=json.loads(manager(phase,context));result['replan']=dict(selected_topic=draft['topic']['title'],duration_seconds=25,
                     duration_reason='기존25초 유지, 최적값 주장은 하지 않음',feedback_response='제작법 대신 게임 장면으로 재기획')
+                if getattr(self,'rework_criterion_ids_fixture',False):
+                    from quality_workflow import _validate_script_plan
+                    from representative_rework import validate_rework_plan
+                    renamed={criterion['id']:'manager_'+criterion['id'] for criterion in result['criteria']}
+                    for criterion in result['criteria']:criterion['id']=renamed[criterion['id']]
+                    for task in result['tasks']:task['criteria_ids']=[renamed[c] for c in task['criteria_ids']]
+                    plan={k:v for k,v in result.items() if k!='replan'}
+                    with self.assertRaisesRegex(CompanyError,'script_plan_handoff_required'):_validate_script_plan(plan)
+                    validate_rework_plan(plan)
+                    for change in (lambda p:p['tasks'][1].update(depends_on=[]),
+                                   lambda p:p['tasks'][0].update(criteria_ids=['missing']),
+                                   lambda p:p['tasks'][1].update(role='writer')):
+                        bad=deepcopy(plan);change(bad)
+                        with self.assertRaises(CompanyError):company._validate_script_plan(bad)
             elif phase=='execute':
                 value=draft if context['assignment']['role']=='writer' else script_editor_handoff(context['previous_results'][0])
                 result=dict(content=value if context['assignment']['role']=='writer' else json.dumps(value),evidence='offline fixture',uncertainty='unassessed')
@@ -1809,6 +1828,12 @@ class MissionOneTests(unittest.TestCase):
         self.assertEqual(flow['stage'],'awaiting_plan_approval');self.assertEqual(len(flow['plan_versions']),2)
         self.assertEqual(flow['plan_versions'][0],original)
         self.assertEqual(flow['plan_versions'][1]['representative_feedback'],feedback)
+        if getattr(self,'rework_criterion_ids_fixture',False):
+            self.assertTrue(all(c['id'].startswith('manager_') for c in result['plan']['criteria']))
+            self.assertEqual([t['role'] for t in result['assignments']],['writer','editor'])
+            self.assertTrue(all(t['state']=='accepted_by_ai_manager' for t in result['assignments']))
+            for path,data in original_bytes.items():self.assertEqual(path.read_bytes(),data)
+            return
         if getattr(self,'unavailable_fixture',False):
             for path,data in preserved.items():self.assertEqual(path.read_bytes(),data)
             for path,data in original_bytes.items():self.assertEqual(path.read_bytes(),data)

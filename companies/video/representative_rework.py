@@ -207,6 +207,10 @@ class ReworkStore(QualityProviderStore):
 class ReworkCompany(MissionOneCompany):
     store_type=ReworkStore
 
+    def _validate_script_plan(self,value):
+        # Rework grants allow manager-selected criterion IDs, unlike production plans.
+        validate_rework_plan(value)
+
     def run(self,project_id,**kwargs):
         job=self.store.load(project_id)
         require(job['status']=='ready' and not job['sessions'] and not job['real_ai']['attempts'],'rework_restart_forbidden')

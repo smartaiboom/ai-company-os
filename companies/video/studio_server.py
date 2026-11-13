@@ -196,10 +196,16 @@ class Studio:
         config=Gemini35Config.from_env()
         require(config.model==MODEL and config.endpoint==ENDPOINT,'rework_fixed_model_required')
         _binding('rework-local',config.api_key)
-        if name in ('rework-prepare','rework-new-prepare'):
-            exact(body,('account_project','confirm_free_account','previous_job') if name=='rework-new-prepare' else ('account_project','confirm_free_account'))
+        if name in ('rework-prepare','rework-new-prepare','rework-quality-prepare'):
+            followup=name=='rework-quality-prepare'
+            exact(body,('account_project','confirm_free_account','previous_job')
+                  if name in ('rework-new-prepare','rework-quality-prepare')
+                  else ('account_project','confirm_free_account'))
             require(body['confirm_free_account'] is True and body['account_project']==MISSION_ACCOUNT,'rework_free_project_required')
-            prepare(self.workflow,pid,config.api_key,body['account_project'],previous_job=body['previous_job'] if name=='rework-new-prepare' else None);return
+            prepare(self.workflow,pid,config.api_key,body['account_project'],
+                previous_job=body['previous_job'] if name!='rework-prepare' else None,
+                quality_decision=followup)
+            return
         provider=ReworkStore(self.stores['workspace'].root/'representative_rework')
         with self.stores['workspace'].lock(pid):
             project=self.project('workspace',pid);state=project['representative'].get('rework')
@@ -441,7 +447,7 @@ class Studio:
         require(key == 'workspace', 'readonly_project')
         if name=='rework-quality-decide':
             self.rework_quality_decide(pid,body)
-        elif name in ('rework-prepare','rework-new-prepare','rework-consent','rework-run','rework-recover'):
+        elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-consent','rework-run','rework-recover'):
             self.rework_action(pid,name,body)
         elif name=='budget-prepare':
             self.budget_prepare(pid,body)

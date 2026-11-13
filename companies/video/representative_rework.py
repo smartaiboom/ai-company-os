@@ -292,30 +292,57 @@ class ReworkCompany(MissionOneCompany):
                     raise
             elif phase=='review':
                 self._semantic=result.pop('goal_review')
+                self._quality_followup=None
+                content=self._review_content
+                artifact=parse(content)
+                def evidence_in_artifact(quote,value):
+                    if isinstance(value,str):return quote in value
+                    if isinstance(value,list):return any(evidence_in_artifact(quote,v) for v in value)
+                    if isinstance(value,dict):return any(evidence_in_artifact(quote,v) for v in value.values())
+                    return False
+                failed={}
+                for name,check in self._semantic.items():
+                    if check['met'] is not True:
+                        failed[name]='not_met'
+                    elif not check['evidence'].strip() or not (
+                        check['evidence'] in content or evidence_in_artifact(check['evidence'],artifact)
+                    ):
+                        failed[name]='evidence_not_found'
+                if result['action']=='accept' and failed:
+                    state=self._rework_state
+                    task=next(t for t in state['assignments'] if t['id']==self._review_task_id)
+                    revisions_available=(task['revisions']<state['limits']['max_revisions_per_task']
+                        and sum(t['revisions'] for t in state['assignments'])<state['limits']['max_total_revisions'])
+                    # Preserve the model's judgment. This is a deterministic safety
+                    # correction, never a claim that the manager actually chose revise.
+                    original=result['action']
+                    reasons=', '.join(name+': '+category for name,category in failed.items())
+                    feedback=('대표 피드백과 원래 게임 이야기 목표를 재확인하고 다음 항목을 수정하세요: '
+                              +reasons+'. 근거 없는 성과 단정은 삭제하거나 미확인으로 표시하세요. '
+                              '수정 후 실제 대본 문장을 근거로 다시 검토받으세요.')
+                    result['action']='revise' if revisions_available else 'stop'
+                    result['feedback']=feedback
+                    result['rationale']=(result['rationale']+' [시스템 품질 검증: '
+                        +('직원 재수정 필요' if revisions_available else '대표 판단 필요')
+                        +'; '+reasons+']')
+                    self._quality_followup=dict(task_id=self._review_task_id,
+                        original_action=original,decision=result['action'],
+                        failed_checks=failed,feedback=feedback,
+                        reason='manager_accept_conflicted_with_goal_review')
+                elif result['action']=='revise':
+                    state=self._rework_state
+                    task=next(t for t in state['assignments'] if t['id']==self._review_task_id)
+                    remaining=(task['revisions']<state['limits']['max_revisions_per_task']
+                        and sum(t['revisions'] for t in state['assignments'])<state['limits']['max_total_revisions'])
+                    if not remaining:
+                        self._quality_followup=dict(task_id=self._review_task_id,
+                            original_action='revise',decision='stop',
+                            failed_checks=failed,feedback=result['feedback'],
+                            reason='revision_limit_reached')
+                        result['action']='stop'
+                        result['rationale']+=' [시스템: 수정 횟수 한도 도달, 대표 판단 필요]'
                 if result['action']=='accept':
-                    content=self._review_content
-                    # Compare quoted evidence with the original script's string fields too.
-                    # JSON serialization escapes newlines and quotes; a literal quote can
-                    # be present in the script yet absent from the serialized JSON string.
-                    artifact=parse(content)
-                    def evidence_in_artifact(quote,value):
-                        if isinstance(value,str):return quote in value
-                        if isinstance(value,list):return any(evidence_in_artifact(quote,v) for v in value)
-                        if isinstance(value,dict):return any(evidence_in_artifact(quote,v) for v in value.values())
-                        return False
-                    failures={name:('not_met' if check['met'] is not True else 'evidence_not_found')
-                              for name,check in self._semantic.items()
-                              if check['met'] is not True or not check['evidence'].strip()
-                              or not (check['evidence'] in content or
-                                      evidence_in_artifact(check['evidence'],artifact))}
-                    if failures:
-                        state=self._rework_state
-                        state['real_ai']['attempts'][-1]['goal_review_diagnostics']=dict(
-                            stage='semantic_review',failed_checks=failures,
-                            response_hash=state['real_ai']['attempts'][-1].get('response_hash'))
-                        self.store.save(state)
-                        raise CompanyError('rework_goal_not_met')
-                    require(not re.search(r'골든타임|(?:쇼츠|영상)\s*(?:제작법|만드는\s*방법)|편집\s*노하우',content),
+                    require(not re.search(r'골든타임|(?:쇼츠|영상)\\s*(?:제작법|만드는\\s*방법)|편집\\s*노하우',content),
                             'rework_obvious_goal_drift')
             raw=json.dumps(value,ensure_ascii=False)
         return super()._parse_role_content(raw,phase)
@@ -328,7 +355,10 @@ class ReworkCompany(MissionOneCompany):
                 rationale=p['rework_plan']['feedback_response'],uncertainty='권리·성과 및 대표 승인 미확정',
                 checks=deepcopy(p['assignments'][0]['reviews'][-1]['checks']),
                 task_refs=[dict(task_id=r['task_id'],revision=r['revision'],result_hash=digest(r)) for r in context['results']])
-        if phase=='review':self._review_content=json.dumps(parse(context['result']['content']),ensure_ascii=False)
+        if phase=='review':
+            self._review_content=json.dumps(parse(context['result']['content']),ensure_ascii=False)
+            self._review_task_id=task_id
+            self._quality_followup=None
         from script_quality import writer_contract,validate_writer_contract
         selection=p.get('rework_plan')
         contract=(writer_contract(p['quality_inputs']['target_segment'],selection['duration_seconds'],MODEL,selection['selected_topic'])
@@ -345,6 +375,9 @@ class ReworkCompany(MissionOneCompany):
             p['rework_plan']=deepcopy(self._decision)
         if phase=='review':
             p.setdefault('goal_reviews',[]).append(dict(task_id=task_id,review=deepcopy(self._semantic)))
+            if self._quality_followup is not None:
+                p.setdefault('quality_followups',[]).append(deepcopy(self._quality_followup))
+                self.store.save(p)
         return result
 
     def _delivery_blockers(self,p):

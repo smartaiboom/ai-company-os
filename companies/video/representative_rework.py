@@ -13,7 +13,7 @@ from quality_workflow import VideoProviderQualityCompany
 from video_mission_one import MissionOneCompany, MISSION_ACCOUNT, DATA_POLICY, _binding
 from role_json_schema import response_format, obj, S, matches
 from representative_workflow import _report
-from script_quality import SCRIPT_CONTRACT, validate_script_editor
+from script_quality import SCRIPT_CONTRACT, script_editor_handoff, validate_script_editor
 
 CHECKS=('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')
 NOTICE=('원 목표와 representative_feedback을 이전 초안과 비교해 재기획하세요. 게임 콘텐츠 자체의 구체적 이야기/장면을 작성하고 '
@@ -43,6 +43,7 @@ CURRENT_PLAYER_COUNT = re.compile(
     r'[^.!?\n]{0,28}(?:실시간|동시\s*접속)|(?:실시간\s*이용자|동시\s*접속자)\s*(?:수\s*)?[:은는이가]?\s*(?:약\s*)?\d'
 )
 MANAGER_RECOVERY_SCOPE = 'validated_writer_manager_review_new_job'
+EDITOR_RECOVERY_SCOPE = 'accepted_writer_system_storyboard_new_job'
 MANAGER_RECOVERY_NOTICE = (
     ' 이 작업은 보존된 대본을 다시 검토하는 단계부터 시작합니다. 각 인용은 한 장면의 한 줄에서 그대로 복사하세요. '
     '줄을 이어 붙이거나 해석을 인용으로 넣지 마세요. 인용 형식 문제와 실제 내용·사실 결함을 구별하세요. '
@@ -55,12 +56,25 @@ MANAGER_RECOVERY_NOTICE = (
 
 def rework_notice(job):
     notice = NOTICE + QUALITY_NOTICE if job.get('content_review_policy') == 1 else NOTICE
+    if editor_review_recovery(job):
+        return (notice + ' 스토리보드는 시스템이 수락된 대본에서 정확히 투영했습니다. '
+                '편집 AI의 제안으로 간주하지 말고 장면·사실·편집 가능성을 관리자 관점에서 검토하세요. '
+                '한 장면의 한 줄을 인용하고 결함이 있으면 책임자에게 보낼 구체적인 이유를 설명한 뒤 stop을 선택하세요.')
     return notice + MANAGER_RECOVERY_NOTICE if manager_review_recovery(job) else notice
 
 
 def manager_review_recovery(job):
     return (job.get('rework_reference', {}).get('previous_failed_attempt', {}).get('recovery_scope')
             == MANAGER_RECOVERY_SCOPE)
+
+
+def editor_review_recovery(job):
+    return (job.get('rework_reference', {}).get('previous_failed_attempt', {}).get('recovery_scope')
+            == EDITOR_RECOVERY_SCOPE)
+
+
+def rework_call_cap(job):
+    return 1 if editor_review_recovery(job) else 7
 
 
 PLAN_RULES = (
@@ -192,6 +206,8 @@ def script_review_recovery_audit(job,state):
 
 
 def review_recovery_audit(job, state):
+    if state.get('error') == 'script_editor_handoff_mismatch':
+        return editor_handoff_recovery_audit(job, state)
     if state.get('error') != 'repeated_employee_result':
         return script_review_recovery_audit(job, state)
     if not (state.get('status') == job.get('status') == 'stopped'
@@ -248,6 +264,51 @@ def review_recovery_audit(job, state):
                 manager_feedback=reviews[0]['manager_review']['feedback'],
                 defect_count=len(inspection['defects']), inspection_hash=digest(inspection),
                 missing_issue_ids=list(failed))
+
+
+def editor_handoff_recovery_audit(job, state):
+    attempts = job['real_ai']['attempts']
+    tasks = job.get('assignments', [])
+    if not (manager_review_recovery(job) and state.get('status') == job.get('status') == 'stopped'
+            and job.get('reason_code') == 'script_editor_handoff_mismatch' and job.get('phase') == 'work'
+            and job.get('plan') and job.get('rework_plan') and not job.get('final') and not job.get('artifacts')
+            and len(job.get('sessions', [])) == 1 and len(attempts) == 2
+            and [t['role'] for t in tasks] == ['writer', 'editor']):
+        return None
+    writer, editor = tasks
+    review, failed = attempts
+    if not (writer['state'] == 'accepted_by_ai_manager' and len(writer['versions']) == len(writer['reviews']) == 1
+            and writer['reviews'][0]['action'] == 'accept' and not writer['revisions']
+            and editor['state'] == 'pending' and not editor['versions'] and not editor['reviews']
+            and editor['depends_on'] == [writer['id']]
+            and review['phase'] == 'review' and review['task_id'] == writer['id']
+            and review['role_result_status'] == 'validated'
+            and failed['phase'] == 'execute' and failed['task_id'] == editor['id']
+            and failed['role_result_status'] == 'json_parsed' and job.get('active_operation') == failed['id']
+            and all(a['status'] == 'completed' and a.get('http_status') == 200
+                    and a.get('response_hash') and a.get('transport_started_at') and a.get('finished_at')
+                    and a.get('session_id') == job['sessions'][0]['id'] for a in attempts)
+            and any(e.get('event') == 'system_safety_stop' and e.get('code') == 'script_editor_handoff_mismatch'
+                    for e in job.get('events', []))):
+        return None
+    version, accepted = writer['versions'][0], writer['reviews'][0]
+    recovery = job['script_recovery']
+    original = {k: v for k, v in version.items() if k != 'reused_from_job'}
+    if not (review['result_hash'] == digest(version)
+            and review['response_hash'] == digest({k: accepted[k] for k in CONTRACTS['review']})
+            and version.get('reused_from_job') == recovery['source_job']
+            and digest(original) == recovery['original_writer_hash']
+            and digest(job['plan']) == recovery['original_plan_hash']):
+        return None
+    from script_quality import inspect_script
+    try:
+        inspection = inspect_script(parse(version['content']), job['quality_inputs']['target_segment'],
+                                    mock=False, target_duration=job['rework_plan']['duration_seconds'])
+        projection = script_editor_handoff(version)
+    except CompanyError:
+        return None
+    return dict(kind='editor_handoff_after_mismatch', safe_for_recovery_proposal=not inspection['defects'],
+                inspection_hash=digest(inspection), projection_hash=digest(projection))
 
 
 def progress_view(job,state):
@@ -357,13 +418,14 @@ class ReworkStore(QualityProviderStore):
             return
         parent=p['rework_reference'].get('previous_failed_attempt',{})
         manager_first = parent.get('recovery_scope') == MANAGER_RECOVERY_SCOPE
-        require((manager_first or parent.get('recovery_scope')=='validated_plan_writer_reuse_new_job')
+        editor_first = editor_review_recovery(p)
+        require((editor_first or manager_first or parent.get('recovery_scope')=='validated_plan_writer_reuse_new_job')
                 and parent['job']==recovery['source_job']
                 and parent['previous_plan_hash']==recovery['original_plan_hash']
                 and parent['previous_writer_hash']==recovery['original_writer_hash']
                 and parent['previous_review_hash']==recovery['original_review_hash']
                 and parent['inspection_hash']==recovery['inspection_hash']
-                and recovery['manager_acceptance'] is False
+                and recovery['manager_acceptance'] is editor_first
                 and recovery['source_request_replayed'] is False
                 and p['phase']=='work' and p['plan'] is not None
                 and digest(p['plan'])==recovery['original_plan_hash']
@@ -371,6 +433,19 @@ class ReworkStore(QualityProviderStore):
                 and [t['role'] for t in p['assignments']]==['writer','editor'],
                 'rework_recovery_seed_mismatch')
         writer,editor=p['assignments']
+        if editor_first:
+            require(writer['state']=='accepted_by_ai_manager' and not writer['revisions']
+                    and len(writer['versions'])==len(writer['reviews'])==1
+                    and digest(writer['versions'][0])==recovery['original_writer_hash']
+                    and digest(writer['reviews'][0])==recovery['original_review_hash']
+                    and writer['reviews'][0]['action']=='accept'
+                    and editor['state']=='awaiting_ai_review' and not editor['reviews'] and not editor['revisions']
+                    and len(editor['versions'])==1 and recovery['initial_task_state']=='awaiting_editor_review'
+                    and editor['versions'][0]['task_id']==editor['id']
+                    and digest(p['rework_plan'])==parent['previous_replan_hash'],
+                    'rework_recovery_seed_mismatch')
+            validate_system_storyboard(writer['versions'][0], editor['versions'][0], parent)
+            return
         require(writer['revisions']==0 and len(writer['versions'])==1
                 and writer['versions'][0].get('reused_from_job')==recovery['source_job']
                 and editor['state']=='pending' and not editor['versions'] and not editor['reviews']
@@ -423,6 +498,9 @@ class ReworkStore(QualityProviderStore):
 
     def _check_contract(self,p,b):
         self.check_binding(p);scope=b.get('rework_scope',{})
+        if editor_review_recovery(p):
+            require(p['limits']==dict(max_calls=1,max_revisions_per_task=0,max_total_revisions=0),
+                    'rework_pending_cap_required')
         require(scope.get('reference')==p['rework_reference'] and scope.get('account_project')==MISSION_ACCOUNT
                 and scope.get('data_policy')==DATA_POLICY and scope.get('new_youtube_calls')==0
                 and scope.get('automatic_retry') is False and scope.get('instructions_hash')==digest(rework_notice(p)),
@@ -442,7 +520,7 @@ class ReworkCompany(MissionOneCompany):
     def run(self,project_id,**kwargs):
         job=self.store.load(project_id)
         require(job['status']=='ready' and not job['sessions'] and not job['real_ai']['attempts'],'rework_restart_forbidden')
-        if manager_review_recovery(job):
+        if manager_review_recovery(job) or editor_review_recovery(job):
             self.store.grant(job)
             self.store.require_unstarted(job)
         return super().run(project_id,**kwargs)
@@ -532,7 +610,8 @@ class ReworkCompany(MissionOneCompany):
                 artifact=parse(content)
                 state = getattr(self, '_rework_state', None) or {}
                 enhanced = state.get('content_review_policy') == 1
-                manager_first = manager_review_recovery(state)
+                editor_first = editor_review_recovery(state)
+                manager_first = manager_review_recovery(state) or editor_first
                 def evidence_in_artifact(quote,value):
                     if isinstance(value,str):return quote in value
                     if isinstance(value,list):return any(evidence_in_artifact(quote,v) for v in value)
@@ -570,14 +649,16 @@ class ReworkCompany(MissionOneCompany):
                     quote in result['feedback'] and any(c.isalnum() for c in result['feedback'].replace(quote,'',1))
                     for quote in quotes)
                 if manager_first and ((result['action']=='accept' and failed)
-                                      or (result['action']=='revise' and not actionable)):
+                                      or (result['action']=='revise' and (editor_first or not actionable))):
                     original = result['action']
                     result['action']='stop'
-                    result['feedback']='검토 근거 또는 문장별 수정 목표를 확인할 수 없어 작가 재수정 전에 중단했습니다.'
+                    result['feedback']=(self._manager_review['feedback'] or '시스템 스토리보드 검토를 수락할 수 없습니다.'
+                        if editor_first else '검토 근거 또는 문장별 수정 목표를 확인할 수 없어 작가 재수정 전에 중단했습니다.')
                     self._quality_followup=dict(task_id=self._review_task_id,
                         original_action=original,decision='stop',failed_checks=failed,
                         evidence={name:self._semantic[name]['evidence'][:200] for name in failed if name in self._semantic},
-                        feedback=result['feedback'],reason='manager_recheck_needs_actionable_evidence')
+                        feedback=result['feedback'],reason='system_storyboard_review_blocked' if editor_first
+                        else 'manager_recheck_needs_actionable_evidence')
                 elif result['action']=='accept' and failed:
                     state=self._rework_state
                     task=next(t for t in state['assignments'] if t['id']==self._review_task_id)
@@ -621,6 +702,9 @@ class ReworkCompany(MissionOneCompany):
         return super()._parse_role_content(raw,phase)
 
     def _call(self,p,provider,phase,task_id,context):
+        if editor_review_recovery(p) and phase != 'finalize':
+            require(not p['real_ai']['attempts'] and phase=='review' and context['assignment']['role']=='editor',
+                    'rework_recovery_seed_mismatch')
         if manager_review_recovery(p) and not p['real_ai']['attempts']:
             require(phase=='review' and context['assignment']['role']=='writer',
                     'rework_recovery_seed_mismatch')
@@ -842,18 +926,37 @@ def script_review_recovery_reference(store,project,key):
     writer=next(t for t in old['assignments'] if t['role']=='writer')
     require(len(old['assignments'])==2 and old['assignments'][1]['role']=='editor'
             and not old['assignments'][1].get('versions')
-            and len(writer['versions'])==1 and writer['reviews'][0]['action']=='revise',
+            and len(writer['versions'])==1 and writer['reviews'][0]['action']==
+            ('accept' if audit.get('kind') == 'editor_handoff_after_mismatch' else 'revise'),
             'rework_script_reuse_not_proven')
     manager_first = audit.get('kind') == 'manager_review_after_repeat'
+    editor_first = audit.get('kind') == 'editor_handoff_after_mismatch'
     return dict(job=old['id'],state_hash=old['storage_hash'],
-                grant_hash=digest(grant),recovery_scope=MANAGER_RECOVERY_SCOPE if manager_first else 'validated_plan_writer_reuse_new_job',
+                grant_hash=digest(grant),recovery_scope=EDITOR_RECOVERY_SCOPE if editor_first else
+                MANAGER_RECOVERY_SCOPE if manager_first else 'validated_plan_writer_reuse_new_job',
                 previous_plan_hash=digest(old['plan']),
                 previous_writer_hash=digest(writer['versions'][-1]),
                 previous_review_hash=digest(writer['reviews'][-1]),
                 inspection_hash=audit['inspection_hash'],
                 previous_attempt_count=len(old['real_ai']['attempts']),
-                previous_review_unvalidated=not manager_first,
-                **({'previous_replan_hash':digest(old['rework_plan'])} if manager_first else {}))
+                previous_review_unvalidated=not (manager_first or editor_first),
+                **({'previous_replan_hash':digest(old['rework_plan'])} if manager_first or editor_first else {}),
+                **({'projection_hash':audit['projection_hash']} if editor_first else {}))
+
+
+def system_storyboard(writer, editor_id):
+    return dict(content=json.dumps(script_editor_handoff(writer), ensure_ascii=False),
+                evidence='수락된 대본의 스토리보드 필드를 시스템에서 그대로 투영했습니다.',
+                uncertainty='창의 연출, 소스 사용권 및 실제 편집 품질은 미확인입니다.',
+                task_id=editor_id, role='editor', revision=1, provider='system', source='deterministic_system')
+
+
+def validate_system_storyboard(writer, version, parent):
+    projection = parse(version['content'])
+    validate_script_editor(projection, [writer])
+    require(digest(projection)==parent['projection_hash']
+            and version==system_storyboard(writer, version['task_id']),
+            'rework_recovery_seed_mismatch')
 
 
 def seed_recovered_script_job(job,old,audit):
@@ -866,7 +969,8 @@ def seed_recovered_script_job(job,old,audit):
         target_duration=old['rework_plan']['duration_seconds'])
     require(digest(inspection)==audit['inspection_hash'],'rework_script_reuse_changed')
     manager_first = audit.get('kind') == 'manager_review_after_repeat'
-    initial_state = 'awaiting_ai_review' if manager_first else 'revision_requested'
+    editor_first = audit.get('kind') == 'editor_handoff_after_mismatch'
+    initial_state = 'awaiting_editor_review' if editor_first else 'awaiting_ai_review' if manager_first else 'revision_requested'
     missing=[d for d in inspection['defects'] if d['issue'] not in writer['reviews'][-1]['feedback']]
     feedback=(writer['reviews'][-1]['feedback']+
         ('\n[시스템 검출 결함 — 관리자 원문이 아님]\n'+
@@ -876,6 +980,12 @@ def seed_recovered_script_job(job,old,audit):
     job['assignments']=[]
     for task in old['assignments']:
         copy=deepcopy(task)
+        if editor_first:
+            if copy['role']=='editor':
+                copy['versions']=[system_storyboard(writer['versions'][0], copy['id'])]
+                copy['state']='awaiting_ai_review'
+            job['assignments'].append(copy)
+            continue
         copy['reviews']=[]
         copy['versions']=[]
         copy['revisions']=0
@@ -896,7 +1006,7 @@ def seed_recovered_script_job(job,old,audit):
         original_plan_hash=digest(old['plan']),
         original_writer_hash=digest(writer['versions'][-1]),
         original_review_hash=digest(writer['reviews'][-1]),
-        inspection_hash=audit['inspection_hash'],manager_acceptance=False,
+        inspection_hash=audit['inspection_hash'],manager_acceptance=editor_first,
         original_call_count=len(old['real_ai']['attempts']),
         initial_task_state=initial_state,source_request_replayed=False)
     return job
@@ -925,7 +1035,8 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False,
                 existing=store.load(path.stem)
                 require(existing['id'] in archived or existing.get('rework_reference',{}).get('decision_hash')!=digest(flow['decisions'][-1]),'rework_orphan_exists')
         manager_first = parent and parent.get('recovery_scope') == MANAGER_RECOVERY_SCOPE
-        inherited = store.load(previous_job)['quality_inputs'] if manager_first else None
+        editor_first = parent and parent.get('recovery_scope') == EDITOR_RECOVERY_SCOPE
+        inherited = store.load(previous_job)['quality_inputs'] if manager_first or editor_first else None
         answers=deepcopy(inherited['answers']) if inherited else snapshot(project)
         if quality_decision:
             old=store.load(previous_job);decision=flow['rework']['quality_decision']
@@ -945,7 +1056,8 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False,
             capabilities=dict(script_contract=SCRIPT_CONTRACT),experiences=[],
             feedback_text=(inherited['feedback_text'] if inherited else flow['decisions'][-1]['feedback']+
                 (' | 대표 추가 수정 지시: '+flow['rework']['quality_decision']['feedback'] if quality_decision else ''))),
-            max_calls=7,max_revisions_per_task=1,max_total_revisions=1)
+            max_calls=1 if editor_first else 7,
+            max_revisions_per_task=0 if editor_first else 1,max_total_revisions=0 if editor_first else 1)
         prior=flow['plan_versions'][-1]
         job['content_review_policy']=1
         job['rework_reference']=dict(project=pid,version=prior['version'],plan_hash=prior['sha256'],
@@ -1008,6 +1120,7 @@ def handoff(workflow,pid,provider,*,allow_fixture=False):
             require(archived is not None,'rework_recovery_source_changed')
             audit=review_recovery_audit(old,archived)
             manager_first = parent.get('recovery_scope') == MANAGER_RECOVERY_SCOPE
+            editor_first = editor_review_recovery(job)
             original_writer=next(t for t in old['assignments'] if t['role']=='writer')
             require(audit and audit['safe_for_recovery_proposal']
                     and old['storage_hash']==parent.get('state_hash')
@@ -1015,12 +1128,23 @@ def handoff(workflow,pid,provider,*,allow_fixture=False):
                     and digest(original_writer['versions'][-1])==recovery['original_writer_hash']
                     and digest(original_writer['reviews'][-1])==recovery['original_review_hash']
                     and digest(job['plan'])==recovery['original_plan_hash']
-                    and (not manager_first or digest(job['rework_plan'])==parent['previous_replan_hash'])
-                    and len(job['assignments'][0]['versions']) >= (1 if manager_first else 2)
-                    and job['assignments'][0]['versions'][0].get('reused_from_job')==old['id']
-                    and all(a['role_result_status']=='validated' for a in old['real_ai']['attempts'][:2])
+                    and (not (manager_first or editor_first) or digest(job['rework_plan'])==parent['previous_replan_hash'])
+                    and len(job['assignments'][0]['versions']) >= (1 if manager_first or editor_first else 2)
+                    and (editor_first or job['assignments'][0]['versions'][0].get('reused_from_job')==old['id'])
+                    and all(a['role_result_status']=='validated'
+                            for a in old['real_ai']['attempts'][:1 if editor_first else 2])
                     and old['real_ai']['attempts'][-1]['role_result_status']=='json_parsed',
                     'rework_recovery_source_changed')
+            if editor_first:
+                writer, editor = job['assignments']
+                attempts = job['real_ai']['attempts']
+                require(writer['versions']==original_writer['versions'] and writer['reviews']==original_writer['reviews']
+                        and len(editor['versions'])==len(editor['reviews'])==len(attempts)==1
+                        and editor['reviews'][0]['action']=='accept' and attempts[0]['phase']=='review'
+                        and attempts[0]['task_id']==editor['id']
+                        and attempts[0]['result_hash']==digest(editor['versions'][0]),
+                        'rework_recovery_source_changed')
+                validate_system_storyboard(writer['versions'][0],editor['versions'][0],parent)
         if flow['plan_versions'][-1].get('internal_job')==job['id']:return
         require(flow['stage']=='plan_revision','rework_stage')
         writer,editor=job['assignments'];script=parse(writer['versions'][-1]['content'])

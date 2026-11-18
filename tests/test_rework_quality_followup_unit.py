@@ -114,6 +114,19 @@ class QualityFollowupTests(unittest.TestCase):
         self.assertEqual(self.parse(payload)['action'], 'revise')
         self.assertEqual(self.parse(model_review(evidence='둘째 장면'))['action'], 'accept')
 
+    def test_system_storyboard_review_stops_instead_of_requesting_an_editor_rewrite(self):
+        from representative_rework import EDITOR_RECOVERY_SCOPE
+        self.company._rework_state.update(content_review_policy=1,
+            rework_reference={'previous_failed_attempt': {'recovery_scope': EDITOR_RECOVERY_SCOPE}})
+        self.company._review_content = json.dumps({'shots': [{'narration':'한 문장'}]}, ensure_ascii=False)
+        self.assertEqual(self.parse(model_review())['action'], 'accept')
+        payload = model_review(action='revise', met=False)
+        payload['result']['feedback'] = '“한 문장”의 사실 근거를 보강하세요.'
+        self.assertEqual(self.parse(payload)['action'], 'stop')
+        self.assertEqual(self.company._quality_followup['reason'], 'system_storyboard_review_blocked')
+        self.assertEqual(self.company._manager_review['action'], 'revise')
+        self.assertEqual(self.company._quality_followup['feedback'], payload['result']['feedback'])
+
     def test_named_conditions_are_separate_from_a_valid_quote(self):
         self.company._rework_state['content_review_policy'] = 1
         self.company._rework_state['assignments'][0]['revisions'] = 1

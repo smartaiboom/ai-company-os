@@ -134,7 +134,7 @@ function planPanel(p, plan, previous) {
       <p class="muted">${h(plan.research.uncertainty)}</p></details>` : ''}
     ${plan.task_history ? `<details class="subpanel"><summary>AI 업무·내부 검토 이력</summary>
       <p>${h(plan.manager_plan?.rationale || plan.changes)}</p>
-      ${plan.task_history.map(t=>`<div><h3>${h(eventRoles[t.role] || t.role)} · 버전 ${t.versions.length}</h3>
+      ${plan.task_history.map(t=>`<div><h3>${h(t.versions.at(-1)?.source==='deterministic_system'?'시스템 스토리보드':eventRoles[t.role] || t.role)} · 버전 ${t.versions.length}</h3>
       ${t.reviews.map((r,i)=>`<p>v${i+1} · ${r.action==='accept'?'수락':'수정 요청'} · ${h(r.rationale)} ${h(r.feedback)}</p>`).join('')}</div>`).join('')}</details>` : ''}
     <details class="subpanel" open><summary>대본 전문</summary><p class="script">${h(script.transcript)}</p></details>
     <details class="subpanel" open><summary>장면 스토리보드</summary><div class="beats">${script.narrative_beats.map(beat => `<article class="beat">
@@ -144,7 +144,7 @@ function planPanel(p, plan, previous) {
       ${plan.sources.length ? plan.sources.map(s=>`<p>${h(s.claim)} · ${h(s.observed_at)} · ${h(s.rights)} ${sourceLink(s.url)}</p>`).join('') : '<p class="muted">이 보고서에 등록된 외부 조사 출처가 없습니다.</p>'}
       <p>${h(plan.risks)}</p>${script.unknowns.map(u=>`<p class="muted">${h(u)}</p>`).join('')}</details>
     ${plan.representative_feedback?`<details class="subpanel" open><summary>대표 피드백 반영·관리자 재기획</summary><p>${h(plan.representative_feedback)}</p><p>${h(plan.changes)}</p><pre>${h(JSON.stringify(plan.goal_reviews,null,2))}</pre></details>`:''}
-    <details class="subpanel"><summary>편집 직원 스토리보드 · 이전 버전 비교</summary>${[plan,previous].filter(Boolean).map(v=>`<h3>기획 v${v.version}</h3>${(v.task_history||[]).filter(t=>t.role==='editor').map(t=>`<pre>${h(t.versions.at(-1)?.content||'')}</pre>`).join('')}`).join('')}</details>
+    <details class="subpanel"><summary>스토리보드 · 이전 버전 비교</summary>${[plan,previous].filter(Boolean).map(v=>`<h3>기획 v${v.version}</h3>${(v.task_history||[]).filter(t=>t.role==='editor').map(t=>`<p>${t.versions.at(-1)?.source==='deterministic_system'?'시스템 투영':'편집 직원'}</p><pre>${h(t.versions.at(-1)?.content||'')}</pre>`).join('')}`).join('')}</details>
     <details class="subpanel"><summary>변경사항·보고서 해시</summary><p>${h(plan.changes)}</p><p class="mono">${h(plan.sha256)}</p>
       ${previous ? `<p class="muted">이전 기획 v${previous.version} 대본</p><p class="script">${h(previous.script.transcript)}</p>` : ''}
       <p class="muted">내부 검토 ${plan.internal_reviews.length}건 · ${h(plan.internal_reviews.map(r=>r.action==='accept'?'수락':r.action==='revise'?'수정':'보류').join(' → '))}</p></details>
@@ -263,7 +263,8 @@ function reworkPanel(p) {
       ${facts([['기록된 요청 시도',progress.counts.attempts],['전송 시작 기록',progress.counts.transport_started],['정상 HTTP 응답',progress.counts.http_ok],['서버 검증 완료',progress.counts.server_validated],['전송 실패 기록',progress.counts.failed],['무료 quota / 청구','미확인 / 독립 검증 안 됨']])}
       <p class="muted">HTTP 응답 완료와 결과물 수락은 다릅니다. 시도에는 실패·수신 불명 요청도 포함됩니다.</p>
       <details><summary>기술 진단·호출 기록</summary><p>${h(r.error||r.recovery?.error||'현재 오류 코드 없음')}</p><pre>${h(JSON.stringify(progress.ledger,null,2))}</pre></details>`:''}
-    ${r.recovery_audit?.kind==='manager_review_after_repeat'?`<section class="subpanel"><h3>중복 응답 중단 · 기존 대본 재검토</h3>
+    ${r.recovery_audit?.kind==='editor_handoff_after_mismatch'?`<section class="subpanel"><h3>편집 인계 중단 · 스토리보드 검토</h3><p>수락된 대본에서 스토리보드를 그대로 만들고 AI 관리자가 검토합니다.</p>${r.recovery_audit.safe_for_recovery_proposal?'<button class="button secondary" data-action="rework-script-recover-prepare">스토리보드 관리자 검토 준비</button>':''}</section>`
+    :r.recovery_audit?.kind==='manager_review_after_repeat'?`<section class="subpanel"><h3>중복 응답 중단 · 기존 대본 재검토</h3>
       <p>보존된 첫 대본을 AI 관리자가 다시 검토합니다. 재기획과 첫 대본 작성은 반복하지 않습니다.</p>
       ${r.recovery_audit.safe_for_recovery_proposal?'<button class="button secondary" data-action="rework-script-recover-prepare">기존 대본 관리자 재검토 준비</button>':''}</section>`
     :r.recovery_audit?`<section class="subpanel"><h3>중단된 대본 검토 · 기존 자료 분석</h3>
@@ -526,7 +527,8 @@ main.addEventListener('click',async event=>{
   }
   else if (['rework-prepare','rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare'].includes(button.dataset.action)) {
     const managerRecovery=detail.rework?.recovery_audit?.kind==='manager_review_after_repeat';
-    modal(managerRecovery?'기존 대본 관리자 재검토 준비':button.dataset.action==='rework-script-recover-prepare'?'기존 대본 재사용 · 외부 전송 동의 준비':'AI 재작업 동의 준비',`<p>${managerRecovery?'기존 대본의 관리자 재검토부터 시작하는 별도 작업을 준비합니다. ':button.dataset.action==='rework-script-recover-prepare'?'이전 기획과 대본을 복사한 새 작업을 준비하고 대본 수정부터 진행합니다. 기존 관리자의 실패한 검토는 승인으로 바꾸지 않습니다. ':'저장된 피드백을 사용합니다. '}지금은 제안만 준비하며 Gemini API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
+    const editorRecovery=detail.rework?.recovery_audit?.kind==='editor_handoff_after_mismatch';
+    modal(editorRecovery?'스토리보드 관리자 검토 준비':managerRecovery?'기존 대본 관리자 재검토 준비':button.dataset.action==='rework-script-recover-prepare'?'기존 대본 재사용 · 외부 전송 동의 준비':'AI 재작업 동의 준비',`<p>${editorRecovery?'수락된 대본을 그대로 투영한 시스템 스토리보드의 관리자 검토를 준비합니다. ':managerRecovery?'기존 대본의 관리자 재검토부터 시작하는 별도 작업을 준비합니다. ':button.dataset.action==='rework-script-recover-prepare'?'이전 기획과 대본을 복사한 새 작업을 준비하고 대본 수정부터 진행합니다. 기존 관리자의 실패한 검토는 승인으로 바꾸지 않습니다. ':'저장된 피드백을 사용합니다. '}지금은 제안만 준비하며 Gemini API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
       '제안 준비',async data=>{await api(detailApi(detail)+'/'+button.dataset.action,{account_project:data.get('account_project'),confirm_free_account:data.has('free'),...(['rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare'].includes(button.dataset.action)?{previous_job:detail.rework.job}:{})});return {message:'새 동의 제안을 확인하세요.'};});
   }
   else if (['rework-quality-revise','rework-quality-hold'].includes(button.dataset.action)) {
@@ -560,11 +562,12 @@ main.addEventListener('click',async event=>{
         notice(error.message,true);button.disabled=false;return;
       }
     }
-    if (detail.rework.status!=='pending' || detail.rework.proposal?.limits?.max_calls!==7) {
+    const editorRecovery=detail.rework.proposal?.rework_scope?.reference?.previous_failed_attempt?.recovery_scope==='accepted_writer_system_storyboard_new_job';
+    if (detail.rework.status!=='pending' || detail.rework.proposal?.limits?.max_calls!==(editorRecovery?1:7)) {
       notice('작업 범위와 호출 상한을 확인할 수 없습니다. 동의하지 않았습니다.',true);
       return;
     }
-    modal('새 외부 전송 동의',`<p>이 작업에서 최대 <strong>${h(detail.rework.proposal?.limits?.max_calls??'미설정')}회</strong>의 Gemini 요청을 허용하는 별도 동의입니다. ${detail.rework.proposal?.rework_scope?.reference?.previous_failed_attempt?.recovery_scope==='validated_writer_manager_review_new_job'?'첫 호출은 기존 대본을 대상으로 한 관리자 재검토입니다. 인용 오류만으로 작가를 다시 호출하지 않습니다. ':detail.rework.proposal?.rework_scope?.reference?.previous_failed_attempt?.recovery_scope==='validated_plan_writer_reuse_new_job'?'이전 검증된 기획과 대본을 재사용하고 새 작업은 대본 수정부터 진행합니다. 과거 요청 3회는 재전송하지 않으며 새 요청은 별도 기록됩니다. ':''} AI 관리자·대본 직원·편집 직원의 하위 작업에는 반복 동의하지 않습니다. 원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,
+    modal('새 외부 전송 동의',`<p>이 작업에서 최대 <strong>${h(detail.rework.proposal?.limits?.max_calls??'미설정')}회</strong>의 Gemini 요청을 허용하는 별도 동의입니다. ${detail.rework.proposal?.rework_scope?.reference?.previous_failed_attempt?.recovery_scope==='accepted_writer_system_storyboard_new_job'?'이 경로는 시스템 스토리보드의 관리자 검토 요청 한 번으로 종료합니다. ':detail.rework.proposal?.rework_scope?.reference?.previous_failed_attempt?.recovery_scope==='validated_writer_manager_review_new_job'?'첫 호출은 기존 대본을 대상으로 한 관리자 재검토입니다. 인용 오류만으로 작가를 다시 호출하지 않습니다. ':detail.rework.proposal?.rework_scope?.reference?.previous_failed_attempt?.recovery_scope==='validated_plan_writer_reuse_new_job'?'이전 검증된 기획과 대본을 재사용하고 새 작업은 대본 수정부터 진행합니다. 과거 요청 3회는 재전송하지 않으며 새 요청은 별도 기록됩니다. ':''} AI 관리자·대본 직원·편집 직원의 하위 작업에는 반복 동의하지 않습니다. 원 목표·대표 피드백·이전 대본/스토리보드·공개 관측을 고정 무료 Gemini에 전송합니다. Google 개선 활용·인적 검토 가능. 청구/쿼터 독립 확인 불가. 새 실행이며 과거 동의를 재사용하지 않습니다.</p><label class="check"><input type="checkbox" name="free" required>프로젝트·키·무료 조건을 확인했습니다.</label><label class="check"><input type="checkbox" name="policy" required>표시된 전송 범위와 무료 데이터 정책에 동의합니다.</label>`,
       '이 범위에 동의',async data=>{await api(detailApi(detail)+'/rework-consent',{review_hash:detail.rework.review_hash,confirm_free_account:data.has('free'),confirm_data_policy:data.has('policy')});return {message:'동의 저장. AI 재작업 시작을 눌러 실행하세요.'};});
   }
   else if (['rework-run','rework-recover'].includes(button.dataset.action)) {

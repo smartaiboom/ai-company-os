@@ -194,7 +194,11 @@ class Studio:
         progress=progress_view(job,state)
         from representative_rework import legacy_quality_report,review_recovery_audit
         audit=review_recovery_audit(job,state)
-        if audit and audit['kind']=='manager_review_after_repeat':
+        if audit and audit['kind']=='editor_handoff_after_mismatch':
+            progress['title']='편집 인계 중단 · 스토리보드 재검토 준비'
+            progress['message']='수락된 대본과 관리자 검토를 보존했습니다. 새 작업은 시스템 스토리보드 검토부터 시작합니다.'
+            progress['next_action']='스토리보드 관리자 검토 준비에서 새 동의 범위를 확인하세요.'
+        elif audit and audit['kind']=='manager_review_after_repeat':
             progress['title']='중복 응답 중단 · 관리자 재검토 준비'
             progress['message']='검증된 첫 대본을 보존했습니다. 이전의 인용 오류는 대본 결함으로 확정되지 않았습니다.'
             progress['next_action']='기존 대본 관리자 재검토 준비에서 새 동의 범위를 검토하세요.'
@@ -373,7 +377,7 @@ class Studio:
             raise CompanyError('mission_worker_unavailable') from None
 
     def rework_action(self,pid,name,body):
-        from representative_rework import prepare,ReworkStore,ReworkCompany,handoff,execution_settings
+        from representative_rework import prepare,ReworkStore,ReworkCompany,handoff,execution_settings,rework_call_cap
         from autonomous_gemini35 import Gemini35Config,MODEL,ENDPOINT
         from video_mission_one import MISSION_ACCOUNT,_binding
         config=Gemini35Config.from_env()
@@ -411,7 +415,8 @@ class Studio:
             project=self.project('workspace',pid);state=project['representative'].get('rework')
             require(state is not None,'rework_prepare_required')
             if name=='rework-consent':
-                require(state.get('proposal',{}).get('limits',{}).get('max_calls')==7,
+                cap=rework_call_cap(provider.load(state['job']))
+                require(state.get('proposal',{}).get('limits',{}).get('max_calls')==cap,
                         'rework_pending_cap_required')
                 exact(body,('review_hash','confirm_free_account','confirm_data_policy'))
                 require(state['status']=='pending' and body['confirm_free_account'] is True and body['confirm_data_policy'] is True
@@ -432,8 +437,9 @@ class Studio:
             else:
                 provider.grant(job);provider.require_unstarted(job)
             require(state['proposal']['rework_scope']['credential_binding']==_binding(job['id'],config.api_key),'rework_key_changed')
-            require(job['limits'].get('max_calls')==7
-                    and state['proposal']['limits'].get('max_calls')==7,
+            cap=rework_call_cap(job)
+            require(job['limits'].get('max_calls')==cap
+                    and state['proposal']['limits'].get('max_calls')==cap,
                     'rework_pending_cap_required')
             state['status']='running';self.stores['workspace'].save(project)
         def worker():

@@ -1022,6 +1022,8 @@ def provider_view(job):
     attempts = [{**{k:a[k] for k in fields if k in a},
                  'usage':a.get('response_diagnostics', {}).get('tokens', {})}
                 for a in job['real_ai']['attempts']]
+    web_attempts = [dict(bucket=a['quota_bucket'], status=a['status'], http_status=a.get('http_status'))
+                    for a in (job.get('employee_web') or {}).get('attempts', [])]
     reason = job.get('reason_code')
     if job['goal'] == GAME_GOAL:
         scope = job['quality_inputs']['capabilities'].get('editorial_scope')
@@ -1032,7 +1034,7 @@ def provider_view(job):
         else:
             reason = GAME_RESEARCH_BLOCKER if scope == GAME_SCOPE else 'mission_old_scope_superseded'
     return dict(id=job['id'], status=job['status'], reason=reason, model=MODEL,
-                attempts=attempts, authorized=job['real_ai']['consent'].get('approved') is True,
+                attempts=attempts, web_attempts=web_attempts, authorized=job['real_ai']['consent'].get('approved') is True,
                 assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
                              for t in job['assignments']])
 

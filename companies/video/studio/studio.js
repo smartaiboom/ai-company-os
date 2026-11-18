@@ -179,28 +179,60 @@ function videoPanel(p, video) {
     <p class="muted">글꼴 · ${h(r.font_license)}</p></details>
     ${reviewActions(p,'video',video)}</section>`;
 }
+function missionProposal(proposal) {
+  return `${facts([
+    ['Gemini 모델', proposal.model], ['고정 엔드포인트', proposal.endpoint],
+    ['Gemini 프로젝트', proposal.account_project], ['YouTube 프로젝트', proposal.youtube_project],
+    ['Gemini 호출 상한', proposal.limits.max_calls],
+    ['YouTube 요청 상한', `검색 ${proposal.searches}회 · 영상 조회 ${proposal.videos}회`],
+    ['수정 상한', `작업당 ${proposal.limits.max_revisions_per_task}회 · 전체 ${proposal.limits.max_total_revisions}회`],
+    ['허용 비용', `미화 ${proposal.max_cost}달러 · 무료 조건만`],
+    ['제공자 잔여량', `Gemini ${proposal.remaining_requests} · YouTube 검색 ${proposal.search_remaining} · 일반 단위 ${proposal.units_remaining}`],
+    ['동의 유효 기한', time(proposal.expires_at)]
+  ])}
+    <p>Gemini에 목표, 입력 조건, 직원 지시와 산출물, 선행 결과 및 검토 피드백을 보냅니다. 조사 직원이 작성한 검색어와 발견한 공개 영상 ID는 YouTube Data API로 보냅니다. 조회한 공개 메타데이터는 내부 조사·검토에 사용하며 동의 정책의 보존 기준은 ${h(proposal.metadata_retention_days)}일입니다.</p>
+    <p>Google 무료 서비스의 입력과 출력은 서비스 개선에 사용되거나 사람이 검토할 수 있습니다. 키 소속과 무료 조건은 소유자 확인에 근거합니다. 실패한 시도도 차감되며 자동 재호출이나 유료 전환은 없습니다.</p>
+    <p class="mono">동의 해시 ${h(proposal.review_hash)}</p>`;
+}
 function missionStatus(mission) {
   if (!mission) return '';
   const reasons = {mission_independent_web_research_unavailable:'조사 직원의 웹 접근 도구 미연결 · 게임·길이 근거 조사 불가',
     employee_web_authorization_required:'YouTube 공개 검색·메타데이터 접근의 별도 승인과 키 확인 필요',
     employee_web_failed_no_retry:'직원 웹 조사 실패 또는 미확정 · 자동 재호출 차단',
-    mission_old_scope_superseded:'이전 조사 입력이 들어간 준비본 · 최신 미션 프로젝트를 사용해 주세요.',
+    mission_old_scope_superseded:'이전 조사 범위로 준비된 미션입니다.',
+    mission_consent_incomplete:'서명 파일과 작업의 동의 상태가 일치하지 않습니다.',
+    mission_internal_error:'실행 결과를 확정하지 못했습니다. 기록을 확인해 주세요.',
+    mission_provider_evidence_incomplete:'대표 제출에 필요한 제공자 증거가 부족합니다.',
+    consent_expired:'동의 유효 시간이 지났습니다.',
     provider_rate_limit:'요청 한도에 도달했습니다.', free_request_failed:'요청이 실패했거나 시간 초과되었습니다.',
     known_script_defects:'대본의 검증 결함이 남아 있습니다.', manager_stopped:'관리자가 내부 작업을 중단했습니다.',
     manager_plan_stopped:'관리자가 계획 단계에서 중단했습니다.', optional_technical_cap_reached:'승인된 호출 한도에 도달했습니다.'};
   const terminal = ['stopped','paused','needs_operational_permission'].includes(mission.status);
   const blocked = ['mission_independent_web_research_unavailable','mission_old_scope_superseded'].includes(mission.reason);
-  const status = blocked ? '독립 조사 연결 대기 · 실제 호출 0회' : mission.status==='needs_user_review' ? '내부 검토 완료 · 대표 제출 확인' :
-    terminal ? '실행 중단 · 자동 재호출 없음' : mission.status==='running' ? '기획 작업 진행 중 · 재호출 금지' :
-    mission.authorized ? '외부 전송 승인 기록 있음 · 별도 실행 대기' : '외부 AI 실행 권한 필요';
+  const reason = mission.execution_error || mission.reason;
+  const status = mission.supported === false ? '현재 컷룸 실행은 미션 01 게임 쇼츠 목표에 연결되어 있습니다.' :
+    mission.running ? '기획 작업 진행 중 · 상태 새로고침으로 확인' :
+    mission.status==='needs_user_review' ? '내부 검토 완료 · 대표 제출 확인' :
+    terminal || mission.execution_error ? '실행 중단 · 자동 재호출 없음' :
+    mission.status==='running' ? '실행 결과 미확정 · 중복 실행 차단' :
+    blocked ? '독립 조사 연결 대기 · 실제 호출 0회' :
+    mission.authorized ? '외부 전송 동의 완료 · 명시적 실행 대기' : '외부 AI 실행 권한 필요';
   return `<div class="subpanel"><h3>미션 01 · 기획과 대본</h3><p class="warning">${h(status)}</p>
     ${facts([['모델',mission.model],['기록된 시도',mission.attempts.length]])}
-    ${mission.reason ? `<p class="muted">${h(reasons[mission.reason] || mission.reason)}</p>` : ''}
+    ${reason ? `<p class="muted">${h(reasons[reason] || reason)}</p>` : ''}
     ${mission.assignments.map(t=>`<p class="muted">${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 수락':'작업·검토 대기'} · v${t.versions}</p>`).join('')}
     ${mission.attempts.length ? `<details><summary>요청·응답 기록</summary>${mission.attempts.map(a=>`
       <div class="subpanel"><p>${h(a.phase)} · ${h(a.task_id || a.role_kind)} · ${h(a.status)} · HTTP ${h(a.http_status ?? '미수신')}</p>
-      <p class="muted">${h(time(a.response_received_at || a.reserved_at))} · ${h(a.usage.total_tokens ?? '미확인')} 토큰 · ${a.cost_basis?'무료 계정 확인 기준':'청구 미확인'}</p>
+      <p class="muted">${h(time(a.response_received_at || a.reserved_at))} · ${h(a.usage.total_tokens ?? '미확인')} 토큰 · ${a.cost_basis?'소유자 무료 조건 확인 기준':'청구 미확인'}</p>
       <p class="mono">요청 ${h(a.request_hash)}</p><p class="mono">응답 ${h(a.response_hash || '미수신')}</p></div>`).join('')}</details>` : ''}
+    ${mission.web_attempts?.length ? `<details><summary>YouTube 조회 기록 (${mission.web_attempts.length}회)</summary>${mission.web_attempts.map(a=>
+      `<p>${a.bucket==='search'?'검색':'영상 조회'} · ${h(a.status)} · HTTP ${h(a.http_status ?? '미수신')}</p>`).join('')}</details>` : ''}
+    ${mission.can_connect ? '<button class="button secondary" data-action="mission-connect-web">독립 웹 조사 연결</button>' : ''}
+    ${mission.can_prepare && !mission.proposal ? '<button class="button secondary" data-action="mission-prepare">외부 전송 동의 제안 준비</button>' : ''}
+    ${mission.proposal ? `<div class="subpanel"><h4>외부 전송 동의 제안</h4>${missionProposal(mission.proposal)}
+      <button class="button secondary" data-action="mission-consent">외부 전송 동의 검토</button></div>` : ''}
+    ${mission.can_run ? '<button class="button secondary" data-action="mission-run">미션 01 실행</button>' : ''}
+    ${mission.can_report ? '<button class="button secondary" data-action="mission-report">내부 검토 결과 대표 제출</button>' : ''}
     <button class="button ghost" data-action="refresh">${icon('revision')} 상태 새로고침</button></div>`;
 }
 function operations(p) {
@@ -418,6 +450,38 @@ function produce() {
       return {message:'로컬 영상이 보고되었습니다.'};
     });
 }
+function missionCommand(action) {
+  const project = detail;
+  const mission = project.mission;
+  const submit = (fields={}) => api(detailApi(project)+'/'+action, {job:mission.id, ...fields});
+  if (action === 'mission-prepare') {
+    modal('외부 전송 동의 제안 준비',`<p>Google 프로젝트 <strong>${h(mission.account_project)}</strong></p>
+      <label class="check"><input type="checkbox" name="free" required>서버의 Gemini·YouTube 키가 이 프로젝트에 속하며, 결제 미연결 및 무료 사용 조건을 확인했습니다.</label>
+      <label class="check"><input type="checkbox" name="youtube" required>YouTube Data API의 공개 검색·영상 메타데이터 사용 정책을 확인했습니다.</label>`,
+    '제안 준비', async data => {
+      await submit({account_project:mission.account_project, confirm_free_account:data.has('free'), confirm_youtube_policy:data.has('youtube')});
+      return {message:'동의 제안을 준비했습니다.'};
+    });
+  } else if (action === 'mission-consent') {
+    const proposal = mission.proposal;
+    modal('외부 전송 동의 검토',`<p><strong>목표</strong> ${h(project.goal)}</p>
+      <p><strong>시청자</strong> ${h(project.audience)} · <strong>길이</strong> 관리자 판단</p>
+      ${facts([['언어', proposal.constraints.language], ['플랫폼', proposal.constraints.platform],
+        ['화면 비율', proposal.constraints.aspect], ['제작 제약', proposal.constraints.notes || '미지정']])}
+      ${missionProposal(proposal)}
+      <label class="check"><input type="checkbox" name="accept" required>이 범위의 외부 데이터 전송과 Google 무료 서비스 데이터 제공 정책에 동의합니다.</label>`,
+    '동의 저장', async data => {
+      await submit({review_hash:proposal.review_hash, confirm_free_data_policy:data.has('accept')});
+      return {message:'서명 동의를 저장했습니다. 실행은 별도입니다.'};
+    });
+  } else if (action === 'mission-run') {
+    modal('미션 01 실행','<p>서명한 범위로 Gemini와 YouTube 요청을 시작합니다. 진행 상태는 상태 새로고침에서 확인할 수 있습니다.</p>',
+    '외부 요청 시작', async () => {
+      await submit();
+      return {message:'미션 실행을 요청했습니다.'};
+    });
+  }
+}
 main.addEventListener('click',async event=>{
   const button=event.target.closest('button');
   if (!button) return;
@@ -426,6 +490,15 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (['mission-prepare','mission-consent','mission-run'].includes(button.dataset.action)) missionCommand(button.dataset.action);
+  else if (['mission-connect-web','mission-report'].includes(button.dataset.action)) {
+    button.disabled=true;
+    try {
+      await api(detailApi(detail)+'/'+button.dataset.action, {job:detail.mission.id});
+      await route();
+      notice(button.dataset.action==='mission-connect-web'?'독립 웹 조사를 연결했습니다.':'내부 검토 결과를 제출했습니다.');
+    } catch(error) { notice(error.message,true); button.disabled=false; }
+  }
   else if (['rework-prepare','rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare'].includes(button.dataset.action)) {
     modal(button.dataset.action==='rework-script-recover-prepare'?'기존 대본 재사용 · 외부 전송 동의 준비':'AI 재작업 동의 준비',`<p>${button.dataset.action==='rework-script-recover-prepare'?'이전 기획과 대본을 복사한 새 작업을 준비하고 대본 수정부터 진행합니다. 기존 관리자의 실패한 검토는 승인으로 바꾸지 않습니다. ':'저장된 피드백을 사용합니다. '}지금은 제안만 준비하며 Gemini API 호출은 없습니다.</p><label>Google 프로젝트<input name="account_project" value="gen-lang-client-0938732315" required></label><label class="check"><input type="checkbox" name="free" required>키 소속 프로젝트와 결제 미연결·무료 조건 확인</label>`,
       '제안 준비',async data=>{await api(detailApi(detail)+'/'+button.dataset.action,{account_project:data.get('account_project'),confirm_free_account:data.has('free'),...(['rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare'].includes(button.dataset.action)?{previous_job:detail.rework.job}:{})});return {message:'새 동의 제안을 확인하세요.'};});

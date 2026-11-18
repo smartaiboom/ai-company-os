@@ -1,6 +1,7 @@
 """Local HTTP adapter for the representative video workflow."""
 import argparse
 from copy import deepcopy
+import hmac
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 import json
 import os
@@ -18,7 +19,23 @@ ROOT = Path('data/video_representative_workflow')
 PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
+MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 ERRORS = {
+    'mission_free_account_unverified': '고정 Google 프로젝트의 키 소속, 결제 미연결 및 무료 사용 조건을 확인해 주세요.',
+    'mission_key_missing': '서버 환경에 Gemini 및 YouTube 키가 설정되어 있는지 확인해 주세요.',
+    'mission_key_binding_mismatch': '현재 서버 키가 검토한 동의 범위에 결합된 키와 다릅니다.',
+    'employee_web_key_mismatch': '서버의 YouTube 키가 서명된 동의 범위에 결합된 키와 다릅니다.',
+    'gemini_provider_binding': '서버의 고정 Gemini 모델 및 엔드포인트 설정을 확인해 주세요.',
+    'gemini_execution_disabled': '서버에서 Gemini 실행이 비활성화되어 있습니다.',
+    'operating_consent_required': '이 미션의 서명된 외부 전송 동의가 필요합니다.',
+    'consent_review_changed': '동의 제안이 달라졌습니다. 상태를 새로고침하고 현재 제안을 확인해 주세요.',
+    'consent_expired': '동의 범위의 유효 시간이 지났습니다.',
+    'mission_restart_forbidden': '이미 시작했거나 실행할 수 없는 미션입니다. 상태를 확인해 주세요.',
+    'explicit_owner_confirmation_required': '외부 데이터 전송 및 무료 사용 정책에 명시적으로 동의해 주세요.',
+    'mission_game_goal_required': '현재 컷룸 실행은 미션 01의 게임 쇼츠 목표에 연결되어 있습니다.',
+    'mission_scope_mismatch': '현재 프로젝트의 미션이 달라졌습니다. 상태를 새로고침해 주세요.',
+    'employee_web_policy_confirmation_required': 'YouTube Data API의 공개 검색·메타데이터 사용 정책을 확인해 주세요.',
+    'consent_replay': '이미 저장된 동의가 있습니다. 현재 상태를 확인해 주세요.',
     'budget_local_account_required': '서버의 계정 프로젝트 ID·무료 조건 확인 설정이 필요합니다. 키를 화면에 입력하지 마세요.',
     'budget_new_project_only': '미운영 새 프로젝트만 등록할 수 있습니다. 기존 프로젝트를 변환하지 않습니다.',
     'budget_sixty_second_path_only': '현재 예산 모드는 길이를 60초로 지정한 새 대본 프로젝트에만 연결됩니다.',
@@ -87,6 +104,10 @@ class Studio:
         self.workflow = RepresentativeVideoWorkflow(self.stores['workspace'])
         self.token = secrets.token_urlsafe(32)
         self.creation_lock = threading.Lock()
+        self.mission_lock = threading.Lock()
+        self.mission_proposals = {}
+        self.mission_workers = set()
+        self.mission_errors = {}
         self.budget_company_factory = None
 
     def projects(self, key):
@@ -142,7 +163,10 @@ class Studio:
         if flow.get('mission_one_job'):
             from video_mission_one import MissionOneStore, provider_view
             provider_store = MissionOneStore(store.root/'mission_one_provider')
-            mission = provider_view(provider_store.load(flow['mission_one_job']))
+            job = provider_store.load(flow['mission_one_job'])
+            mission = provider_view(job)
+            if key == 'workspace' and flow['stage'] == 'research_planning':
+                mission.update(self.mission_controls(p, provider_store, job))
         return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p),
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
@@ -217,6 +241,128 @@ class Studio:
                 report_hash=digest(report),job=body['job'],at=now(),
                 requires_new_consent=body['action']=='request_revision')
             self.stores['workspace'].save(project)
+
+    @staticmethod
+    def mission_unstarted(job):
+        return (job['status'] == 'ready' and not job['sessions']
+                and not job['real_ai']['attempts'] and not job['active_operation'])
+
+    def mission_controls(self, project, store, job):
+        from video_mission_one import GAME_GOAL, MISSION_ACCOUNT, WEB_TOOL
+        jid = job['id']
+        with self.mission_lock:
+            proposal = self.mission_proposals.get(jid)
+            running = jid in self.mission_workers
+            error = self.mission_errors.get(jid)
+        eligible = self.mission_unstarted(job) and not running and not error
+        consent_file = store._grant_path(jid).exists()
+        unsigned = eligible and not consent_file and not job['real_ai']['consent']
+        connected = job['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL
+        supported = project['goal'] == GAME_GOAL
+        review = None
+        if (unsigned and proposal and proposal['initial_state_hash'] == job['storage_hash']
+                and proposal['expires_at'] > now()):
+            account, web = proposal['mission_account'], proposal['mission_web']
+            review = dict(review_hash=digest(proposal), expires_at=proposal['expires_at'],
+                          model=proposal['model'], endpoint=proposal['endpoint'],
+                          limits=proposal['limits'], max_cost=proposal['max_cost'],
+                          account_project=account['account_project'], youtube_project=web['account_project'],
+                          remaining_requests=account['remaining_requests'], search_remaining=web['search_remaining'],
+                          units_remaining=web['general_units_remaining'], searches=web['approved_max_searches'],
+                          videos=web['approved_max_videos'],
+                          metadata_retention_days=web['policy']['api_metadata_retention_days'],
+                          constraints=proposal['quality_contract']['inputs']['constraints'])
+        return dict(account_project=MISSION_ACCOUNT, supported=supported, proposal=review, running=running,
+                    execution_error=error or ('mission_consent_incomplete' if eligible and consent_file
+                                              and not job['real_ai']['consent'] else None),
+                    can_connect=supported and unsigned and not connected,
+                    can_prepare=supported and unsigned and connected,
+                    can_run=supported and connected and eligible and consent_file
+                    and job['real_ai']['consent'].get('approved') is True,
+                    can_report=supported and not running and job['status'] == 'needs_user_review')
+
+    def mission_action(self, pid, name, body):
+        from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config
+        from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
+        from video_mission_one import GAME_GOAL, MISSION_ACCOUNT, MissionOneCompany, MissionOneStore, WEB_TOOL, _binding
+        fields = {
+            'mission-prepare': ('account_project', 'confirm_free_account', 'confirm_youtube_policy'),
+            'mission-consent': ('review_hash', 'confirm_free_data_policy'),
+        }
+        exact(body, ('job', *fields.get(name, ())))
+        require(isinstance(body['job'], str), 'mission_scope_mismatch')
+        store = MissionOneStore(self.workflow.store.root/'mission_one_provider')
+        if name == 'mission-connect-web':
+            self.workflow.connect_employee_web(pid, expected_job=body['job'])
+            return
+        if name == 'mission-report':
+            self.workflow.report_plan(pid, provider_store=store, expected_mission_job=body['job'])
+            return
+
+        with self.mission_lock, self.workflow.store.lock(pid):
+            project = self.workflow.store.load(pid)
+            flow = project['representative']
+            jid = flow.get('mission_one_job')
+            require(jid and jid == body['job'] and flow['stage'] == 'research_planning', 'mission_scope_mismatch')
+            require(project['goal'] == GAME_GOAL, 'mission_game_goal_required')
+            job = store.load(jid)
+            require(job['quality_inputs']['capabilities'].get('employee_web_research') == WEB_TOOL,
+                    'mission_independent_web_research_unavailable')
+            require(self.mission_unstarted(job) and jid not in self.mission_workers and jid not in self.mission_errors,
+                    'mission_restart_forbidden')
+            config = Gemini35Config.from_env()
+            require(config.model == MODEL and config.endpoint == ENDPOINT, 'gemini_provider_binding')
+            youtube_key = os.getenv('YOUTUBE_DATA_API_KEY', '')
+            if name != 'mission-run':
+                require(not job['real_ai']['consent'] and not store._grant_path(jid).exists(), 'consent_replay')
+                if name == 'mission-prepare':
+                    require(body['account_project'] == MISSION_ACCOUNT and body['confirm_free_account'] is True,
+                            'mission_free_account_unverified')
+                    self.mission_proposals[jid] = store.prepare_mission(jid, key=config.api_key,
+                        account_project=MISSION_ACCOUNT, quota_note='Provider quota unknown; owner attestation only.',
+                        youtube_key=youtube_key, youtube_project=MISSION_ACCOUNT,
+                        confirm_youtube_policy=body['confirm_youtube_policy'])
+                    return
+                proposal = self.mission_proposals.get(jid)
+                require(body['confirm_free_data_policy'] is True, 'explicit_owner_confirmation_required')
+                require(proposal and body['review_hash'] == digest(proposal), 'consent_review_changed')
+                require(hmac.compare_digest(proposal['mission_account']['credential_binding'], _binding(jid, config.api_key))
+                        and hmac.compare_digest(proposal['mission_web']['credential_binding'], _binding(jid+':youtube', youtube_key)),
+                        'mission_key_binding_mismatch')
+                store.approve(jid, proposal, review_hash=body['review_hash'], owner_confirmed=True)
+                del self.mission_proposals[jid]
+                return
+
+            company = MissionOneCompany(store, LiveManagerProvider('gemini-manager'),
+                                        LiveEmployeeProvider('gemini-staff'), config)
+            grant = company._preflight(job)['body']
+            require(grant['mission_account']['account_project'] == grant['mission_web']['account_project'] == MISSION_ACCOUNT,
+                    'mission_free_account_unverified')
+            self.mission_workers.add(jid)
+
+        def worker():
+            error = None
+            try:
+                result = company.run(jid, expected_state_hash=job['storage_hash'])
+                if result['status'] == 'needs_user_review':
+                    self.workflow.report_plan(pid, provider_store=store, expected_mission_job=jid)
+                else:
+                    error = result.get('reason_code') or 'mission_internal_review_incomplete'
+            except CompanyError as exc:
+                error = exc.code
+            except Exception:
+                error = 'mission_internal_error'
+            finally:
+                with self.mission_lock:
+                    if error:
+                        self.mission_errors[jid] = error
+                    self.mission_workers.remove(jid)
+        try:
+            threading.Thread(target=worker, daemon=True).start()
+        except RuntimeError:
+            with self.mission_lock:
+                self.mission_workers.discard(jid)
+            raise CompanyError('mission_worker_unavailable') from None
 
     def rework_action(self,pid,name,body):
         from representative_rework import prepare,ReworkStore,ReworkCompany,handoff,execution_settings
@@ -498,6 +644,8 @@ class Studio:
         require(key == 'workspace', 'readonly_project')
         if name=='rework-quality-decide':
             self.rework_quality_decide(pid,body)
+        elif name in MISSION_ACTIONS:
+            self.mission_action(pid, name, body)
         elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare',
                       'rework-cap-prepare','rework-consent','rework-run','rework-recover'):
             self.rework_action(pid,name,body)
@@ -651,7 +799,7 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS)}|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-cap-prepare)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

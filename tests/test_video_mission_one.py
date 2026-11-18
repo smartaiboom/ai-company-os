@@ -524,18 +524,38 @@ class MissionOneTests(unittest.TestCase):
         self.resume_fixture = True
         self.test_employee_web_queries_to_manager_duration_and_representative()
 
+    def test_cutroom_connect_consent_run_and_handoff_offline(self):
+        self.cutroom_mission_fixture = True
+        self.test_employee_web_queries_to_manager_duration_and_representative()
+
+    def test_cutroom_provider_failure_records_one_attempt_without_retry(self):
+        self.cutroom_failure_fixture = True
+        self.test_cutroom_connect_consent_run_and_handoff_offline()
+
     def test_employee_web_queries_to_manager_duration_and_representative(self):
         from datetime import datetime,timedelta,timezone
         from urllib.parse import parse_qs, urlsplit
         from employee_web_research import TOOL
-        from video_mission_one import _binding
+        from video_mission_one import MISSION_ACCOUNT, _binding
+        cutroom = getattr(self, 'cutroom_mission_fixture', False)
         account='gen-lang-client-0938732315' if getattr(self,'budget_fixture',False) else 'fixture'
         web_account=account if getattr(self,'budget_fixture',False) else 'fixture-youtube'
         fixture_audience = '' if getattr(self,'audience_case',None) in ('inferred','missing_inference') else AUDIENCE
         project = self.studio.create(dict(goal=GAME_GOAL,audience=fixture_audience,language='한국어',
             platform='YouTube Shorts',duration=None,notes='',key='00000000-0000-4000-8000-000000000044'))['id']
         previous = self.studio.workflow.stage_mission_one(project)
-        self.job = self.studio.workflow.connect_employee_web(project)
+        original_mission = self.store.path(previous).read_bytes()
+        def action(name, **fields):
+            return self.studio.action('workspace', project, name, dict(job=self.job, **fields))
+        if cutroom:
+            self.job = previous
+            detail = self.studio.detail('workspace', project)
+            self.assertTrue(detail['mission']['can_connect'])
+            self.assertFalse(detail['mission']['can_run'])
+            self.job = action('mission-connect-web')['mission']['id']
+            self.assertEqual(self.store.path(previous).read_bytes(), original_mission)
+        else:
+            self.job = self.studio.workflow.connect_employee_web(project)
         self.assertNotEqual(previous,self.job)
         self.assertEqual(self.studio.workflow.connect_employee_web(project),self.job)
         self.assertEqual(self.store.load(previous)['real_ai']['attempts'],[])
@@ -556,7 +576,55 @@ class MissionOneTests(unittest.TestCase):
         bad.pop('mission_research_review')
         with self.assertRaisesRegex(CompanyError, 'mission_research_review_consent'):
             self.store.approve(self.job,bad,review_hash=digest(bad),owner_confirmed=True)
-        self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
+        if cutroom:
+            with self.assertRaisesRegex(CompanyError, 'operating_consent_required'):
+                action('mission-run')
+            with self.assertRaisesRegex(CompanyError, 'mission_free_account_unverified'):
+                action('mission-prepare', account_project='incorrect', confirm_free_account=True, confirm_youtube_policy=True)
+            with self.assertRaisesRegex(CompanyError, 'employee_web_policy_confirmation_required'):
+                action('mission-prepare', account_project=MISSION_ACCOUNT, confirm_free_account=True, confirm_youtube_policy=False)
+            proposal = action('mission-prepare', account_project=MISSION_ACCOUNT, confirm_free_account=True,
+                              confirm_youtube_policy=True)['mission']['proposal']
+            self.assertEqual(proposal['limits'], dict(max_calls=10, max_revisions_per_task=1, max_total_revisions=1))
+            self.assertEqual((proposal['searches'], proposal['videos'], proposal['max_cost']), (4, 4, 0))
+            self.assertEqual([proposal[k] for k in ('remaining_requests', 'search_remaining', 'units_remaining')],
+                             ['unknown']*3)
+            for secret in (self.key, youtube_key, 'credential_binding'):
+                self.assertNotIn(secret, json.dumps(proposal))
+            with self.assertRaisesRegex(CompanyError, 'consent_review_changed'):
+                action('mission-consent', review_hash='0'*64, confirm_free_data_policy=True)
+            with self.assertRaisesRegex(CompanyError, 'explicit_owner_confirmation_required'):
+                action('mission-consent', review_hash=proposal['review_hash'], confirm_free_data_policy=False)
+            with patch.dict('os.environ', YOUTUBE_DATA_API_KEY='wrong-fixture-youtube-key'):
+                with self.assertRaisesRegex(CompanyError, 'mission_key_binding_mismatch'):
+                    action('mission-consent', review_hash=proposal['review_hash'], confirm_free_data_policy=True)
+            with patch('autonomous_free.now', return_value=proposal['expires_at']):
+                with self.assertRaisesRegex(CompanyError, 'consent_expired'):
+                    action('mission-consent', review_hash=proposal['review_hash'], confirm_free_data_policy=True)
+            self.assertTrue(action('mission-consent', review_hash=proposal['review_hash'],
+                                   confirm_free_data_policy=True)['mission']['can_run'])
+            with self.assertRaisesRegex(CompanyError, 'consent_replay'):
+                action('mission-consent', review_hash=proposal['review_hash'], confirm_free_data_policy=True)
+            for variables, error in (
+                (dict(GEMINI35_MODEL='wrong-model'), 'gemini_provider_binding'),
+                (dict(GEMINI_API_KEY='wrong-fixture-gemini-key'), 'mission_key_binding_mismatch'),
+                (dict(YOUTUBE_DATA_API_KEY='wrong-fixture-youtube-key'), 'employee_web_key_mismatch'),
+                (dict(GEMINI35_AUTONOMOUS_FREE_ENABLED='0'), 'gemini_execution_disabled'),
+            ):
+                with patch.dict('os.environ', variables), self.assertRaisesRegex(CompanyError, error):
+                    action('mission-run')
+            grant_path = self.store._grant_path(self.job)
+            signed = grant_path.read_bytes()
+            try:
+                grant_path.write_text(json.dumps({**json.loads(signed), 'signature':'0'*64}))
+                with self.assertRaisesRegex(CompanyError, 'invalid_consent_signature'):
+                    action('mission-run')
+            finally:
+                grant_path.write_bytes(signed)
+            self.http.assert_not_called()
+            self.assertEqual(self.store.load(self.job)['real_ai']['attempts'], [])
+        else:
+            self.store.approve(self.job,body,review_hash=digest(body),owner_confirmed=True)
         if getattr(self, 'resume_fixture', False):
             from urllib.error import URLError
             import socket
@@ -796,6 +864,50 @@ class MissionOneTests(unittest.TestCase):
             self.review_error=None
             self.http.reset_mock(side_effect=False)
             result=self.run_job()
+        elif cutroom:
+            queued = []
+
+            class QueuedThread:
+                def __init__(self, *, target, daemon):
+                    self.target = target
+
+                def start(self):
+                    queued.append(self.target)
+
+            with patch('threading.Thread', QueuedThread):
+                self.assertTrue(action('mission-run')['mission']['running'])
+                with self.assertRaisesRegex(CompanyError, 'mission_restart_forbidden'):
+                    action('mission-run')
+                self.assertTrue(self.studio.detail('workspace', project)['mission']['running'])
+                self.http.assert_not_called()
+                self.assertEqual(urls, [])
+                if getattr(self, 'cutroom_failure_fixture', False):
+                    self.http.side_effect = HTTPError(ENDPOINT, 503, 'fixture', {}, None)
+                queued.pop()()
+            result = self.store.load(self.job)
+            detail = self.studio.detail('workspace', project)
+            self.assertEqual(self.store.path(previous).read_bytes(), original_mission)
+            self.assertFalse(self.store._grant_path(previous).exists())
+            if getattr(self, 'cutroom_failure_fixture', False):
+                self.assertEqual(detail['stage'], 'research_planning')
+                self.assertEqual(detail['mission']['execution_error'], 'provider_unavailable')
+                self.assertFalse(detail['mission']['can_run'])
+                self.assertFalse(detail['mission']['can_report'])
+                self.assertEqual(result['real_ai']['attempts'][0]['status'], 'failed')
+                with self.assertRaisesRegex(CompanyError, 'mission_restart_forbidden'):
+                    action('mission-run')
+                self.assertEqual(self.http.call_count, 1)
+                self.assertEqual(urls, [])
+                return
+            self.assertEqual(detail['stage'], 'awaiting_plan_approval', detail['mission']['reason'])
+            self.assertEqual(len(detail['flow']['plan_versions']), 1)
+            self.assertEqual(result['status'], 'needs_user_review')
+            self.assertEqual([a['bucket'] for a in detail['mission']['web_attempts']], ['search', 'general'])
+            with self.assertRaisesRegex(CompanyError, 'mission_scope_mismatch'):
+                action('mission-run')
+            self.assertEqual(self.http.call_count, 8)
+            self.assertEqual(len(urls), 2)
+            return
         else:
             result=self.run_job()
         if getattr(self,'writer_schema_mutation',None):

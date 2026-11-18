@@ -112,17 +112,21 @@ class RepresentativeVideoWorkflow:
             self._transition(p, 'research_planning')
             return job['id']
 
-    def connect_employee_web(self, project_id):
+    def connect_employee_web(self, project_id, *, expected_job=None):
         from employee_web_research import TOOL
         from video_mission_one import GAME_GOAL, MAX_CALLS, MissionOneStore
         with self.store.lock(project_id):
             p = self.store.load(project_id)
             flow = p['representative']
-            require(p['goal']==GAME_GOAL and flow['stage']=='research_planning' and not flow['plan_versions'],
+            require(p['goal']==GAME_GOAL and flow['stage']=='research_planning'
+                    and flow.get('mission_one_job') and not flow['plan_versions'],
                     'representative_stage_mismatch')
+            require(expected_job is None or flow['mission_one_job']==expected_job, 'mission_scope_mismatch')
             store = MissionOneStore(self.store.root/'mission_one_provider')
             previous = store.load(flow['mission_one_job'])
-            require(not previous['real_ai']['attempts'] and not previous['real_ai']['consent'],
+            require(previous['status']=='ready' and not previous['sessions'] and not previous['active_operation']
+                    and not previous['real_ai']['attempts'] and not previous['real_ai']['consent']
+                    and not store._grant_path(previous['id']).exists(),
                     'mission_scope_already_used')
             if previous['quality_inputs']['capabilities'].get('employee_web_research')==TOOL:
                 return previous['id']
@@ -334,7 +338,7 @@ class RepresentativeVideoWorkflow:
                 return job['id']
 
     def report_plan(self, project_id, *, summary=None, sources=None, risks=None, changes=None,
-                    render_spec=None, provider_store=None, allow_fixture=False):
+                    render_spec=None, provider_store=None, allow_fixture=False, expected_mission_job=None):
         with self.store.lock(project_id):
             p = self.store.load(project_id)
             flow = p['representative']
@@ -343,7 +347,9 @@ class RepresentativeVideoWorkflow:
                 from video_mission_one import MissionOneStore, checked_result, provider_view
                 require(type(provider_store) is MissionOneStore and
                         provider_store.root == self.store.root/'mission_one_provider'
-                        and flow.get('mission_one_job'), 'mission_scope_mismatch')
+                        and flow.get('mission_one_job') and
+                        (expected_mission_job is None or flow['mission_one_job'] == expected_mission_job),
+                        'mission_scope_mismatch')
                 job = provider_store.result(flow['mission_one_job'])
                 provider_store.check_scope(job)
                 provider_store.grant(job)  # Verify this accepted job's signed scope before local handoff.

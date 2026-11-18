@@ -2,11 +2,67 @@ from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
 
-from autonomous_company import CompanyError, Store
+from autonomous_company import CompanyError, Store, digest
+from cutroom_review import DRAFT_NAME, matching_plan, plan_markdown
+from representative_workflow import _report
 from studio_server import Studio, byte_range
 
 
 class StudioTests(unittest.TestCase):
+    def test_revision_draft_requires_matching_project_version_and_checksum(self):
+        with TemporaryDirectory() as root:
+            studio = Studio(root)
+            store = studio.workflow.store
+            pid = studio.workflow.create('가상 기획', audience='예시 시청자')
+            project = store.load(pid)
+            flow = project['representative']
+            plan = _report(dict(topic='예시'), [])
+            flow.update(stage='awaiting_plan_approval', plan_versions=[plan])
+            store.save(project)
+            original = store.path(pid).read_bytes()
+            draft = dict(project=pid, version=1, report_hash=plan['sha256'], feedback='게임 사례를 보강해 주세요.')
+            path = Path(root)/DRAFT_NAME
+            for changed in (dict(project='another-project'), dict(version=2), dict(report_hash='0'*64)):
+                candidate = {**draft, **changed}
+                Store.atomic(path, {**candidate, 'checksum': digest(candidate)})
+                self.assertIsNone(studio.detail('workspace', pid)['revision_draft'])
+            Store.atomic(path, {**draft, 'feedback':'변조된 내용', 'checksum':digest(draft)})
+            self.assertIsNone(studio.detail('workspace', pid)['revision_draft'])
+            Store.atomic(path, {**draft, 'checksum':digest(draft)})
+            self.assertEqual(studio.detail('workspace', pid)['revision_draft']['feedback'], draft['feedback'])
+            self.assertEqual(store.path(pid).read_bytes(), original)
+            self.assertEqual(store.load(pid)['representative']['decisions'], [])
+            studio.action('workspace', pid, 'decide', dict(stage='plan', version=1, sha256=plan['sha256'],
+                          action='request_revision', feedback=draft['feedback'], changes_plan=False))
+            self.assertIsNone(studio.detail('workspace', pid)['revision_draft'])
+            self.assertEqual(store.load(pid)['representative']['decisions'][-1]['feedback'], draft['feedback'])
+
+    def test_markdown_uses_the_selected_report_and_excludes_private_fields(self):
+        private = 'owner@example.test'
+        source = dict(url='https://www.youtube.com/watch?v=abcdefghijk', duration_seconds=20,
+                      view_count=123, observed_at='2026-11-18', title=private)
+        script = dict(target_duration=20, transcript=f'첫 줄\n둘째 줄 {private}',
+                      narrative_beats=[dict(start=0, end=20, shot_type='demo', screen='게임 화면',
+                                           caption='게임 시작', source_status='pending')])
+        first = _report(dict(topic='첫 기획', script=script, research=dict(observations=[source,
+                            {**source, 'url':source['url']+'&token=hidden-secret'}]),
+                             provider_run=dict(attempts=[dict(signature='private-signature')], web_attempts=[{}])), [])
+        second = _report(dict(topic='새 기획', script=script, rework_plan=dict(duration_reason='새 정보량'),
+                              call_counts=dict(gemini=5, youtube=0)), [first])
+        project = dict(goal='가상 게임', representative=dict(plan_versions=[first, second]))
+        original = plan_markdown(project, matching_plan(project, 1, first['sha256']))
+        revision = plan_markdown(project, matching_plan(project, 2, second['sha256']))
+        self.assertIn('Gemini 1회 · YouTube 1회', original)
+        self.assertIn('비교 기준 v1', revision)
+        self.assertIn('새 정보량', revision)
+        self.assertIn('Gemini 5회 · YouTube 0회', revision)
+        self.assertIn(source['url'], original)
+        self.assertIn('첫 줄<br>', original)
+        for value in (private, 'hidden-secret', 'private-signature', first['sha256']):
+            self.assertNotIn(value, original)
+        with self.assertRaisesRegex(CompanyError, 'stale_representative_report'):
+            matching_plan(project, 2, first['sha256'])
+
     def test_creation_is_persistently_idempotent_and_planning_uses_workflow(self):
         with TemporaryDirectory() as root:
             studio = Studio(root)

@@ -225,12 +225,18 @@ def progress_view(job,state):
 def snapshot(project):
     flow=project['representative'];prior=flow['plan_versions'][-1];decision=flow['decisions'][-1]
     require(decision['stage']=='plan' and decision['action']=='request_revision'
-            and decision['sha256']==prior['sha256'],'rework_feedback_binding')
+            and decision['version']==prior['version'] and decision['sha256']==prior['sha256']
+            and digest({k:v for k,v in prior.items() if k!='sha256'})==prior['sha256'],
+            'rework_feedback_binding')
     editor=next(t for t in prior['task_history'] if t['role']=='editor')
+    research = prior['research']
     return dict(representative_project=project['id'],representative_feedback=deepcopy(decision),
         previous_plan=dict(version=prior['version'],sha256=prior['sha256'],script=prior['script'],
                            storyboard=parse(editor['versions'][-1]['content'])),
-        observations=deepcopy(prior['research']['observations']))
+        observations=deepcopy(research['observations']),
+        research_context=dict(previous_selection=deepcopy(research.get('manager_decision', {})),
+                              limitations=research.get('uncertainty', ''),
+                              additional_web_research_available=False))
 
 
 class ReworkStore(QualityProviderStore):
@@ -867,6 +873,7 @@ def handoff(workflow,pid,provider,*,allow_fixture=False):
             internal_reviews=writer['reviews'],task_history=deepcopy(job['assignments']),manager_plan=job['plan'],
             provenance=job['plan']['source'],representative_feedback=job['quality_inputs']['feedback_text'],
             rework_plan=job['rework_plan'],goal_reviews=job['goal_reviews'],final_evaluation='not_performed_local_handoff',
+            final_review=job['final'], call_counts=dict(gemini=len(job['real_ai']['attempts']), youtube=0),
             research=prior['research'],
             **(dict(recovery_source=deepcopy(job['script_recovery'])) if job.get('script_recovery') else {})
             ),flow['plan_versions'])

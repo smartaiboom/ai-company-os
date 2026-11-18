@@ -167,7 +167,9 @@ class Studio:
             mission = provider_view(job)
             if key == 'workspace' and flow['stage'] == 'research_planning':
                 mission.update(self.mission_controls(p, provider_store, job))
-        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p),
+        from cutroom_review import revision_draft
+        draft = revision_draft(store.root, p) if key == 'workspace' else None
+        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft,
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
                                            for t in j['assignments']]) for j in jobs]}
@@ -799,6 +801,12 @@ def make_server(host, port, studio):
                 body = json.loads(self.rfile.read(int(length)))
                 if path == '/api/project':
                     return self.send_json(201, studio.create(body))
+                if match := re.fullmatch(rf'/api/project/workspace/({PROJECT})/plan-markdown', path):
+                    from cutroom_review import matching_plan, plan_markdown
+                    exact(body, ('version', 'sha256'))
+                    project = studio.project('workspace', match[1])
+                    plan = matching_plan(project, body['version'], body['sha256'])
+                    return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
                 if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS)}|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-cap-prepare)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError

@@ -148,6 +148,7 @@ function planPanel(p, plan, previous) {
     <details class="subpanel"><summary>변경사항·보고서 해시</summary><p>${h(plan.changes)}</p><p class="mono">${h(plan.sha256)}</p>
       ${previous ? `<p class="muted">이전 기획 v${previous.version} 대본</p><p class="script">${h(previous.script.transcript)}</p>` : ''}
       <p class="muted">내부 검토 ${plan.internal_reviews.length}건 · ${h(plan.internal_reviews.map(r=>r.action==='accept'?'수락':r.action==='revise'?'수정':'보류').join(' → '))}</p></details>
+    ${p.readonly ? '' : '<button class="button ghost" data-action="plan-markdown">대표 검토 Markdown 내려받기</button>'}
     ${reviewActions(p,'plan',plan)}
   </section>`;
 }
@@ -428,9 +429,12 @@ function review(kind, action) {
   const project=detail;
   const report=project.flow[`${kind}_versions`].at(-1);
   const revise=action==='request_revision';
+  const draft=revise && kind==='plan' && project.revision_draft?.version===report.version
+    && project.revision_draft.report_hash===report.sha256 ? project.revision_draft : null;
   const title=revise?'수정 요청':kind==='plan'?'기획·대본 승인':'최종 영상 승인';
   modal(title,`<p class="muted">${kind==='plan'?'기획':'영상'} v${report.version} · SHA-256</p><p class="mono">${h(report.sha256)}</p>
-    ${revise ? '<label>수정 피드백<textarea required name="feedback" maxlength="2000" rows="4"></textarea></label>' :
+    ${draft ? '<p>이 기획 버전의 로컬 검토 초안입니다. 내용을 확인하거나 편집한 뒤 수정 요청을 확정해 주세요.</p>' : ''}
+    ${revise ? `<label>수정 피드백<textarea required name="feedback" maxlength="2000" rows="${draft ? 9 : 4}">${h(draft?.feedback)}</textarea></label>` :
       '<label>승인 메모 (선택)<textarea name="feedback" maxlength="2000" rows="2"></textarea></label>'}
     ${revise && kind==='video' ? '<label class="check"><input type="checkbox" name="changes_plan"> 대본·기획 변경이 필요합니다. 새 기획의 대표 승인 후 제작합니다.</label>' : ''}
     <p class="muted">이 결정은 외부 API 사용·결제·게시 권한을 부여하지 않습니다.</p>`,title,async data=>{
@@ -490,6 +494,22 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action==='plan-markdown') {
+    const project=detail;
+    const reports=project.flow.plan_versions;
+    const report=reports.find(item=>item.version===selectedVersions.plan) || reports.at(-1);
+    button.disabled=true;
+    try {
+      const result=await api(detailApi(project)+'/plan-markdown', {version:report.version, sha256:report.sha256});
+      const url=URL.createObjectURL(new Blob([result.markdown], {type:'text/markdown;charset=utf-8'}));
+      const link=document.createElement('a');
+      link.href=url;
+      link.download=`plan-review-v${report.version}.md`;
+      link.click();
+      setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    } catch(error) { notice(error.message,true); }
+    finally { button.disabled=false; }
+  }
   else if (['mission-prepare','mission-consent','mission-run'].includes(button.dataset.action)) missionCommand(button.dataset.action);
   else if (['mission-connect-web','mission-report'].includes(button.dataset.action)) {
     button.disabled=true;

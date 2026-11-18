@@ -1,0 +1,7 @@
+# 미션 01 최종 검토/대표 제출 검증 및 무호출 복구 (2026-11-18 KST)
+AGENTS.md 준수. 실제 16:25:58 KST editor review HTTP200/validated 1회 이후 invalid_checks. 누적 Gemini 20회, YouTube 4회 보존. 이번 실제 API 0회.
+소스 확인: representative_rework.py ReworkCompany._call finalize가 writer 마지막 reviews[-1].checks만 반환하지만 core/autonomous_company.py 최종 validate_checks는 plan 전체 criteria를 요구한다. 실제 운영 작업의 phase, 두 직원 상태, 리뷰 수락 및 criterion IDs, 원장, 동의/해시를 읽기 전용 조사해 이 원인인지 검증; editor 검토 자체의 실패 가능성과 구별.
+- 실제 원인이 최종 집계라면 기존 accepted review를 각 업무의 승인된 최신 버전에 결합하고 계획 전체 기준을 정확히 한 번씩 포함하는 결정론적 집계로 최소 수정. 공동 기준의 경우 실제 모든 해당 업무 리뷰의 충족을 확인하고 원본 검토 근거/출처를 보존한다. 누락/미충족/불일치 시 차단. AI 판단을 새로 만들어내거나 model_claim으로 위장하지 않는다. 시스템 집계와 모델 검토를 분리. 모든 기존 경로/서명/원장 호환 확인.
+- 현재 중단 작업에서 두 직원 수락과 모든 검토/호출 완료, 유효한 승인 및 계보가 확인된 경우에만 추가 API 없는 안전한 최종 제출 복구를 제공. 기존 실행 기록과 중단 상태 이력 보존, 승인 우회 금지, 과거 작업 덮어쓰기 금지. 실제 대표 결정 자동 승인 금지. 기존 작업의 정상적 완료/대표 승인 대기 전환에 필요한 로컬 결정론적 복구는 대표가 명시적으로 화면에서 실행하게 한다. 새 외부 전송 불필요. 승인 만료/기타 제약 시 완화하지 말고 보고.
+- 이번에는 실제 운영 복제본에서 현재 상태부터 최종 checks, final task_refs, handoff, recovery lineage, 대표 보고서 v2 생성, UI detail/export, v1 보존, 중복 제출 차단까지 전체를 오프라인 끝까지 검증한다. 마지막 단계마다 추가 오류가 반복되지 않도록 실제 운영 데이터의 복제본 및 모의 정상/실패 경로 테스트. 운영 원본/동의/대표 결정 변경 금지, API 0회. 서버 변경 시 기존 환경으로 재시작하고 실제 localhost UI 준비 상태 확인.
+- reports/mission01_final_review_handoff_fix_result.md에 실제 원인, 각 기준의 집계 방식, 복구 경로, 전 과정 검증, 다음 정확한 대표 조작, 0회 호출, 남은 제약 기재. 검증된 코드/보고서만 commit/push origin main 및 원격 보고서 존재 확인. 민감정보 제외. 사용자 직접 push 승인 범위 내 진행.

@@ -113,12 +113,16 @@ class MissionOneTests(unittest.TestCase):
     def test_signed_native_wire_revision_and_studio_handoff(self):
         self.assertEqual(self.studio.action('workspace', self.project, 'mission', {})['mission']['id'], self.job)
         self.assertEqual(self.studio.detail('workspace', self.project)['stage'], 'research_planning')
-        with self.assertRaisesRegex(CompanyError, 'mission_internal_review_incomplete'):
+        # Handoff requires signed consent before evaluating the review result.
+        with self.assertRaisesRegex(CompanyError, 'operating_consent_required'):
             self.studio.workflow.report_plan(self.project, provider_store=self.store)
         with self.assertRaisesRegex(CompanyError, 'operating_consent_required'):
             self.run_job()
         self.http.assert_not_called()
         self.approve()
+        with self.assertRaisesRegex(CompanyError, 'mission_internal_review_incomplete'):
+            self.studio.workflow.report_plan(self.project, provider_store=self.store)
+        self.http.assert_not_called()
         self.fixture()
         result = self.run_job()
         self.assertEqual(result['status'], 'needs_user_review', result.get('reason_code'))
@@ -171,7 +175,7 @@ class MissionOneTests(unittest.TestCase):
                 remaining_requests=10, quota_note='fixture RPM/TPM')
         with self.assertRaisesRegex(CompanyError, GAME_RESEARCH_BLOCKER):
             self.run_job()
-        with self.assertRaisesRegex(CompanyError, GAME_RESEARCH_BLOCKER):
+        with self.assertRaisesRegex(CompanyError, 'operating_consent_required'):
             self.studio.workflow.report_plan(project, provider_store=self.store, allow_fixture=True)
         self.http.assert_not_called()
         detail = self.studio.detail('workspace', project)
@@ -246,6 +250,10 @@ class MissionOneTests(unittest.TestCase):
 
     def test_strict_rework_plan_contract_to_script_offline(self):
         self.strict_plan_fixture=True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
+    def test_signed_script_recovery_reuses_plan_and_starts_with_writer_revision(self):
+        self.script_recovery_fixture = True
         self.test_representative_feedback_rework_end_to_end_offline()
 
     def test_legacy_unvalidated_review_to_ceo_new_job_offline(self):
@@ -1629,7 +1637,16 @@ class MissionOneTests(unittest.TestCase):
         self.assertFalse(provider.load(pid)['real_ai']['attempts'])
         prepare(self.studio.workflow,project,self.key,'gen-lang-client-0938732315')
         self.assertEqual(self.studio.workflow.store.load(project)['representative']['rework']['job'],pid)
-        class OfflineRework(ReworkCompany):source='offline_http_fixture'
+        script_recovery = getattr(self, 'script_recovery_fixture', False)
+
+        class OfflineRework(ReworkCompany):
+            source = 'offline_http_fixture'
+
+            def _validate_review_decision(self, job, task, review):
+                if script_recovery and not job.get('script_recovery'):
+                    # Reproduce the historical validator before automatic defect attachment.
+                    return super(ReworkCompany, self)._validate_review_decision(job, task, review)
+                return super()._validate_review_decision(job, task, review)
         company=OfflineRework(provider,LiveManagerProvider('fixture-manager'),LiveEmployeeProvider('fixture-staff'),Gemini35Config(self.key))
         def run():return company.run(pid,expected_state_hash=provider.load(pid)['storage_hash'])
         with self.assertRaises(CompanyError):run()
@@ -1822,11 +1839,19 @@ class MissionOneTests(unittest.TestCase):
             self.assertEqual(valid,original_plan)
         review_count=0
         revision_exec_count=0
+        recovered_phases = []
         def send(request,timeout):
             nonlocal review_count,revision_exec_count
             wire=json.loads(request.data);message=json.loads(wire['contents'][0]['parts'][0]['text']);phase=message['phase'];context=message['data']
             self.assertEqual(context['quality']['feedback_text'],feedback)
             self.assertEqual(context['quality']['answers']['previous_plan']['sha256'],original['sha256'])
+            recovering = script_recovery and bool(provider.load(pid).get('script_recovery'))
+            if recovering:
+                recovered_phases.append(phase)
+                if len(recovered_phases) == 1:
+                    self.assertEqual(phase, 'execute')
+                    self.assertEqual(context['assignment']['role'], 'writer')
+                    self.assertIn('caption_width', context['revision_feedback'])
             if phase=='plan':
                 from representative_rework import PLAN_SCHEMA_REFERENCE
                 self.assertEqual(message['output_contract'],PLAN_SCHEMA_REFERENCE)
@@ -1865,6 +1890,8 @@ class MissionOneTests(unittest.TestCase):
                         self.assertIn('goal_fit',context['revision_feedback'])
                         self.assertIn('subject_story',context['revision_feedback'])
                 value=deepcopy(draft) if context['assignment']['role']=='writer' else script_editor_handoff(context['previous_results'][0])
+                if script_recovery and not recovering and context['assignment']['role'] == 'writer':
+                    value['narrative_beats'][1]['caption'] = '역전 한 수 ' * 10
                 if (getattr(self,'rework_quality_revision_fixture',False)
                         and context['assignment']['role']=='writer' and revision_exec_count==2):
                     # Change visual detail without breaking narration/transcript/close invariants.
@@ -1873,6 +1900,8 @@ class MissionOneTests(unittest.TestCase):
                 result=dict(content=value if context['assignment']['role']=='writer' else json.dumps(value),evidence='offline fixture',uncertainty='unassessed')
             else:
                 result=json.loads(manager(phase,context));result['goal_review']={k:dict(met=True,evidence='역전 한 수') for k in ('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')}
+                if script_recovery and not recovering:
+                    result.update(action='revise', feedback='긴 자막을 줄이세요.')
                 if getattr(self,'rework_quality_escalation_fixture',False) and phase=='review' and context['assignment']['role']=='writer':
                     result['action']='stop'
                     result['goal_review']['goal_fit']['met']=False
@@ -1903,6 +1932,47 @@ class MissionOneTests(unittest.TestCase):
                 self.assertEqual(provider._grant_path(pid).read_bytes(),saved_grant)
             queued.pop()()
         result=provider.load(pid)
+        if script_recovery:
+            from video_mission_one import MISSION_ACCOUNT
+            self.assertEqual(result['reason_code'], 'script_feedback_missing_defect')
+            self.assertEqual(self.http.call_count, 3)
+            old_id = pid
+            old_files = {path: path.read_bytes() for path in
+                         (provider.path(old_id), provider._grant_path(old_id))}
+            old_grant_id = provider.grant(result)['id']
+            self.studio.action('workspace', project, 'rework-script-recover-prepare',
+                               dict(account_project=MISSION_ACCOUNT, confirm_free_account=True, previous_job=old_id))
+            pending = self.studio.detail('workspace', project)['rework']
+            pid = pending['job']
+            self.assertNotEqual(pid, old_id)
+            new = provider.load(pid)
+            self.assertEqual(new['real_ai']['attempts'], [])
+            self.assertEqual(new['plan'], result['plan'])
+            self.assertEqual(new['assignments'][0]['state'], 'revision_requested')
+            with self.assertRaisesRegex(CompanyError, 'operating_consent_required'):
+                provider.grant(new)
+            with self.assertRaisesRegex(CompanyError, 'rework_duplicate_or_unapproved'):
+                self.studio.action('workspace', project, 'rework-run', {})
+            self.assertEqual(self.http.call_count, 3)
+            self.studio.action('workspace', project, 'rework-consent',
+                               dict(review_hash=pending['review_hash'], confirm_free_account=True, confirm_data_policy=True))
+            self.assertNotEqual(provider.grant(provider.load(pid))['id'], old_grant_id)
+            self.http.reset_mock(side_effect=False)
+            with patch('threading.Thread', QueuedThread), patch('representative_rework.ReworkCompany', OfflineRework), patch('representative_rework.handoff', offline_handoff):
+                self.studio.action('workspace', project, 'rework-run', {})
+                queued.pop()()
+            recovered = provider.load(pid)
+            self.assertEqual(recovered['status'], 'needs_user_review', recovered.get('reason_code'))
+            self.assertEqual(recovered_phases, ['execute', 'review', 'execute', 'review'])
+            self.assertEqual(self.http.call_count, 4)
+            self.assertEqual([attempt['phase'] for attempt in recovered['real_ai']['attempts']], recovered_phases)
+            flow = self.studio.workflow.store.load(project)['representative']
+            self.assertEqual(flow['stage'], 'awaiting_plan_approval', flow['rework'].get('error'))
+            self.assertEqual(flow['plan_versions'][0], original)
+            self.assertEqual(flow['plan_versions'][1]['recovery_source']['source_job'], old_id)
+            for path, data in {**original_bytes, **old_files}.items():
+                self.assertEqual(path.read_bytes(), data)
+            return
         if getattr(self,'rework_quality_escalation_fixture',False):
             if getattr(self,'legacy_unvalidated_rework_fixture',False):
                 # Synthetic historical completed HTTP 200 but parser rejected review;
@@ -2002,11 +2072,24 @@ class MissionOneTests(unittest.TestCase):
             self.assertEqual(flow['rework_history'][0]['error'],'provider_unavailable')
             return
         # The server rejects an explicit instructional drift even if the model calls it acceptable.
-        company._review_content='쇼츠 만드는 방법'
-        review=json.loads(manager('review',dict(plan_inspection={},criteria=[dict(id='hook')])) )
-        review['goal_review']={k:dict(met=True,evidence='쇼츠 만드는 방법') for k in ('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')}
-        with self.assertRaisesRegex(CompanyError,'rework_obvious_goal_drift'):
-            company._parse_role_content(json.dumps(dict(result=review)),'review')
+        writer = next(task for task in result['assignments'] if task['role'] == 'writer')
+        artifact = json.loads(writer['versions'][-1]['content'])
+        artifact['topic']['title'] = '쇼츠 만드는 방법'
+        review = json.loads(manager('review', dict(plan_inspection={}, criteria=[dict(id='hook')])))
+        review['goal_review'] = {
+            name: dict(met=True, evidence=artifact['topic']['title'])
+            for name in ('goal_fit', 'feedback_applied', 'subject_story', 'concrete_hook', 'claims_supported')
+        }
+        for available, action in ((True, 'revise'), (False, 'stop')):
+            state = deepcopy(result)
+            state['limits']['max_total_revisions'] = sum(task['revisions'] for task in state['assignments']) + 1
+            state['limits']['max_revisions_per_task'] = writer['revisions'] + int(available)
+            with patch.multiple(company, create=True, _rework_state=state, _review_task_id=writer['id'],
+                                _review_content=json.dumps(artifact, ensure_ascii=False)):
+                parsed = company._parse_role_content(json.dumps(dict(result=review)), 'review')
+            self.assertEqual(parsed['action'], action)
+            self.assertEqual(company._quality_followup['original_action'], 'accept')
+            self.assertEqual(company._quality_followup['failed_checks'], {'subject_story': 'obvious_goal_drift'})
         # A later separately consented revision fails once; duplicate starts cannot retry it.
         latest=flow['plan_versions'][-1]
         self.studio.workflow.decide(project,'plan',version=2,sha256=latest['sha256'],action='request_revision',feedback='후크를 더 구체화하세요')

@@ -498,7 +498,8 @@ class Studio:
         require(key == 'workspace', 'readonly_project')
         if name=='rework-quality-decide':
             self.rework_quality_decide(pid,body)
-        elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-cap-prepare','rework-consent','rework-run','rework-recover'):
+        elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare',
+                      'rework-cap-prepare','rework-consent','rework-run','rework-recover'):
             self.rework_action(pid,name,body)
         elif name=='budget-prepare':
             self.budget_prepare(pid,body)

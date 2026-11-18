@@ -3,12 +3,32 @@ from tempfile import TemporaryDirectory
 import unittest
 
 from autonomous_company import CompanyError, Store, digest
-from cutroom_review import DRAFT_NAME, matching_plan, plan_markdown
+from cutroom_review import DRAFT_NAME, QUALITY_DRAFT_NAME, matching_plan, plan_markdown, quality_draft
 from representative_workflow import _report
 from studio_server import Studio, byte_range
 
 
 class StudioTests(unittest.TestCase):
+    def test_quality_draft_matches_only_the_undecided_stop_report(self):
+        with TemporaryDirectory() as root:
+            report = dict(decision='stop', original_action='revise', reason='revision_limit_reached')
+            state = dict(status='stopped', job='fixture-job')
+            project = dict(id='fixture-project', representative=dict(stage='plan_revision', rework=state))
+            path = Path(root)/QUALITY_DRAFT_NAME
+            draft = dict(project=project['id'], job=state['job'], report_hash=digest(report), feedback='검토할 초안')
+            for fields in (dict(project='another'), dict(job='another'), dict(report_hash='wrong')):
+                bad = {**draft, **fields}
+                Store.atomic(path, {**bad, 'checksum':digest(bad)})
+                self.assertIsNone(quality_draft(root, project, state['job'], report))
+            Store.atomic(path, {**draft, 'feedback':'변조', 'checksum':digest(draft)})
+            self.assertIsNone(quality_draft(root, project, state['job'], report))
+            Store.atomic(path, {**draft, 'checksum':digest(draft)})
+            before = path.read_bytes()
+            self.assertEqual(quality_draft(root, project, state['job'], report)['feedback'], draft['feedback'])
+            self.assertEqual(path.read_bytes(), before)
+            state['quality_decision'] = dict(action='hold')
+            self.assertIsNone(quality_draft(root, project, state['job'], report))
+
     def test_revision_draft_requires_matching_project_version_and_checksum(self):
         with TemporaryDirectory() as root:
             studio = Studio(root)

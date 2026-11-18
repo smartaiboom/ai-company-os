@@ -8,6 +8,7 @@ from urllib.parse import urlsplit
 from autonomous_company import CompanyError, digest, exact, parse, require, text
 
 DRAFT_NAME = '.cutroom-revision-draft.json'
+QUALITY_DRAFT_NAME = '.cutroom-quality-draft.json'
 PRIVATE_TEXT = re.compile(
     r'https?://[^\s<>]+|[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}'
     r'|(?<!\d)(?:\+?82[- ]?)?0?1[016789][- ]?\d{3,4}[- ]?\d{4}(?!\d)'
@@ -26,12 +27,9 @@ def matching_plan(project, version, report_hash):
     return plan
 
 
-def revision_draft(root, project):
-    flow = project['representative']
-    if flow['stage'] != 'awaiting_plan_approval' or not flow['plan_versions']:
-        return None
+def _bound_draft(root, name, binding):
     try:
-        path = Path(root)/DRAFT_NAME
+        path = Path(root)/name
         with os.fdopen(
             os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK), 'rb'
         ) as stream:
@@ -39,15 +37,36 @@ def revision_draft(root, project):
             raw = stream.read(16385)
         require(len(raw) <= 16384, 'invalid_revision_draft')
         draft = parse(raw.decode('utf-8'))
-        exact(draft, ('project', 'version', 'report_hash', 'feedback', 'checksum'))
-        require(draft['project'] == project['id'] and draft['version'] == flow['plan_versions'][-1]['version']
+        exact(draft, (*binding, 'feedback', 'checksum'))
+        require(all(type(draft[k]) is type(v) and draft[k] == v for k, v in binding.items())
                 and draft['checksum'] == digest({k: v for k, v in draft.items() if k != 'checksum'}),
                 'invalid_revision_draft')
-        matching_plan(project, draft['version'], draft['report_hash'])
         text(draft['feedback'], 2000)
     except (OSError, UnicodeError, CompanyError):
         return None
-    return dict(version=draft['version'], report_hash=draft['report_hash'], feedback=draft['feedback'])
+    return {**{k: v for k, v in binding.items() if k != 'project'}, 'feedback': draft['feedback']}
+
+
+def revision_draft(root, project):
+    flow = project['representative']
+    if flow['stage'] != 'awaiting_plan_approval' or not flow['plan_versions']:
+        return None
+    plan = flow['plan_versions'][-1]
+    try:
+        matching_plan(project, plan['version'], plan['sha256'])
+    except CompanyError:
+        return None
+    return _bound_draft(root, DRAFT_NAME, dict(project=project['id'], version=plan['version'], report_hash=plan['sha256']))
+
+
+def quality_draft(root, project, job, report):
+    flow = project['representative']
+    state = flow.get('rework', {})
+    if (flow['stage'] != 'plan_revision' or state.get('status') != 'stopped'
+            or state.get('job') != job or state.get('quality_decision')
+            or not report or report.get('decision') != 'stop'):
+        return None
+    return _bound_draft(root, QUALITY_DRAFT_NAME, dict(project=project['id'], job=job, report_hash=digest(report)))
 
 
 def _plain(value):

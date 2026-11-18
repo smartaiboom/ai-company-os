@@ -24,6 +24,29 @@ NOTICE=('원 목표와 representative_feedback을 이전 초안과 비교해 재
         '{met:boolean,evidence:string}를 추가하세요. evidence는 대본/스토리보드 원문 인용이어야 합니다. '
         '대표 피드백 핵심과 목표 충족을 검토하고 미충족이면 accept 금지. 미확인 권리/성과는 미확인으로 유지.')
 
+QUALITY_NOTICE = (
+    ' 대표의 최근 명시적 유지 조건과 재량 항목을 구분하세요. plan은 유지 조건을 writer 지시에 전달하고 '
+    'editor와 review에서도 확인하세요. 여러 게임 소개가 명시된 경우 실제 내레이션에서 여러 게임과 각각의 특징을 '
+    '전달해야 합니다. 한 게임만 소개하면 goal_fit 또는 feedback_applied는 false입니다. 주제 세부 구성과 길이는 '
+    '대표가 맡긴 범위에서 실제 정보량과 내레이션 호흡에 맞춰 판단하세요. '
+    '이전 대본과 관리자 피드백을 활용하고 추가 웹 조사 없이 전달할 수 있는 확인 가능한 정보만 쓰세요. '
+    'API 관측은 영상 제목·게시 시각·길이·조회수 같은 메타데이터입니다. 제목 속 숫자나 표현은 제목 게시자의 '
+    '주장이며 현재 동시 접속자 수, 조회수 증가, 인기 순위 또는 최적 길이를 입증하지 않습니다. '
+    '근거가 없는 현재 수치·순위·인기 단정은 제거하거나 출처의 미검증 주장으로 한정하세요. '
+    'review에서 goal_review.evidence는 해당 대본/스토리보드 문구를 짧고 정확하게 복사한 값입니다. '
+    '인용 표시, 요약, 설명, 말줄임표 없이 복사하세요. 인용할 문구가 없으면 met=false와 빈 문자열을 사용하세요. '
+    '판단·이유와 출처 대조는 rationale에 쓰고, 빠진 정보와 지시 사항은 feedback에 쓰세요. '
+    '원문 인용이 있더라도 대표 조건 위반이나 출처로 뒷받침하지 못한 주장에는 met=false를 기록하고 수락하지 마세요.'
+)
+CURRENT_PLAYER_COUNT = re.compile(
+    r'(?:지금|현재)\s*(?:약\s*)?[\d,]+(?:\s*[만천백]\s*[\d,]*){0,3}\s*명'
+    r'[^.!?\n]{0,28}(?:실시간|동시\s*접속)|(?:실시간\s*이용자|동시\s*접속자)\s*(?:수\s*)?[:은는이가]?\s*(?:약\s*)?\d'
+)
+
+
+def rework_notice(job):
+    return NOTICE + QUALITY_NOTICE if job.get('content_review_policy') == 1 else NOTICE
+
 
 PLAN_RULES = (
     'Rework plan contract v3: exactly TWO tasks in order: writer then editor. '
@@ -314,13 +337,13 @@ class ReworkStore(QualityProviderStore):
         b=super().prepare(pid,confirm_free_account=True,valid_hours=1)
         return dict(b,rework_scope=dict(reference=p['rework_reference'],account_project=account_project,
             credential_binding=_binding(pid,key),data_policy=DATA_POLICY,billing='unverified',quota='unknown',
-            new_youtube_calls=0,automatic_retry=False,instructions_hash=digest(NOTICE),plan_contract_hash=digest(PLAN_RULES)))
+            new_youtube_calls=0,automatic_retry=False,instructions_hash=digest(rework_notice(p)),plan_contract_hash=digest(PLAN_RULES)))
 
     def _check_contract(self,p,b):
         self.check_binding(p);scope=b.get('rework_scope',{})
         require(scope.get('reference')==p['rework_reference'] and scope.get('account_project')==MISSION_ACCOUNT
                 and scope.get('data_policy')==DATA_POLICY and scope.get('new_youtube_calls')==0
-                and scope.get('automatic_retry') is False and scope.get('instructions_hash')==digest(NOTICE),
+                and scope.get('automatic_retry') is False and scope.get('instructions_hash')==digest(rework_notice(p)),
                 'rework_consent_scope')
         if 'plan_contract_hash' in scope:
             require(scope['plan_contract_hash']==digest(PLAN_RULES),'rework_plan_contract_changed')
@@ -349,7 +372,7 @@ class ReworkCompany(MissionOneCompany):
         return True
 
     def _tool_notice(self,p):
-        return VideoProviderQualityCompany._tool_notice(self,p).replace('target_duration=60','target_duration=replan.duration_seconds')+NOTICE+PLAN_RULES
+        return VideoProviderQualityCompany._tool_notice(self,p).replace('target_duration=60','target_duration=replan.duration_seconds')+rework_notice(p)+PLAN_RULES
 
     def _manager_selection(self,p):
         return p.get('rework_plan')
@@ -367,7 +390,11 @@ class ReworkCompany(MissionOneCompany):
             target['properties']['tasks']['items']['description']=PLAN_RULES
         elif phase=='review':
             target=schema['properties']['result']
-            target['properties']['goal_review']=obj(**{k:obj(met={'type':'boolean'},evidence=S) for k in CHECKS})
+            evidence = S
+            if (getattr(self, '_rework_state', None) or {}).get('content_review_policy') == 1:
+                evidence = {**S, 'description':'Copy a short, exact excerpt from the artifact. Put reasoning in rationale. '
+                            'Use an empty string when no excerpt exists and mark met false.'}
+            target['properties']['goal_review']=obj(**{k:obj(met={'type':'boolean'},evidence=dict(evidence)) for k in CHECKS})
             target['required'].append('goal_review')
         return schema
 
@@ -414,9 +441,11 @@ class ReworkCompany(MissionOneCompany):
                     raise
             elif phase=='review':
                 self._semantic=result.pop('goal_review')
+                self._manager_review={k:result[k] for k in ('action','rationale','evidence','feedback')}
                 self._quality_followup=None
                 content=self._review_content
                 artifact=parse(content)
+                enhanced = (getattr(self, '_rework_state', None) or {}).get('content_review_policy') == 1
                 def evidence_in_artifact(quote,value):
                     if isinstance(value,str):return quote in value
                     if isinstance(value,list):return any(evidence_in_artifact(quote,v) for v in value)
@@ -427,9 +456,15 @@ class ReworkCompany(MissionOneCompany):
                     if check['met'] is not True:
                         failed[name]='not_met'
                     elif not check['evidence'].strip() or not (
-                        check['evidence'] in content or evidence_in_artifact(check['evidence'],artifact)
+                        evidence_in_artifact(check['evidence'],artifact)
+                        or (not enhanced and check['evidence'] in content)
                     ):
                         failed[name]='evidence_not_found'
+                if enhanced:
+                    utterances = [artifact.get('transcript', ''), artifact.get('hook_0_3s', '')]
+                    utterances.extend(shot.get('narration', '') for shot in artifact.get('shots', []))
+                    if any(CURRENT_PLAYER_COUNT.search(line) for line in utterances):
+                        failed['current_player_count']='unverified_current_player_count'
                 if result['action']=='accept':
                     for criterion in result['checks']:
                         if criterion['status']!='met':
@@ -505,8 +540,13 @@ class ReworkCompany(MissionOneCompany):
             require([t['role'] for t in result['tasks']]==['writer','editor'],'rework_roles_required')
             p['rework_plan']=deepcopy(self._decision)
         if phase=='review':
-            p.setdefault('goal_reviews',[]).append(dict(task_id=task_id,review=deepcopy(self._semantic)))
+            record=dict(task_id=task_id,review=deepcopy(self._semantic))
+            if p.get('content_review_policy') == 1:
+                record['manager_review']=deepcopy(self._manager_review)
+            p.setdefault('goal_reviews',[]).append(record)
             if self._quality_followup is not None:
+                if 'manager_review' in record:
+                    self._quality_followup['manager_review']=deepcopy(record['manager_review'])
                 p.setdefault('quality_followups',[]).append(deepcopy(self._quality_followup))
                 self.store.save(p)
         return result
@@ -773,15 +813,15 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False,
         if quality_decision:
             old=store.load(previous_job);decision=flow['rework']['quality_decision']
             writer=next(t for t in old['assignments'] if t['role']=='writer' and t.get('versions'))
+            quality_report=legacy_quality_report(old,flow['rework']) or old['quality_followups'][-1]
+            manager_review=quality_report.get('manager_review', {})
             answers['quality_followup']=dict(
                 representative_instruction=decision['feedback'],
                 source_job=old['id'],source_report_hash=decision['report_hash'],
-                failed_checks=deepcopy(legacy_quality_report(old,flow['rework'])['failed_checks']
-                    if legacy_quality_report(old,flow['rework']) else
-                    old['quality_followups'][-1].get('failed_checks',{})),
-                manager_feedback=(legacy_quality_report(old,flow['rework'])['feedback']
-                    if legacy_quality_report(old,flow['rework']) else
-                    old['quality_followups'][-1].get('feedback','')),
+                failed_checks=deepcopy(quality_report.get('failed_checks',{})),
+                manager_feedback=manager_review.get('feedback', quality_report.get('feedback','')),
+                previous_review_action=quality_report.get('original_action'),
+                previous_system_decision=quality_report.get('decision'),
                 previous_writer=deepcopy(parse(writer['versions'][-1]['content'])))
         job=store.create(project['goal'],inputs=dict(domain='video',target_segment=flow['audience'],answers=answers,
             constraints=dict(aspect='9:16',language='한국어',platform='YouTube Shorts'),
@@ -790,6 +830,7 @@ def prepare(workflow,pid,key,account,*,previous_job=None,quality_decision=False,
                 (' | 대표 추가 수정 지시: '+flow['rework']['quality_decision']['feedback'] if quality_decision else ''))),
             max_calls=7,max_revisions_per_task=1,max_total_revisions=1)
         prior=flow['plan_versions'][-1]
+        job['content_review_policy']=1
         job['rework_reference']=dict(project=pid,version=prior['version'],plan_hash=prior['sha256'],
             decision_hash=digest(flow['decisions'][-1]),input_hash=digest(answers))
         if parent:job['rework_reference']['previous_failed_attempt']=parent

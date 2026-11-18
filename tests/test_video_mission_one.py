@@ -1955,6 +1955,11 @@ class MissionOneTests(unittest.TestCase):
         def send(request,timeout):
             nonlocal review_count,revision_exec_count
             wire=json.loads(request.data);message=json.loads(wire['contents'][0]['parts'][0]['text']);phase=message['phase'];context=message['data']
+            self.assertIn('대표의 최근 명시적 유지 조건', wire['systemInstruction']['parts'][0]['text'])
+            if phase == 'review':
+                fields = wire['generationConfig']['responseJsonSchema']['properties']['result']['properties']
+                evidence = fields['goal_review']['properties']['claims_supported']['properties']['evidence']
+                self.assertIn('exact excerpt', evidence['description'])
             self.assertEqual(context['quality']['feedback_text'],feedback)
             self.assertEqual(context['quality']['answers']['previous_plan']['sha256'],original['sha256'])
             recovering = script_recovery and bool(provider.load(pid).get('script_recovery'))
@@ -2140,7 +2145,16 @@ class MissionOneTests(unittest.TestCase):
             self.assertEqual(new['real_ai']['attempts'],[])
             self.assertEqual(new['rework_reference']['previous_failed_attempt']['job'],pid)
             self.assertIn('반전 장면',new['quality_inputs']['feedback_text'])
-            self.assertIn('quality_followup',new['quality_inputs']['answers'])
+            followup=new['quality_inputs']['answers']['quality_followup']
+            self.assertEqual(followup['previous_writer'], json.loads(result['assignments'][0]['versions'][-1]['content']))
+            self.assertFalse(new['quality_inputs']['answers']['research_context']['additional_web_research_available'])
+            with self.assertRaisesRegex(CompanyError, 'rework_duplicate_or_unapproved'):
+                self.studio.action('workspace',project,'rework-run',{})
+            consent=dict(review_hash=pending['review_hash'],confirm_free_account=True,confirm_data_policy=True)
+            self.studio.action('workspace',project,'rework-consent',consent)
+            self.assertEqual(provider.grant(provider.load(pending['job']))['body']['limits']['max_calls'],7)
+            with self.assertRaises(CompanyError):
+                self.studio.action('workspace',project,'rework-consent',consent)
             self.assertEqual(self.http.call_count,3)
             for path,data in old_files.items():self.assertEqual(path.read_bytes(),data)
             with self.assertRaises(CompanyError):

@@ -206,6 +206,7 @@ class Studio:
             progress['next_action']='저장된 대본을 읽고 대표가 새 수정 지시 또는 보류를 기록하세요. 과거 검토를 수락 처리하지 않습니다.'
         if new_attempt:
             progress['next_action']='새 AI 재작업 준비를 눌러 새 전송 범위를 검토·동의한 뒤 시작하세요. 기존 실패 업무는 다시 실행하지 않습니다.'
+        from cutroom_review import quality_draft
         return dict(status=state['status'],job=state['job'],error=state.get('error'),settings=settings,recovery=recovery,
             new_attempt=new_attempt,history=[dict(job=x['job'],status=x['status'],error=x.get('error')) for x in flow.get('rework_history',[])],
             feedback=job['quality_inputs']['feedback_text'],proposal=state.get('proposal'),
@@ -215,6 +216,7 @@ class Studio:
             quality_decision=state.get('quality_decision'),
             recovery_audit=audit,
             quality_report_hash=digest(progress['quality_report']) if progress.get('quality_report') else None,
+            quality_draft=quality_draft(self.stores[key].root, p, job['id'], progress.get('quality_report')),
             quality_script=next((json.loads(t['versions'][-1]['content']).get('transcript','')
                  for t in job.get('assignments',[]) if t['role']=='writer' and t.get('versions')),None))
 

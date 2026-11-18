@@ -77,6 +77,48 @@ class QualityFollowupTests(unittest.TestCase):
         self.assertIsNone(self.company._quality_followup)
         self.assertEqual(self.company.store.saves, 0)
 
+    def test_current_player_count_blocks_even_with_exact_quote(self):
+        phrase = "지금 1만 4천 명이 실시간으로 살아남는 게임"
+        self.company._review_content = json.dumps({"transcript": phrase}, ensure_ascii=False)
+        self.company._rework_state['content_review_policy'] = 1
+        result = self.parse(model_review(evidence=phrase))
+        self.assertEqual(result['action'], 'revise')
+        self.assertEqual(self.company._quality_followup['failed_checks'],
+                         {'current_player_count': 'unverified_current_player_count'})
+        self.assertEqual(self.company._manager_review['action'], 'accept')
+        self.assertEqual(self.company._manager_review['rationale'], '검토 의견')
+
+    def test_new_policy_quotes_only_artifact_text(self):
+        self.company._rework_state['content_review_policy'] = 1
+        self.assertEqual(self.parse(model_review(evidence='한 문장'))['action'], 'accept')
+        for value in ('transcript', '대본은 목표를 충족함'):
+            self.assertEqual(self.parse(model_review(evidence=value))['action'], 'revise')
+            self.assertEqual(self.company._quality_followup['failed_checks']['goal_fit'], 'evidence_not_found')
+
+    def test_named_conditions_are_separate_from_a_valid_quote(self):
+        self.company._rework_state['content_review_policy'] = 1
+        self.company._rework_state['assignments'][0]['revisions'] = 1
+        payload = model_review(action='revise')
+        payload['result']['goal_review']['feedback_applied']['met'] = False
+        payload['result']['goal_review']['claims_supported']['met'] = False
+        result = self.parse(payload)
+        self.assertEqual(result['action'], 'stop')
+        self.assertEqual(self.company._manager_review['action'], 'revise')
+        self.assertEqual(self.company._quality_followup['failed_checks'],
+                         {'feedback_applied':'not_met', 'claims_supported':'not_met'})
+
+    def test_review_description_adds_guidance_without_changing_old_shape(self):
+        from representative_rework import NOTICE, QUALITY_NOTICE, rework_notice
+        self.assertEqual(rework_notice({}), NOTICE)
+        old = self.company._schema('review')
+        self.company._rework_state['content_review_policy'] = 1
+        self.assertEqual(rework_notice(self.company._rework_state), NOTICE + QUALITY_NOTICE)
+        revised = self.company._schema('review')
+        checks = revised['properties']['result']['properties']['goal_review']['properties']
+        for check in checks.values():
+            self.assertIn('exact excerpt', check['properties']['evidence'].pop('description'))
+        self.assertEqual(revised, old)
+
     def test_unmet_manager_accept_becomes_bounded_revision(self):
         result = self.parse(model_review(met=False))
         self.assertEqual(result["action"], "revise")

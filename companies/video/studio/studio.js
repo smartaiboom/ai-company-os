@@ -276,7 +276,9 @@ function reworkPanel(p) {
         ?'이전 AI 관리자 응답은 HTTP 200이지만 검증에 실패했습니다. 아래 내용은 관리자 승인이나 확정 평가가 아니며, 대표가 저장된 대본을 직접 판단해야 합니다.'
         :'수정 한도에 도달했거나 AI 관리자가 대표 판단을 요청했습니다. 자동 재호출은 없습니다.'}</p>
       <p><strong>대본 직원 산출물</strong></p><pre>${h(r.quality_script||'저장된 대본 없음')}</pre>
-      <p><strong>부족한 검토 항목</strong></p><pre>${h(JSON.stringify(progress.quality_report.failed_checks,null,2))}</pre>
+      <p><strong>관리자 선택 / 시스템 처리</strong> · ${h(progress.quality_report.original_action)} / ${h(progress.quality_report.decision)} · ${h(progress.quality_report.reason)}</p>
+      ${progress.quality_report.manager_review ? `<p><strong>관리자 판단 원문</strong> · ${h(progress.quality_report.manager_review.rationale)}</p>` : ''}
+      <p><strong>시스템 검증 사유</strong> · 인용 불일치(evidence_not_found), 관리자 미충족 판단(not_met), 현재 수치 미검증 등</p><pre>${h(JSON.stringify(progress.quality_report.failed_checks,null,2))}</pre>
       <p><strong>${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'?'과거 검토 상태(미검증)':'AI 관리자 검토 근거'}</strong></p><pre>${h(JSON.stringify(progress.quality_report.evidence||{},null,2))}</pre>
       <p><strong>${progress.quality_report.source==='legacy_failure_diagnostic_not_manager_review'?'안내 및 대표 직접 검토 요청':'수정 제안'}</strong></p><p>${h(progress.quality_report.feedback||'구체적인 수정 지시가 기록되지 않았습니다.')}</p>
       ${r.quality_decision?`<p><strong>대표 결정:</strong> ${h(r.quality_decision.action==='request_revision'?'수정 지시 기록됨':'보류')} · ${h(r.quality_decision.feedback||'추가 의견 없음')}</p>
@@ -526,9 +528,12 @@ main.addEventListener('click',async event=>{
   else if (['rework-quality-revise','rework-quality-hold'].includes(button.dataset.action)) {
     const revision=button.dataset.action==='rework-quality-revise';
     const report=detail.rework;
-    const defaults=report.progress?.quality_report?.feedback||'';
+    const draft=report.quality_draft;
+    const matchedDraft=draft?.job===report.job && draft.report_hash===report.quality_report_hash;
+    const defaults=matchedDraft ? draft.feedback : report.progress?.quality_report?.feedback||'';
     modal(revision?'AI 관리자 품질 보고 · 수정 지시':'AI 관리자 품질 보고 · 보류',
       `<p>현재 대본과 관리자 검토 근거를 확인한 뒤 지시를 기록합니다. 이 동작은 AI를 호출하지 않습니다.</p>
+      ${revision && matchedDraft ? '<p>이 중단 작업의 로컬 초안입니다. 검토하거나 편집한 뒤 저장해 주세요.</p>' : ''}
       <label>대표 의견<textarea name="feedback" maxlength="2000" rows="5" ${revision?'required':''}>${h(revision?defaults:'')}</textarea></label>`,
       '지시 저장',async data=>{
         await api(detailApi(detail)+'/rework-quality-decide',{

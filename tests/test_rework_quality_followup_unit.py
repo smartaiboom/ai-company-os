@@ -46,6 +46,39 @@ def model_review(*, action="accept", met=True, evidence="한 문장", check_stat
 
 
 class QualityFollowupTests(unittest.TestCase):
+    def test_final_aggregation_requires_each_assigned_review_and_exact_versions(self):
+        from copy import deepcopy
+        from autonomous_company import CompanyError, digest
+        from representative_rework import aggregate_final_review
+        assignments = []
+        for role, ids in (('writer', ['shared']), ('editor', ['shared','edit_only'])):
+            review = model_review()['result']
+            del review['goal_review']
+            review['checks'] = [dict(criterion_id=cid, status='met', source='model_claim', evidence=f'{role} 근거')
+                                for cid in ids]
+            assignments.append(dict(id=role, role=role, criteria_ids=ids, reviews=[review],
+                                    state='accepted_by_ai_manager',
+                                    versions=[dict(task_id=role, role=role, revision=1)]))
+        job = dict(assignments=assignments, rework_plan=dict(feedback_response='검토 완료'),
+                   plan=dict(tasks=[{k:t[k] for k in ('id','role','criteria_ids')} for t in assignments],
+                             criteria=[dict(id='shared'),dict(id='edit_only')]))
+        before = deepcopy(job)
+        final = aggregate_final_review(job)
+        self.assertEqual([c['criterion_id'] for c in final['checks']], ['shared','edit_only'])
+        self.assertIn('writer v1 수락 검토 · editor v1 수락 검토', final['checks'][0]['evidence'])
+        self.assertEqual(final['task_refs'][1]['result_hash'],digest(assignments[1]['versions'][0]))
+        self.assertEqual(job,before)
+        for modify, error in (
+            (lambda t:t['reviews'][0]['checks'].pop(), 'invalid_checks'),
+            (lambda t:t['reviews'][0]['checks'][1].update(criterion_id='shared'), 'duplicate_checks'),
+            (lambda t:t['reviews'][0]['checks'][0].update(status='unmet'), 'quality_unverified'),
+            (lambda t:t['versions'].append(dict(task_id='editor',role='editor',revision=2)), 'invalid_final_references'),
+        ):
+            bad=deepcopy(job)
+            modify(bad['assignments'][1])
+            with self.assertRaisesRegex(CompanyError,error):
+                aggregate_final_review(bad)
+
     def setUp(self):
         self.company = object.__new__(ReworkCompany)
         self.company._review_content = json.dumps({"transcript": "한 문장\n두 번째 문장"}, ensure_ascii=False)

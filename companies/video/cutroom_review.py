@@ -126,11 +126,17 @@ def plan_markdown(project, plan):
         lines.append(f"- {_plain(beat['start'])}–{_plain(beat['end'])}초 · {_plain(beat['shot_type'])} · "
                      f"{_plain(beat['screen'])} · 자막 {caption} · {_plain(beat['source_status'])}{source_link}")
     lines += ["", "## 관리자 검토", ""]
+    final = plan.get('final_review', {})
+    aggregated = any(c.get('source')=='system_aggregation' for c in final.get('checks', []))
     for task in plan.get('task_history', []):
         for review in task['reviews']:
             lines.append(f"- {_plain(task['role'])} / {_plain(review['action'])} · {_plain(review.get('rationale'))}")
-    final = plan.get('final_review', {})
+        if aggregated and task['reviews']:
+            for check in task['reviews'][-1]['checks']:
+                lines.append(f"  - {_plain(check['criterion_id'])} / 모델 검토 근거 · {_plain(check['evidence'])}")
     lines += [_plain(final.get('rationale') or plan.get('summary')), ""]
+    if aggregated:
+        lines += ["## 시스템 최종 집계", ""]
     for check in final.get('checks', []):
         lines.append(f"- {_plain(check['criterion_id'])} / {_plain(check['status'])} · {_plain(check['evidence'])}")
     lines += ["", "## 호출 집계", ""]

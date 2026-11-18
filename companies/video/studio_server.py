@@ -179,8 +179,10 @@ class Studio:
         flow=p['representative'];state=flow.get('rework')
         if not state:
             return dict(status='available',feedback=flow['decisions'][-1]['feedback']) if flow['stage']=='plan_revision' and flow['plan_versions'] else None
-        from representative_rework import ReworkStore,execution_settings,progress_view,failed_plan_reference
-        job=ReworkStore(self.stores[key].root/'representative_rework').load(state['job'])
+        from representative_rework import (ReworkStore, check_finalization_recovery, execution_settings,
+                                            progress_view, failed_plan_reference)
+        provider=ReworkStore(self.stores[key].root/'representative_rework')
+        job=provider.load(state['job'])
         settings=execution_settings();recovery=dict(eligible=False,error=None)
         if state['status']=='stopped' and state.get('error')=='gemini_execution_disabled':
             try:
@@ -192,6 +194,13 @@ class Studio:
             try:new_attempt=failed_plan_reference(ReworkStore(self.stores[key].root/'representative_rework'),p,os.getenv('GEMINI_API_KEY',''))
             except CompanyError:pass
         progress=progress_view(job,state)
+        final_recovery=None
+        if state.get('status')=='stopped' and state.get('error')=='invalid_checks' and job.get('phase')=='finalize':
+            try:
+                check_finalization_recovery(p,provider,job)
+                final_recovery=dict(eligible=True,job=job['id'],state_hash=job['storage_hash'])
+            except CompanyError as exc:
+                final_recovery=dict(eligible=False,error=exc.code)
         from representative_rework import legacy_quality_report,review_recovery_audit
         audit=review_recovery_audit(job,state)
         if audit and audit['kind']=='editor_handoff_after_mismatch':
@@ -219,7 +228,7 @@ class Studio:
             new_attempt=new_attempt,history=[dict(job=x['job'],status=x['status'],error=x.get('error')) for x in flow.get('rework_history',[])],
             feedback=job['quality_inputs']['feedback_text'],proposal=state.get('proposal'),
             review_hash=digest(state['proposal']) if state.get('proposal') else None,
-            job_status=job['status'],attempts=len(job['real_ai']['attempts']),
+            job_status=job['status'],attempts=len(job['real_ai']['attempts']),final_recovery=final_recovery,
             replan=job.get('rework_plan'),reviews=job.get('goal_reviews',[]),progress=progress,
             quality_decision=state.get('quality_decision'),
             recovery_audit=audit,
@@ -658,6 +667,9 @@ class Studio:
         require(key == 'workspace', 'readonly_project')
         if name=='rework-quality-decide':
             self.rework_quality_decide(pid,body)
+        elif name=='rework-finalize-recover':
+            from representative_rework import recover_finalization
+            recover_finalization(self.workflow,pid,body)
         elif name in MISSION_ACTIONS:
             self.mission_action(pid, name, body)
         elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare',
@@ -819,7 +831,7 @@ def make_server(host, port, studio):
                     project = studio.project('workspace', match[1])
                     plan = matching_plan(project, body['version'], body['sha256'])
                     return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS)}|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS)}|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

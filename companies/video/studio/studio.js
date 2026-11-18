@@ -263,6 +263,9 @@ function reworkPanel(p) {
       ${facts([['기록된 요청 시도',progress.counts.attempts],['전송 시작 기록',progress.counts.transport_started],['정상 HTTP 응답',progress.counts.http_ok],['서버 검증 완료',progress.counts.server_validated],['전송 실패 기록',progress.counts.failed],['무료 quota / 청구','미확인 / 독립 검증 안 됨']])}
       <p class="muted">HTTP 응답 완료와 결과물 수락은 다릅니다. 시도에는 실패·수신 불명 요청도 포함됩니다.</p>
       <details><summary>기술 진단·호출 기록</summary><p>${h(r.error||r.recovery?.error||'현재 오류 코드 없음')}</p><pre>${h(JSON.stringify(progress.ledger,null,2))}</pre></details>`:''}
+    ${r.final_recovery?`<section class="subpanel"><h3>최종 기준 집계 · 대표 제출</h3>${r.final_recovery.eligible
+      ?'<p>이미 수락된 대본과 스토리보드의 검토를 집계합니다. 외부 요청 0회.</p><button class="button secondary" data-action="rework-finalize-recover">기존 검토로 대표 제출 복구</button>'
+      :`<p class="warning">${r.final_recovery.error==='consent_expired'?'기존 동의가 만료되어 제출을 복구할 수 없습니다.':h(r.final_recovery.error)}</p>`}</section>`:''}
     ${r.recovery_audit?.kind==='editor_handoff_after_mismatch'?`<section class="subpanel"><h3>편집 인계 중단 · 스토리보드 검토</h3><p>수락된 대본에서 스토리보드를 그대로 만들고 AI 관리자가 검토합니다.</p>${r.recovery_audit.safe_for_recovery_proposal?'<button class="button secondary" data-action="rework-script-recover-prepare">스토리보드 관리자 검토 준비</button>':''}</section>`
     :r.recovery_audit?.kind==='manager_review_after_repeat'?`<section class="subpanel"><h3>중복 응답 중단 · 기존 대본 재검토</h3>
       <p>보존된 첫 대본을 AI 관리자가 다시 검토합니다. 재기획과 첫 대본 작성은 반복하지 않습니다.</p>
@@ -500,6 +503,15 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action==='rework-finalize-recover') {
+    const project=detail;
+    const recovery=project.rework.final_recovery;
+    modal('기존 검토로 대표 제출 복구','<p>수락된 검토를 로컬에서 집계하고 기획 승인 대기로 제출합니다. 외부 요청과 대표 승인 없이 처리합니다.</p>',
+      '대표 승인 대기로 제출',async ()=>{
+        await api(detailApi(project)+'/rework-finalize-recover',{job:recovery.job,state_hash:recovery.state_hash});
+        return {message:'기획 승인 대기로 제출했습니다.'};
+      });
+  }
   else if (button.dataset.action==='plan-markdown') {
     const project=detail;
     const reports=project.flow.plan_versions;

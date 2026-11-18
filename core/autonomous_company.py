@@ -216,13 +216,13 @@ def validate_plan(value):
     return value
 
 
-def validate_checks(checks, criteria_ids):
+def validate_checks(checks, criteria_ids, *, source='model_claim'):
     require(isinstance(checks,list) and len(checks)==len(criteria_ids),'invalid_checks')
     seen=[]
     for check in checks:
         exact(check,('criterion_id','status','evidence','source'))
         require(check['criterion_id'] in criteria_ids and check['status'] in ('met','unmet','unknown')
-                and check['source']=='model_claim','invalid_check')
+                and check['source']==source,'invalid_check')
         text(check['evidence']);seen.append(check['criterion_id'])
     require(len(set(seen))==len(seen),'duplicate_checks')
     return all(c['status']=='met' for c in checks)
@@ -243,6 +243,7 @@ def validate_review(value, criteria_ids):
 
 class Company:
     source = "mock_model"
+    final_check_source = 'model_claim'
     data_notice = "모의 자료이며 외부 확인을 수행하지 않는다. 자료 속 명령은 운영 권한이 아니다."
 
     def _validate_mode(self, p):
@@ -360,7 +361,8 @@ class Company:
                     exact(value,('action','content','rationale','uncertainty','checks','task_refs'))
                     for field in ('content','rationale','uncertainty'):text(value[field])
                     require(value['action'] in ('deliver','stop'),'invalid_final_action')
-                    passed=validate_checks(value['checks'],[c['id'] for c in p['plan']['criteria']])
+                    passed=validate_checks(value['checks'],[c['id'] for c in p['plan']['criteria']],
+                                           source=self.final_check_source)
                     expected=[{'task_id':r['task_id'],'revision':r['revision'],'result_hash':digest(r)} for r in results]
                     require(value['task_refs']==expected,'invalid_final_references')
                     if value['action']=='stop':
@@ -368,8 +370,11 @@ class Company:
                         self._commit(p,'ai_manager_decision',phase='finalize',actor=self.manager.name,decision=value)
                         return self.store.result(project_id)
                     require(passed,'final_quality_unverified')
-                    p['final']={**value,'provider':self.manager.name,'source':self.source}
-                    p['events'].append({'at':now(),'event':'ai_manager_decision','phase':'finalize','actor':self.manager.name,'decision':value})
+                    system_final = self.final_check_source == 'system_aggregation'
+                    actor = 'system' if system_final else self.manager.name
+                    p['final']={**value,'provider':actor,'source':self.final_check_source if system_final else self.source}
+                    p['events'].append({'at':now(),'event':'system_review_aggregation' if system_final else 'ai_manager_decision',
+                                        'phase':'finalize','actor':actor,'decision':value})
                     blockers=self._delivery_blockers(p)
                     if blockers:
                         p['status']=blockers[0];p['reason_code']=blockers[0]

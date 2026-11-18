@@ -5,7 +5,7 @@ import json
 import re
 import os
 import inspect
-from autonomous_company import CompanyError, Store, digest, parse, require, text, validate_plan
+from autonomous_company import CompanyError, Store, digest, exact, now, parse, require, text, validate_checks, validate_plan, validate_review
 from autonomous_gemini35 import Gemini35Store, Gemini35Config, MODEL, ENDPOINT
 from autonomous_live import CONTRACTS, LiveManagerProvider, LiveEmployeeProvider
 from quality_provider import QualityProviderStore
@@ -330,7 +330,8 @@ def progress_view(job,state):
     if state['status']=='running' and latest and latest.get('status')=='reserved':
         role=next((t['role'] for t in tasks.values() if t['id']==latest.get('task_id')),None)
         current='plan' if latest['phase']=='plan' else role+('_review' if latest['phase']=='review' else '') if role else current
-    terminal=state['status']=='stopped' or job['status'] in ('stopped','paused','needs_operational_permission')
+    terminal=(not state.get('local_finalization') and
+              (state['status']=='stopped' or job['status'] in ('stopped','paused','needs_operational_permission')))
     error=(state.get('error') or job.get('reason_code')) if terminal else None
     messages={
         'invalid_dependencies':('AI 관리자가 작성한 업무 순서나 참조 관계가 유효하지 않아 기획안 검증에서 중단됐습니다. 새 대본은 아직 생성되지 않았습니다.','담당 개발 점검이 필요합니다. 다시 실행하지 마세요.'),
@@ -512,6 +513,7 @@ class ReworkStore(QualityProviderStore):
 
 class ReworkCompany(MissionOneCompany):
     store_type=ReworkStore
+    final_check_source='system_aggregation'
 
     def _validate_script_plan(self,value):
         # Rework grants allow manager-selected criterion IDs, unlike production plans.
@@ -710,11 +712,7 @@ class ReworkCompany(MissionOneCompany):
                     'rework_recovery_seed_mismatch')
         if phase=='finalize':
             self.store.grant(p)
-            require(all(t['state']=='accepted_by_ai_manager' for t in p['assignments']),'rework_not_accepted')
-            return dict(action='deliver',content='대표 수정 요청에 따른 새 대본·스토리보드 검토 완료',
-                rationale=p['rework_plan']['feedback_response'],uncertainty='권리·성과 및 대표 승인 미확정',
-                checks=deepcopy(p['assignments'][0]['reviews'][-1]['checks']),
-                task_refs=[dict(task_id=r['task_id'],revision=r['revision'],result_hash=digest(r)) for r in context['results']])
+            return aggregate_final_review(p)
         if phase=='review':
             self._review_content=json.dumps(parse(context['result']['content']),ensure_ascii=False)
             self._review_task_id=task_id
@@ -1102,64 +1100,161 @@ def cap_pending_proposal(workflow,pid,key):
         workflow.store.save(project)
 
 
+def aggregate_final_review(job):
+    """Combine the existing approvals without adding a model judgment."""
+    plan = job['plan']
+    criteria = [item['id'] for item in plan['criteria']]
+    require(len(criteria) == len(set(criteria)), 'duplicate_checks')
+    assignments = job['assignments']
+    require([task['id'] for task in assignments] == [task['id'] for task in plan['tasks']],
+            'invalid_final_references')
+    refs, evidence = [], {criterion: [] for criterion in criteria}
+    for task, planned in zip(assignments, plan['tasks']):
+        ids = task['criteria_ids']
+        require(ids == planned['criteria_ids'] and ids and len(ids) == len(set(ids))
+                and set(ids) <= set(criteria), 'invalid_checks')
+        require(task['state'] == 'accepted_by_ai_manager' and task['versions'] and task['reviews'],
+                'rework_not_accepted')
+        require(len(task['versions'])==len(task['reviews']), 'invalid_final_references')
+        result, review = task['versions'][-1], task['reviews'][-1]
+        require(result['task_id'] == task['id'] and result['role'] == task['role'] == planned['role']
+                and result['revision'] == len(task['versions']), 'invalid_final_references')
+        require(validate_review(review, ids)['action'] == 'accept', 'rework_not_accepted')
+        refs.append(dict(task_id=task['id'], revision=result['revision'], result_hash=digest(result)))
+        for check in review['checks']:
+            evidence[check['criterion_id']].append(f"{task['role']} v{result['revision']} 수락 검토")
+    require(all(evidence.values()), 'invalid_checks')
+    checks = [dict(criterion_id=k, status='met', source='system_aggregation',
+                   evidence=' · '.join(evidence[k])) for k in criteria]
+    validate_checks(checks, criteria, source='system_aggregation')
+    return dict(action='deliver', content='대표 수정 요청에 따른 새 대본·스토리보드 검토 완료',
+                rationale=job['rework_plan']['feedback_response'], uncertainty='권리·성과 및 대표 승인 미확정',
+                checks=checks, task_refs=refs)
+
+
 def handoff(workflow,pid,provider,*,allow_fixture=False):
     with workflow.store.lock(pid):
-        project=workflow.store.load(pid);flow=project['representative'];job=provider.result(flow['rework']['job'])
+        project=workflow.store.load(pid)
+        job=provider.result(project['representative']['rework']['job'])
         provider.grant(job)
-        require(job['status']=='needs_user_review' and job['final']['source']=='accepted_review_handoff'
-                and all(t['state']=='accepted_by_ai_manager' for t in job['assignments']),'rework_not_accepted')
-        require(all(a['status']=='completed' and a.get('http_status')==200 and a.get('role_result_status')=='validated'
-                    for a in job['real_ai']['attempts']),'rework_evidence')
-        require(job['plan']['source']=='provider_model_claim' or allow_fixture and job['plan']['source']=='offline_http_fixture','rework_fixture_forbidden')
-        if job.get('script_recovery'):
-            recovery=job['script_recovery']
-            old=provider.load(recovery['source_job'])
-            parent=job['rework_reference'].get('previous_failed_attempt',{})
-            archived=next((entry for entry in flow.get('rework_history',[])
-                           if entry.get('job')==old['id']),None)
-            require(archived is not None,'rework_recovery_source_changed')
-            audit=review_recovery_audit(old,archived)
-            manager_first = parent.get('recovery_scope') == MANAGER_RECOVERY_SCOPE
-            editor_first = editor_review_recovery(job)
-            original_writer=next(t for t in old['assignments'] if t['role']=='writer')
-            require(audit and audit['safe_for_recovery_proposal']
-                    and old['storage_hash']==parent.get('state_hash')
-                    and digest(old['plan'])==recovery['original_plan_hash']
-                    and digest(original_writer['versions'][-1])==recovery['original_writer_hash']
-                    and digest(original_writer['reviews'][-1])==recovery['original_review_hash']
-                    and digest(job['plan'])==recovery['original_plan_hash']
-                    and (not (manager_first or editor_first) or digest(job['rework_plan'])==parent['previous_replan_hash'])
-                    and len(job['assignments'][0]['versions']) >= (1 if manager_first or editor_first else 2)
-                    and (editor_first or job['assignments'][0]['versions'][0].get('reused_from_job')==old['id'])
-                    and all(a['role_result_status']=='validated'
-                            for a in old['real_ai']['attempts'][:1 if editor_first else 2])
-                    and old['real_ai']['attempts'][-1]['role_result_status']=='json_parsed',
+        _handoff_locked(workflow,project,provider,job,allow_fixture=allow_fixture)
+
+
+def _check_handoff(project,provider,job,*,allow_fixture=False):
+    flow=project['representative']
+    require(job['status']=='needs_user_review' and job['final']['source']=='accepted_review_handoff'
+            and all(t['state']=='accepted_by_ai_manager' for t in job['assignments']),'rework_not_accepted')
+    require(all(a['status']=='completed' and a.get('http_status')==200 and a.get('role_result_status')=='validated'
+                for a in job['real_ai']['attempts']),'rework_evidence')
+    require(job['plan']['source']=='provider_model_claim' or allow_fixture and job['plan']['source']=='offline_http_fixture','rework_fixture_forbidden')
+    if job['final']['checks'] and job['final']['checks'][0]['source']=='system_aggregation':
+        require({k:v for k,v in job['final'].items() if k not in ('provider','source')}==aggregate_final_review(job),
+                'invalid_final_references')
+    if job.get('script_recovery'):
+        recovery=job['script_recovery']
+        old=provider.load(recovery['source_job'])
+        parent=job['rework_reference'].get('previous_failed_attempt',{})
+        archived=next((entry for entry in flow.get('rework_history',[])
+                       if entry.get('job')==old['id']),None)
+        require(archived is not None,'rework_recovery_source_changed')
+        audit=review_recovery_audit(old,archived)
+        manager_first = parent.get('recovery_scope') == MANAGER_RECOVERY_SCOPE
+        editor_first = editor_review_recovery(job)
+        original_writer=next(t for t in old['assignments'] if t['role']=='writer')
+        require(audit and audit['safe_for_recovery_proposal']
+                and old['storage_hash']==parent.get('state_hash')
+                and digest(old['plan'])==recovery['original_plan_hash']
+                and digest(original_writer['versions'][-1])==recovery['original_writer_hash']
+                and digest(original_writer['reviews'][-1])==recovery['original_review_hash']
+                and digest(job['plan'])==recovery['original_plan_hash']
+                and (not (manager_first or editor_first) or digest(job['rework_plan'])==parent['previous_replan_hash'])
+                and len(job['assignments'][0]['versions']) >= (1 if manager_first or editor_first else 2)
+                and (editor_first or job['assignments'][0]['versions'][0].get('reused_from_job')==old['id'])
+                and all(a['role_result_status']=='validated'
+                        for a in old['real_ai']['attempts'][:1 if editor_first else 2])
+                and old['real_ai']['attempts'][-1]['role_result_status']=='json_parsed',
+                'rework_recovery_source_changed')
+        if editor_first:
+            writer, editor = job['assignments']
+            attempts = job['real_ai']['attempts']
+            require(writer['versions']==original_writer['versions'] and writer['reviews']==original_writer['reviews']
+                    and len(editor['versions'])==len(editor['reviews'])==len(attempts)==1
+                    and editor['reviews'][0]['action']=='accept' and attempts[0]['phase']=='review'
+                    and attempts[0]['task_id']==editor['id']
+                    and attempts[0]['result_hash']==digest(editor['versions'][0])
+                    and attempts[0]['response_hash']==digest(editor['reviews'][0]),
                     'rework_recovery_source_changed')
-            if editor_first:
-                writer, editor = job['assignments']
-                attempts = job['real_ai']['attempts']
-                require(writer['versions']==original_writer['versions'] and writer['reviews']==original_writer['reviews']
-                        and len(editor['versions'])==len(editor['reviews'])==len(attempts)==1
-                        and editor['reviews'][0]['action']=='accept' and attempts[0]['phase']=='review'
-                        and attempts[0]['task_id']==editor['id']
-                        and attempts[0]['result_hash']==digest(editor['versions'][0]),
-                        'rework_recovery_source_changed')
-                validate_system_storyboard(writer['versions'][0],editor['versions'][0],parent)
-        if flow['plan_versions'][-1].get('internal_job')==job['id']:return
-        require(flow['stage']=='plan_revision','rework_stage')
-        writer,editor=job['assignments'];script=parse(writer['versions'][-1]['content'])
-        validate_script_editor(parse(editor['versions'][-1]['content']),[writer['versions'][-1]])
-        prior=flow['plan_versions'][-1]
-        report=_report(dict(summary=job['final']['content'],topic=script['topic']['title'],script=script,
-            sources=prior['sources'],risks=job['final']['uncertainty'],changes=job['rework_plan']['feedback_response'],
-            internal_job=job['id'],previous_plan_sha256=prior['sha256'],render_spec=None,cost_limit_usd=0,
-            writer_sha256=digest(writer['versions'][-1]),editor_sha256=digest(editor['versions'][-1]),
-            internal_reviews=writer['reviews'],task_history=deepcopy(job['assignments']),manager_plan=job['plan'],
-            provenance=job['plan']['source'],representative_feedback=job['quality_inputs']['feedback_text'],
-            rework_plan=job['rework_plan'],goal_reviews=job['goal_reviews'],final_evaluation='not_performed_local_handoff',
-            final_review=job['final'], call_counts=dict(gemini=len(job['real_ai']['attempts']), youtube=0),
-            research=prior['research'],
-            **(dict(recovery_source=deepcopy(job['script_recovery'])) if job.get('script_recovery') else {})
-            ),flow['plan_versions'])
-        flow['plan_versions'].append(report);flow['rework']['status']='completed'
-        workflow._transition(project,'awaiting_plan_approval')
+            validate_system_storyboard(writer['versions'][0],editor['versions'][0],parent)
+
+
+def _handoff_locked(workflow,project,provider,job,*,allow_fixture=False,local_recovery=None):
+    _check_handoff(project,provider,job,allow_fixture=allow_fixture)
+    flow=project['representative']
+    if flow['plan_versions'][-1].get('internal_job')==job['id']:return
+    require(flow['stage']=='plan_revision','rework_stage')
+    writer,editor=job['assignments'];script=parse(writer['versions'][-1]['content'])
+    validate_script_editor(parse(editor['versions'][-1]['content']),[writer['versions'][-1]])
+    prior=flow['plan_versions'][-1]
+    report=_report(dict(summary=job['final']['content'],topic=script['topic']['title'],script=script,
+        sources=prior['sources'],risks=job['final']['uncertainty'],changes=job['rework_plan']['feedback_response'],
+        internal_job=job['id'],previous_plan_sha256=prior['sha256'],render_spec=None,cost_limit_usd=0,
+        writer_sha256=digest(writer['versions'][-1]),editor_sha256=digest(editor['versions'][-1]),
+        internal_reviews=writer['reviews'],task_history=deepcopy(job['assignments']),manager_plan=job['plan'],
+        provenance=job['plan']['source'],representative_feedback=job['quality_inputs']['feedback_text'],
+        rework_plan=job['rework_plan'],goal_reviews=job['goal_reviews'],final_evaluation='not_performed_local_handoff',
+        final_review=job['final'], call_counts=dict(gemini=len(job['real_ai']['attempts']), youtube=0),
+        research=prior['research'],
+        **({'local_finalization':local_recovery} if local_recovery else {}),
+        **(dict(recovery_source=deepcopy(job['script_recovery'])) if job.get('script_recovery') else {})
+        ),flow['plan_versions'])
+    if local_recovery:
+        original=deepcopy(flow['rework'])
+        flow.setdefault('rework_history',[]).append(original)
+        flow['rework']={**original,'local_finalization':local_recovery}
+        flow['rework'].pop('error',None)
+    flow['plan_versions'].append(report);flow['rework']['status']='completed'
+    workflow._transition(project,'awaiting_plan_approval')
+
+
+def check_finalization_recovery(project,provider,job,*,allow_fixture=False):
+    flow=project['representative']
+    state=flow['rework']
+    require(flow['stage']=='plan_revision' and state.get('status')=='stopped'
+            and state.get('job')==job['id'] and not state.get('local_finalization')
+            and state.get('error')==job.get('reason_code')=='invalid_checks'
+            and job['status']=='stopped' and job['phase']=='finalize'
+            and not job['final'] and not job['active_operation'] and not job['artifacts']
+            and editor_review_recovery(job)
+            and job['events'][-1].get('event')=='system_safety_stop'
+            and job['events'][-1].get('code')=='invalid_checks',
+            'rework_finalization_recovery_unavailable')
+    grant=provider.grant(job)
+    require(grant['body']==state['proposal'] and len(job['sessions'])==1
+            and len(job['real_ai']['attempts'])==1,'rework_evidence')
+    attempt=job['real_ai']['attempts'][0]
+    require(attempt.get('session_id')==job['sessions'][0]['id']
+            and attempt.get('grant_id')==grant['id'] and attempt.get('transport_started_at')
+            and attempt.get('finished_at') and attempt.get('response_hash'),'rework_evidence')
+    final=aggregate_final_review(job)
+    writer_checks=job['assignments'][0]['reviews'][-1]['checks']
+    require(len(writer_checks)<len(final['checks']),'rework_finalization_recovery_unavailable')
+    preview={**job,'status':'needs_user_review',
+             'final':{**final,'provider':'system','source':'accepted_review_handoff'}}
+    _check_handoff(project,provider,preview,allow_fixture=allow_fixture)
+    return preview
+
+
+def recover_finalization(workflow,pid,body,*,allow_fixture=False):
+    exact(body,('job','state_hash'))
+    provider=ReworkStore(workflow.store.root/'representative_rework')
+    with workflow.store.lock(pid):
+        project=workflow.store.load(pid)
+        state=project['representative'].get('rework',{})
+        require(state.get('job')==body['job'] and state.get('status')=='stopped',
+                'rework_finalization_recovery_unavailable')
+        job=provider.result(state['job'])
+        require(job['storage_hash']==body['state_hash'],'rework_finalization_recovery_unavailable')
+        preview=check_finalization_recovery(project,provider,job,allow_fixture=allow_fixture)
+        receipt=dict(at=now(),source_job=job['id'],source_state_hash=job['storage_hash'],
+                     original_reason=job['reason_code'],final_hash=digest(preview['final']),new_requests=0)
+        _handoff_locked(workflow,project,provider,preview,allow_fixture=allow_fixture,local_recovery=receipt)

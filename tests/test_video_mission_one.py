@@ -2012,6 +2012,10 @@ class MissionOneTests(unittest.TestCase):
                     self.assertEqual((tasks_schema['minItems'],tasks_schema['maxItems']),(2,2))
                 result=json.loads(manager(phase,context));result['replan']=dict(selected_topic=draft['topic']['title'],duration_seconds=25,
                     duration_reason='기존25초 유지, 최적값 주장은 하지 않음',feedback_response='제작법 대신 게임 장면으로 재기획')
+                if editor_recovery:
+                    criterion_ids=[criterion['id'] for criterion in result['criteria']]
+                    result['tasks'][0]['criteria_ids']=criterion_ids[:-1]
+                    result['tasks'][1]['criteria_ids']=criterion_ids[-2:]
                 if getattr(self,'rework_criterion_ids_fixture',False):
                     from quality_workflow import _validate_script_plan
                     from representative_rework import validate_rework_plan
@@ -2185,6 +2189,13 @@ class MissionOneTests(unittest.TestCase):
                 self.assertEqual(flow['plan_versions'][0],original)
                 self.assertEqual(flow['plan_versions'][1]['call_counts'],dict(gemini=1,youtube=0))
                 self.assertEqual(flow['plan_versions'][1]['task_history'][1]['versions'][0]['source'],'deterministic_system')
+                final=new['final']
+                self.assertEqual([c['criterion_id'] for c in final['checks']],
+                                 [c['id'] for c in new['plan']['criteria']])
+                self.assertEqual({c['source'] for c in final['checks']},{'system_aggregation'})
+                self.assertIn('writer v1 수락 검토 · editor v1 수락 검토', [c['evidence'] for c in final['checks']])
+                self.assertEqual(final['task_refs'][-1]['result_hash'], digest(new['assignments'][1]['versions'][0]))
+                self.assertTrue(any(e['event']=='system_review_aggregation' for e in new['events']))
                 for path,data in {**original_bytes,**old_files}.items():
                     self.assertEqual(path.read_bytes(),data)
                 return

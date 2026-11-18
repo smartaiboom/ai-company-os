@@ -192,9 +192,13 @@ class Studio:
             try:new_attempt=failed_plan_reference(ReworkStore(self.stores[key].root/'representative_rework'),p,os.getenv('GEMINI_API_KEY',''))
             except CompanyError:pass
         progress=progress_view(job,state)
-        from representative_rework import legacy_quality_report,script_review_recovery_audit
-        audit=script_review_recovery_audit(job,state)
-        if audit:
+        from representative_rework import legacy_quality_report,review_recovery_audit
+        audit=review_recovery_audit(job,state)
+        if audit and audit['kind']=='manager_review_after_repeat':
+            progress['title']='중복 응답 중단 · 관리자 재검토 준비'
+            progress['message']='검증된 첫 대본을 보존했습니다. 이전의 인용 오류는 대본 결함으로 확정되지 않았습니다.'
+            progress['next_action']='기존 대본 관리자 재검토 준비에서 새 동의 범위를 검토하세요.'
+        elif audit:
             progress['title']='기존 대본·관리자 검토 보존 확인'
             progress['message']='대본 검토는 내부 검증에서 중단됐습니다. 이전 호출을 반복하지 않고 저장된 자료의 재사용 가능성을 확인합니다.'
             progress['next_action']='실패 작업은 자동 재실행하지 않습니다. 저장된 대본과 검토 근거를 확인하고 별도 복구 경로를 검토합니다.'

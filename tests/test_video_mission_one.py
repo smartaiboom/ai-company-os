@@ -256,6 +256,14 @@ class MissionOneTests(unittest.TestCase):
         self.script_recovery_fixture = True
         self.test_representative_feedback_rework_end_to_end_offline()
 
+    def test_repeated_writer_recovery_starts_with_signed_manager_review(self):
+        self.manager_recovery_fixture = True
+        self.test_representative_feedback_rework_end_to_end_offline()
+
+    def test_repeated_writer_recovery_revises_only_for_an_actionable_review(self):
+        self.manager_recovery_revision_fixture = True
+        self.test_repeated_writer_recovery_starts_with_signed_manager_review()
+
     def test_legacy_unvalidated_review_to_ceo_new_job_offline(self):
         self.rework_quality_escalation_fixture=True
         self.legacy_unvalidated_rework_fixture=True
@@ -1952,6 +1960,8 @@ class MissionOneTests(unittest.TestCase):
         review_count=0
         revision_exec_count=0
         recovered_phases = []
+        manager_recovery = getattr(self, 'manager_recovery_fixture', False)
+        manager_revision = getattr(self, 'manager_recovery_revision_fixture', False)
         def send(request,timeout):
             nonlocal review_count,revision_exec_count
             wire=json.loads(request.data);message=json.loads(wire['contents'][0]['parts'][0]['text']);phase=message['phase'];context=message['data']
@@ -1962,13 +1972,19 @@ class MissionOneTests(unittest.TestCase):
                 self.assertIn('exact excerpt', evidence['description'])
             self.assertEqual(context['quality']['feedback_text'],feedback)
             self.assertEqual(context['quality']['answers']['previous_plan']['sha256'],original['sha256'])
-            recovering = script_recovery and bool(provider.load(pid).get('script_recovery'))
+            recovering = (script_recovery or manager_recovery) and bool(provider.load(pid).get('script_recovery'))
             if recovering:
                 recovered_phases.append(phase)
                 if len(recovered_phases) == 1:
-                    self.assertEqual(phase, 'execute')
+                    self.assertEqual(phase, 'review' if manager_recovery else 'execute')
                     self.assertEqual(context['assignment']['role'], 'writer')
-                    self.assertIn('caption_width', context['revision_feedback'])
+                    if manager_recovery:
+                        self.assertIn('한 장면의 한 줄', wire['systemInstruction']['parts'][0]['text'])
+                        self.assertEqual(json.loads(context['result']['content']), draft)
+                        self.assertEqual(context['version_history'][0], context['result'])
+                        self.assertEqual(context['revision_feedback'], '')
+                    else:
+                        self.assertIn('caption_width', context['revision_feedback'])
             if phase=='plan':
                 from representative_rework import PLAN_SCHEMA_REFERENCE
                 self.assertEqual(message['output_contract'],PLAN_SCHEMA_REFERENCE)
@@ -2007,6 +2023,12 @@ class MissionOneTests(unittest.TestCase):
                         self.assertIn('goal_fit',context['revision_feedback'])
                         self.assertIn('subject_story',context['revision_feedback'])
                 value=deepcopy(draft) if context['assignment']['role']=='writer' else script_editor_handoff(context['previous_results'][0])
+                if manager_revision and recovering and context['assignment']['role']=='writer':
+                    self.assertIn('빈칸에 놓자 길이 열렸어요.', context['revision_feedback'])
+                    new_line = '왼쪽 빈칸을 채우면 길이 이어져요.'
+                    value['narrative_beats'][1]['narration'] = new_line
+                    value['transcript'] = '\n'.join(beat['narration'] for beat in value['narrative_beats'])
+                    value['close'] = value['narrative_beats'][-1]['narration']
                 if script_recovery and not recovering and context['assignment']['role'] == 'writer':
                     value['narrative_beats'][1]['caption'] = '역전 한 수 ' * 10
                 if (getattr(self,'rework_quality_revision_fixture',False)
@@ -2017,6 +2039,12 @@ class MissionOneTests(unittest.TestCase):
                 result=dict(content=value if context['assignment']['role']=='writer' else json.dumps(value),evidence='offline fixture',uncertainty='unassessed')
             else:
                 result=json.loads(manager(phase,context));result['goal_review']={k:dict(met=True,evidence='역전 한 수') for k in ('goal_fit','feedback_applied','subject_story','concrete_hook','claims_supported')}
+                if manager_recovery and not recovering:
+                    result['goal_review']['subject_story']['evidence'] = ' '.join(draft['transcript'].splitlines())
+                if manager_revision and recovering and len(recovered_phases)==1:
+                    quote = draft['narrative_beats'][1]['narration']
+                    result['goal_review']['subject_story'] = dict(met=False, evidence=quote)
+                    result.update(action='revise', feedback=f'“{quote}”가 가리키는 빈칸 위치와 무엇이 달라지는지 설명하세요.')
                 if script_recovery and not recovering:
                     result.update(action='revise', feedback='긴 자막을 줄이세요.')
                 if getattr(self,'rework_quality_escalation_fixture',False) and phase=='review' and context['assignment']['role']=='writer':
@@ -2049,14 +2077,23 @@ class MissionOneTests(unittest.TestCase):
                 self.assertEqual(provider._grant_path(pid).read_bytes(),saved_grant)
             queued.pop()()
         result=provider.load(pid)
-        if script_recovery:
+        if script_recovery or manager_recovery:
             from video_mission_one import MISSION_ACCOUNT
-            self.assertEqual(result['reason_code'], 'script_feedback_missing_defect')
-            self.assertEqual(self.http.call_count, 3)
+            self.assertEqual(result['reason_code'], 'repeated_employee_result' if manager_recovery else 'script_feedback_missing_defect')
+            expected_prior = 4 if manager_recovery else 3
+            self.assertEqual(self.http.call_count, expected_prior)
             old_id = pid
             old_files = {path: path.read_bytes() for path in
                          (provider.path(old_id), provider._grant_path(old_id))}
             old_grant_id = provider.grant(result)['id']
+            if manager_recovery:
+                from representative_rework import review_recovery_audit
+                project_state = self.studio.workflow.store.load(project)['representative']['rework']
+                self.assertTrue(review_recovery_audit(result, project_state)['safe_for_recovery_proposal'])
+                for fields in (dict(status='reserved'), dict(finished_at=None), dict(response_hash=None)):
+                    bad = deepcopy(result)
+                    bad['real_ai']['attempts'][-1].update(fields)
+                    self.assertIsNone(review_recovery_audit(bad, project_state))
             self.studio.action('workspace', project, 'rework-script-recover-prepare',
                                dict(account_project=MISSION_ACCOUNT, confirm_free_account=True, previous_job=old_id))
             pending = self.studio.detail('workspace', project)['rework']
@@ -2065,23 +2102,29 @@ class MissionOneTests(unittest.TestCase):
             new = provider.load(pid)
             self.assertEqual(new['real_ai']['attempts'], [])
             self.assertEqual(new['plan'], result['plan'])
-            self.assertEqual(new['assignments'][0]['state'], 'revision_requested')
+            self.assertEqual(new['assignments'][0]['state'], 'awaiting_ai_review' if manager_recovery else 'revision_requested')
             with self.assertRaisesRegex(CompanyError, 'operating_consent_required'):
                 provider.grant(new)
             with self.assertRaisesRegex(CompanyError, 'rework_duplicate_or_unapproved'):
                 self.studio.action('workspace', project, 'rework-run', {})
-            self.assertEqual(self.http.call_count, 3)
+            self.assertEqual(self.http.call_count, expected_prior)
             self.studio.action('workspace', project, 'rework-consent',
                                dict(review_hash=pending['review_hash'], confirm_free_account=True, confirm_data_policy=True))
             self.assertNotEqual(provider.grant(provider.load(pid))['id'], old_grant_id)
             self.http.reset_mock(side_effect=False)
             with patch('threading.Thread', QueuedThread), patch('representative_rework.ReworkCompany', OfflineRework), patch('representative_rework.handoff', offline_handoff):
                 self.studio.action('workspace', project, 'rework-run', {})
+                if manager_recovery:
+                    with self.assertRaises(CompanyError):
+                        self.studio.action('workspace', project, 'rework-run', {})
                 queued.pop()()
             recovered = provider.load(pid)
             self.assertEqual(recovered['status'], 'needs_user_review', recovered.get('reason_code'))
-            self.assertEqual(recovered_phases, ['execute', 'review', 'execute', 'review'])
-            self.assertEqual(self.http.call_count, 4)
+            expected = ['review', 'execute', 'review'] if manager_recovery else ['execute', 'review', 'execute', 'review']
+            if manager_revision:
+                expected = ['review', 'execute', 'review', 'execute', 'review']
+            self.assertEqual(recovered_phases, expected)
+            self.assertEqual(self.http.call_count, len(expected))
             self.assertEqual([attempt['phase'] for attempt in recovered['real_ai']['attempts']], recovered_phases)
             flow = self.studio.workflow.store.load(project)['representative']
             self.assertEqual(flow['stage'], 'awaiting_plan_approval', flow['rework'].get('error'))

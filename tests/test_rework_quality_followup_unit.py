@@ -95,6 +95,25 @@ class QualityFollowupTests(unittest.TestCase):
             self.assertEqual(self.parse(model_review(evidence=value))['action'], 'revise')
             self.assertEqual(self.company._quality_followup['failed_checks']['goal_fit'], 'evidence_not_found')
 
+    def test_manager_recheck_requires_actionable_scene_feedback_before_writer(self):
+        from representative_rework import MANAGER_RECOVERY_SCOPE
+        self.company._rework_state.update(content_review_policy=1,
+            rework_reference={'previous_failed_attempt': {'recovery_scope': MANAGER_RECOVERY_SCOPE}})
+        self.company._review_content = json.dumps({
+            'transcript': '첫 장면\n둘째 장면',
+            'narrative_beats': [{'narration':'첫 장면'}, {'narration':'둘째 장면'}],
+        }, ensure_ascii=False)
+        for quote in ('첫 장면 둘째 장면', '첫 장면\n둘째 장면'):
+            self.assertEqual(self.parse(model_review(evidence=quote))['action'], 'stop')
+            self.assertEqual(self.company._quality_followup['failed_checks']['subject_story'], 'evidence_not_found')
+        payload = model_review(action='revise', evidence='첫 장면')
+        self.assertEqual(self.parse(payload)['action'], 'stop')
+        payload['result']['goal_review']['claims_supported']['met'] = False
+        self.assertEqual(self.parse(payload)['action'], 'stop')
+        payload['result']['feedback'] = '“첫 장면”의 수치 대신 출처로 확인되는 게임 특징을 설명하세요.'
+        self.assertEqual(self.parse(payload)['action'], 'revise')
+        self.assertEqual(self.parse(model_review(evidence='둘째 장면'))['action'], 'accept')
+
     def test_named_conditions_are_separate_from_a_valid_quote(self):
         self.company._rework_state['content_review_policy'] = 1
         self.company._rework_state['assignments'][0]['revisions'] = 1

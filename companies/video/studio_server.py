@@ -21,6 +21,7 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-relevance-approve','production-relevance-run','production-relevance-rights','production-relevance-revoke',
                       'production-diagnostic-approve','production-diagnostic-run','production-diagnostic-rights',
                       'production-diagnostic-revoke',
                       'production-adaptive-approve','production-adaptive-run','production-adaptive-rights',
@@ -36,6 +37,7 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'commons_relevance_invalid': '장면 적합성 응답의 후보 ID, 실제 인용 근거 또는 화면 유형을 확인하지 못했습니다.',
     'still_image_pixels_invalid': '이미지 해상도 또는 총 픽셀 수가 로컬 검증 한도를 벗어났습니다.',
     'still_image_format_invalid': '지원되는 단일 PNG/JPEG 원본이 아닙니다.',
     'commons_rights_review_changed': '확인한 후보, 검색 결과 해시 또는 권리 검토 범위가 달라졌습니다.',

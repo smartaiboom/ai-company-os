@@ -77,6 +77,10 @@ const diagnosis={...assetsBlocked,adaptive_discovery:{status:'empty'},commons_di
 hasAction(ui.productionNext(diagnosis),'production-diagnostic-approve');
 hasAction(ui.productionNext({...diagnosis,commons_diagnostic:{status:'active'}}),'production-diagnostic-run');
 hasAction(ui.productionNext({...diagnosis,commons_diagnostic:{status:'review'}}),'production-diagnostic-rights');
+const recovery={...diagnosis,manager_enabled:true,commons_relevance:{status:'available'}};
+hasAction(ui.productionNext(recovery),'production-relevance-approve');
+hasAction(ui.productionNext({...recovery,commons_relevance:{status:'active'}}),'production-relevance-run');
+hasAction(ui.productionNext({...recovery,commons_relevance:{status:'review'}}),'production-relevance-rights');
 const blockedAssetWork = ui.productionNext(assetsBlocked);
 hasAction(blockedAssetWork,'production-assets-approve',true);
 assert.match(blockedAssetWork.reason,/공식 직접 다운로드/);
@@ -117,7 +121,10 @@ if (process.argv[2]) {
       hasAction(work,'production-voice-prepare');
     }
     if (live.autonomous_production.asset_execution?.status==='waiting_rights') {
-      if (live.autonomous_production.commons_diagnostic?.status==='available') {
+      if (live.autonomous_production.commons_relevance?.status==='available') {
+        hasAction(work,'production-relevance-approve');
+        assert.match(page,/장면 적합성 판단/);
+      } else if (live.autonomous_production.commons_diagnostic?.status==='available') {
         hasAction(work,'production-diagnostic-approve');
         assert.match(page,/개선 검색 기록/);
         assert.match(page,/개별 판정과 원본 응답 보존 기록 없음/);

@@ -168,14 +168,19 @@ def adaptive_queries(plan, clips, previous):
     return sorted(rows,key=lambda row:row['wave'])[:12]
 
 
-def request_path(phrase,media='video'):
+def request_path(phrase,media='video',*,include_context=False):
     require(media in ('video','image'),'commons_response_failed')
     filetype='bitmap' if media=='image' else 'video'
-    return '/w/api.php?'+urlencode(dict(action='query',generator='search',gsrnamespace=6,
+    params=dict(action='query',generator='search',gsrnamespace=6,
         gsrsearch=f'{phrase} filetype:{filetype}',gsrlimit=LIMIT,prop='imageinfo',iilimit=1,
         iiprop='url|mime|mediatype|size|sha1|extmetadata',iiextmetadatafilter=
         'LicenseShortName|LicenseUrl|Artist|Credit|Attribution|AttributionRequired|Restrictions',
-        format='json',formatversion=2,maxlag=5))
+        format='json',formatversion=2,maxlag=5)
+    if include_context:
+        params['prop']='imageinfo|categories'
+        params['iiextmetadatafilter']+='|ImageDescription'
+        params.update(cllimit=5,clshow='!hidden')
+    return '/w/api.php?'+urlencode(params)
 
 
 def search_commons(path):
@@ -275,7 +280,7 @@ def technical_snapshot(page,media):
     return info,url,snapshot
 
 
-def candidates(data, scene, media='video', diagnostics=None):
+def candidates(data, scene, media='video', diagnostics=None, *,include_context=False):
     query=data.get('query',{})
     pages=query.get('pages',[]) if isinstance(query,dict) else None
     if diagnostics is not None:
@@ -340,6 +345,11 @@ def candidates(data, scene, media='video', diagnostics=None):
             license_url=license_url if rights else None,license_name=license_name,
             attribution_required=license_is_by,share_alike=bool(rights and rights[2]=='by-sa'),
             edit_allowed_by_license=bool(rights),reviewable=not reasons,reasons=reasons))
+        if include_context:
+            tags=page.get('categories')
+            found[-1]['description']=field('ImageDescription')
+            found[-1]['categories']=[plain(tag['title'],140) for tag in tags[:5]
+                if isinstance(tag,dict) and tag.get('ns')==14 and isinstance(tag.get('title'),str)] if isinstance(tags,list) else []
     if diagnostics is not None:
         for kind in ('technical','rights'):
             diagnostics[kind+'_counts']=dict(Counter(code for row in diagnostics['pages'] for code in row.get(kind+'_reasons',[])))
@@ -425,8 +435,9 @@ def status(manager,plan,clips,manager_enabled,adaptive=False):
     return answer
 
 
-def accepted_media(manager,plan,adaptive=False,diagnostic=False):
-    store=diagnostic_store(manager,plan) if diagnostic else store_for(manager,plan,adaptive)
+def accepted_media(manager,plan,adaptive=False,diagnostic=False,*,store=None):
+    if store is None:
+        store=diagnostic_store(manager,plan) if diagnostic else store_for(manager,plan,adaptive)
     review=store.read('rights.json')
     if not review:
         return {}
@@ -444,6 +455,8 @@ def accepted_media(manager,plan,adaptive=False,diagnostic=False):
                     required=c['attribution_required'],share_alike=c['share_alike']),
                 rights_evidence='Local edit/review attested by owner; license '+c['license_url']+
                     '; file page '+c['original_page']+'; creator '+c['creator'])
+            if c.get('relevance'):
+                items[c['id']]['relevance']=c['relevance']
     require(set(items)==set(review['accepted']),'commons_rights_review_changed')
     return items
 
@@ -467,12 +480,12 @@ def row_key(row):
     return row.get('unit_id',row['scene_id'])
 
 
-def collect_metadata(store,row,path):
+def collect_metadata(store,row,path,*,include_context=False):
     info={}
     data=search_commons(path)
     name='metadata-'+row_key(row)+'.json'
     try:
-        found,rejected=candidates(data,row['scene_id'],row.get('media','video'),info)
+        found,rejected=candidates(data,row['scene_id'],row.get('media','video'),info,include_context=include_context)
     except CompanyError:
         store.write(name,dict(candidates=[],rejected=None,diagnostics=info,at=now()))
         raise

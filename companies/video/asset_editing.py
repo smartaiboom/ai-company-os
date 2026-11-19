@@ -45,10 +45,14 @@ def extension_store(manager, plan):
 
 def registries(root,manager,plan):
     from commons_discovery import accepted_media
+    from commons_recovery import recovery_media, required_relevance, store_for_recovery
     library=root/'production_source_library'
     offices=registered_media(root/'production_official_media')
-    commons={**accepted_media(manager,plan,diagnostic=True),**accepted_media(manager,plan),
-             **accepted_media(manager,plan,adaptive=True)}
+    relevance_required=required_relevance(manager,plan) and (
+        not extension_store(manager,plan).read('policy.json') or store_for_recovery(manager,plan).read('policy.json'))
+    diagnostic={} if relevance_required else accepted_media(manager,plan,diagnostic=True)
+    commons={**diagnostic,**accepted_media(manager,plan),**accepted_media(manager,plan,adaptive=True),
+             **recovery_media(manager,plan)}
     require(not offices.keys() & commons.keys(),'official_registry_invalid')
     return library,library_entries(library),{**offices,**commons}
 
@@ -67,6 +71,8 @@ def edit_context(manager, plan, constraints, clips, libraries, offices, source_r
                                           route=item.get('origin','official_direct_media'))
         if 'scene_ids' in item:
             candidates['official:'+name]['scene_ids']=item['scene_ids']
+        if item.get('relevance'):
+            candidates['official:'+name]['metadata_relevance']=item['relevance']
         if item.get('mime','').startswith('image/'):
             candidates['official:'+name]['image']=True
             candidates['official:'+name]['source_checksum']=item['sha1']

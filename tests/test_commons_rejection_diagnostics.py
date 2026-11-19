@@ -122,5 +122,5 @@ class CommonsRejectionTests(TestCase):
             diagnostic_action(manager,plan,'production-diagnostic-rights',
                               dict(result_sha256=s['result_sha256'],confirmed=True,accepted=['commons-42']))
             from asset_editing import registries
-            self.assertIn('commons-42',registries(root,manager,plan)[2])
+            self.assertNotIn('commons-42',registries(root,manager,plan)[2])
             self.assertTrue(all(path.read_bytes()==value for path,value in hashes.items()))

@@ -173,7 +173,7 @@ def open_input(root, relative):
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW); descriptors.append(fd)
         for part in relative.parts[:-1]:
             fd = os.open(part, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW, dir_fd=fd); descriptors.append(fd)
-        fd = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd); descriptors.append(fd)
+        fd = os.open(relative.name, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK, dir_fd=fd); descriptors.append(fd)
         info = os.fstat(fd)
         require(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= 209715200, 'invalid_clip_file')
         with os.fdopen(os.dup(fd), 'rb') as stream: yield stream
@@ -217,7 +217,7 @@ class ClipJob:
             try: yield
             finally: fcntl.flock(lock, fcntl.LOCK_UN)
 
-    def import_generated_clip(self, inbox, relative, scene_id, source):
+    def import_generated_clip(self, inbox, relative, scene_id, source, *, expected_sha256=None):
         validate_source(source)
         with self.lock():
             p = self.load()
@@ -234,6 +234,7 @@ class ClipJob:
                         size+=len(block); require(size<=209715200, 'clip_too_large')
                         dst.write(block)
                 original_hash = file_hash(staged)
+                require(expected_sha256 is None or expected_sha256 == original_hash, 'production_source_asset_changed')
                 require(not any(c['sha256'] == original_hash for c in p['clips']), 'duplicate_clip')
                 media = probe(staged)
                 run_command(['ffmpeg', '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',

@@ -21,6 +21,12 @@ SCHEMA = obj(
     scenes=arr(obj(scene_id=S, source=enum('operator_clip','hold'), request=S, direction=S,
                    transition=enum('cut'), speech_style=S)),
 )
+KOREAN_DIRECTION = (
+    ' Write all explanations in Korean. Preserve IDs and tool names. Set project-specific checks for the hook, '
+    'visual relevance, immersion, variety and natural Korean speech. Give achievable source leads in requests '
+    'without implying footage use or downloads are authorized. A separately consented source employee can assess '
+    'registered local assets and propose rights checks or search terms for resources that are not yet available.'
+)
 
 
 class ProductionManager(ManagerPlanAcceptanceStore):
@@ -31,6 +37,11 @@ class ProductionManager(ManagerPlanAcceptanceStore):
     def __init__(self, root, contract):
         self.contract = contract
         super().__init__(root)
+
+    def freeze_contract(self):
+        marker=self.root/'.korean_direction_v2'
+        if not marker.exists():
+            private_write(marker,b'2')
 
     def _authorize_transport(self, p, api_key):
         config=Gemini35Config.from_env()
@@ -60,9 +71,10 @@ class ProductionManager(ManagerPlanAcceptanceStore):
 class SceneVoice(TTSExecution):
     scope_id='mission_production_scene_tts_once_v1'
 
-    def __init__(self, root, plan_hash, direction_hash, scene, selected, text):
+    def __init__(self, root, plan_hash, direction_hash, scene, selected, text, *, diagnostic_window=False):
         super().__init__(root)
-        self.job=dict(model=selected['model'],voice=selected['voice'],max_seconds=min(20,scene['end']-scene['start']),
+        self.job=dict(model=selected['model'],voice=selected['voice'],max_seconds=20 if diagnostic_window
+                      else min(20,scene['end']-scene['start']),
                       max_response_bytes=2000000)
         require(self.job['model'] in MODELS and self.job['voice'] in ('Puck','Kore'),'tts_model_voice_policy')
         require(len(text.encode())<=1000,'tts_input_limit')
@@ -78,6 +90,8 @@ class SceneVoice(TTSExecution):
             local_max_response_bytes=2000000,quality='unassessed',publish_ready=False,
             google_unpaid_data_policy='inputs_and_outputs_may_be_used_for_improvement_and_human_review',
             automatic_retry=False)
+        if diagnostic_window:
+            self.scope['approved_scene_seconds']=scene['end']-scene['start']
 
     def create_scene(self):
         self.root.mkdir(mode=0o700,parents=True,exist_ok=False)
@@ -133,6 +147,10 @@ def production_manager(workflow, project):
         'Explain timing and listening/viewing checks, owner/worker sequence and blockers. Never claim to have heard or watched media.'))
     root=workflow.store.root/'production_direction'/project['id']/digest(dict(plan=plan['sha256'],revision=decision))
     require(not any(p.is_symlink() for p in (root,root.parent,root.parent.parent)), 'invalid_acceptance_path')
+    marker=root/'.korean_direction_v2'
+    require(not marker.is_symlink(),'invalid_acceptance_path')
+    if marker.is_file() or not any(root.glob('dialogue-*.json')):
+        contract['system']+=KOREAN_DIRECTION
     return ProductionManager(root,contract)
 
 
@@ -148,9 +166,17 @@ def voice_scene(manager, result, scene_id):
     require(scene_id in scenes and scene_id in inputs and result['voice']['tool']=='gemini_scene',
             'production_voice_contract')
     source=inputs[scene_id]
-    return SceneVoice(manager.root/'voice'/scene_id,manager.contract['input']['approved_plan_hash'],
+    root=manager.root/'voice'/scene_id
+    voice=SceneVoice(root,manager.contract['input']['approved_plan_hash'],
                       digest(result),{**source,'speech_style':scenes[scene_id]['speech_style']},
                       result['voice'],source['narration'])
+    if root.exists():
+        stored=parse(voice._read('scope.json').decode()) if (root/'scope.json').is_file() else {}
+        if 'approved_scene_seconds' not in stored:
+            return voice
+    return SceneVoice(root,manager.contract['input']['approved_plan_hash'],
+                      digest(result),{**source,'speech_style':scenes[scene_id]['speech_style']},
+                      result['voice'],source['narration'],diagnostic_window=True)
 
 
 def approved_manager_result(manager):
@@ -184,8 +210,6 @@ def clip_job(manager, result):
     spec=dict(goal=inputs['goal'],decision_source='gemini_manager_'+digest(result),
               total_seconds=inputs['duration'],fit=result['fit'],allow_repeat=False,scenes=[],approved_timeline=[])
     for source,decision in zip(inputs['storyboard'],result['scenes']):
-        if decision['source']!='operator_clip':
-            raise CompanyError('production_waiting_for_source_plan')
         spec['scenes'].append(dict(id=source['scene_id'],request=dict(prompt=decision['request'],
             aspect_ratio='9:16',duration_target=source['end']-source['start'],reference_image=None),
             utterances=[source['narration']]))
@@ -200,6 +224,8 @@ def import_operator_clip(manager,result,scene_id,filename,rights):
     require(isinstance(filename,str) and PurePath(filename).name==filename and '/' not in filename
             and '\\' not in filename and filename.lower().endswith('.mp4'),'invalid_source_path')
     safe_text(rights,600)
+    require(any(s['scene_id']==scene_id and s['source']=='operator_clip' for s in result['scenes']),
+            'production_waiting_for_source_plan')
     inbox=manager.root/'inbox'
     require(inbox.is_dir() and not inbox.is_symlink(),'production_inbox_missing')
     job,spec=clip_job(manager,result)
@@ -232,6 +258,12 @@ class SceneSpeechReceipts:
                 'production_voice_receipt_changed')
         return path,result
 
+    def duration(self,scene_id):
+        import wave
+        path,_=self.validated(scene_id)
+        with wave.open(str(path),'rb') as wav:
+            return wav.getnframes()/wav.getframerate()
+
     def synthesize(self,texts,folder):
         import wave
         from local_artifacts import run_command
@@ -263,7 +295,8 @@ def imported_preview_inputs(workflow,project):
     tool=result['voice']['tool']
     if tool=='gemini_scene':
         speech=SceneSpeechReceipts(manager,result)
-        for scene in result['scenes']:speech.validated(scene['scene_id'])
+        for scene in manager.contract['input']['storyboard']:
+            require(speech.duration(scene['scene_id'])<=scene['end']-scene['start'],'narration_exceeds_scene')
     else:
         speech=MeloLocal()
         require(tool=='melo_local' and speech.available(),'production_voice_unavailable')
@@ -353,12 +386,16 @@ def production_status(workflow,project):
     plan=approved_manager_result(manager)
     result.update(status='waiting_assets',plan=plan,inbox=str(manager.root/'inbox'))
     if plan['voice']['tool']=='gemini_scene':
+        speech=SceneSpeechReceipts(manager,plan)
         for scene in plan['scenes']:
             voice=voice_scene(manager,plan,scene['scene_id'])
+            storyboard=next(s for s in manager.contract['input']['storyboard'] if s['scene_id']==scene['scene_id'])
+            duration=storyboard['end']-storyboard['start']
             if not voice.root.exists():
                 continue
             info=dict(consent=(voice.root/'consent.json').is_file(),
                       attempted=(voice.root/'attempt.json').is_file(),
+                      approved_seconds=duration, diagnostic_max_seconds=voice.job['max_seconds'],
                       payload_sha256=voice.scope['payload_sha256'],
                       payload=parse(voice.raw.decode()),review_hash=None)
             if (voice.root/'review.json').is_file():
@@ -366,6 +403,13 @@ def production_status(workflow,project):
                 info.update(review_hash=digest(review),expires_at=review['expires_at'])
             if (voice.root/'result.json').is_file():
                 info['status']=parse(voice._read('result.json').decode()).get('status')
+                if info['status']=='audio_validated':
+                    try:
+                        measured=speech.duration(scene['scene_id'])
+                        info.update(duration_seconds=round(measured,3),fits_timeline=measured<=duration,
+                                    audio_url=f'/media/workspace/{project["id"]}/production-voice/{scene["scene_id"]}')
+                    except (CompanyError,FileNotFoundError):
+                        info['status']='receipt_invalid'
             result['voices'][scene['scene_id']]=info
     try:
         job,_=clip_job(manager,plan)
@@ -381,7 +425,25 @@ def production_status(workflow,project):
         result['render_blocker']=exc.code
     except FileNotFoundError:
         result['render_blocker']='pending_external_clip'
+    from production_sources import source_status
+    result['source_assessment']=source_status(manager,plan,workflow.store.root/'production_source_library',result['clips'])
     return result
+
+
+def prepare_manager_request(manager,jid,body):
+    exact(body,('free','quota','docs'))
+    require(all(body[k] is True for k in body),'current_docs_and_quota_confirmation_required')
+    key,independent=production_keys()
+    if jid is None:
+        manager.root.mkdir(mode=0o700,parents=True,exist_ok=True)
+        manager._initialize()
+        manager.freeze_contract()
+        jid=manager.create()['id']
+    current=manager.load(jid)
+    require(not current['grants'] and not current['real_ai']['attempts'],'consent_replay')
+    manager.verify_project_key(jid,api_key=key,project_api_key=independent,project=MISSION_ACCOUNT,
+        free_tier_confirmed=True,billing_disabled=True,quota_available=True,official_docs_reviewed=True)
+    return manager.prepare_consent(jid)
 
 
 def production_action(workflow,pid,action,body):
@@ -391,17 +453,7 @@ def production_action(workflow,pid,action,body):
         manager=production_manager(workflow,project)
         jid=draft_id(manager)
         if action=='production-plan-prepare':
-            exact(body,('free','quota','docs'))
-            require(all(body[k] is True for k in body),'current_docs_and_quota_confirmation_required')
-            key,independent=production_keys()
-            if jid is None:
-                manager.root.mkdir(mode=0o700,parents=True,exist_ok=True)
-                jid=manager.create()['id']
-            current=manager.load(jid)
-            require(not current['grants'] and not current['real_ai']['attempts'],'consent_replay')
-            manager.verify_project_key(jid,api_key=key,project_api_key=independent,project=MISSION_ACCOUNT,
-                free_tier_confirmed=True,billing_disabled=True,quota_available=True,official_docs_reviewed=True)
-            return manager.prepare_consent(jid)
+            return prepare_manager_request(manager,jid,body)
         require(jid is not None,'production_manager_missing')
         if action=='production-plan-consent':
             exact(body,('review_hash','free','policy'))
@@ -415,6 +467,9 @@ def production_action(workflow,pid,action,body):
             (manager.root/'inbox').mkdir(mode=0o700,exist_ok=True)
             return result
         result=approved_manager_result(manager)
+        if action.startswith('production-source-'):
+            from production_sources import run_source_action
+            return run_source_action(manager,result,workflow.store.root/'production_source_library',action,body)
         if action=='production-clip-import':
             exact(body,('scene','filename','rights','confirmed'))
             require(body['confirmed'] is True,'production_rights_confirmation_required')

@@ -60,3 +60,42 @@ class MissionProductionTests(TestCase):
                 manager.validate_plan({**value,'scenes':[{**value['scenes'][0],'scene_id':'scene-2'}]})
             with self.assertRaisesRegex(CompanyError,'melo_runtime_missing'):
                 manager.validate_plan({**value,'voice':{**value['voice'],'tool':'melo_local','model':'local','voice':'local'}})
+
+    def test_source_assignment_rejects_unregistered_or_duplicate_assets(self):
+        from production_sources import SourceAssignment, source_capabilities
+
+        with TemporaryDirectory() as temp:
+            storyboard = [dict(scene_id='scene-1'), dict(scene_id='scene-2')]
+            catalog = {'owned': {'sha256': 'a'*64}, 'same-bytes': {'sha256': 'a'*64}}
+            worker = SourceAssignment(Path(temp), dict(input=dict(storyboard=storyboard,
+                source_tools=source_capabilities(catalog))))
+            item = dict(scene_id='scene-1',route='local_library',asset_id='owned',
+                        rationale='등록 후보',next_step='권리 기록 확인',suitability_check='실제 장면 확인')
+            alternative = {**item,'scene_id':'scene-2','asset_id':'none','route':'official_direct_media'}
+            result = dict(scenes=[item,alternative],review_criteria=['동작과 후크의 일치'])
+            worker.validate_plan(result)
+            for invalid in ({**alternative,'route':'local_library','asset_id':'invented'},
+                            {**alternative,'route':'local_library','asset_id':'same-bytes'},
+                            {**alternative,'asset_id':'owned'}):
+                with self.assertRaisesRegex(CompanyError,'source_library_selection_invalid'):
+                    worker.validate_plan({**result,'scenes':[item,invalid]})
+
+    def test_new_scene_receipt_can_record_overrun_without_replacing_legacy_scope(self):
+        from mission_production import voice_scene
+
+        with TemporaryDirectory() as temp:
+            root = Path(temp)
+            scene = dict(scene_id='scene-1',start=0,end=3,narration='승인된 원문')
+            manager = ProductionManager(root,dict(input=dict(storyboard=[scene],approved_plan_hash='approved')))
+            selected = dict(tool='gemini_scene',model='gemini-3.8-flash-tts',voice='Puck')
+            direction = dict(scene_id='scene-1',speech_style='자연스럽게')
+            result = dict(voice=selected,scenes=[direction])
+            diagnostic = voice_scene(manager,result,'scene-1')
+            self.assertEqual(diagnostic.scope['approved_scene_seconds'], 3)
+            self.assertEqual(diagnostic.scope['local_max_seconds'], 20)
+            legacy = SceneVoice(diagnostic.root,'approved',digest(result),{**scene,**direction},selected,scene['narration'])
+            self.assertEqual(legacy.raw, diagnostic.raw)
+            legacy.create_scene()
+            recovered = voice_scene(manager,result,'scene-1')
+            self.assertEqual(recovered._load()[1], legacy.scope)
+            self.assertEqual(recovered.scope['local_max_seconds'], 3)

@@ -245,10 +245,13 @@ function missionStatus(mission) {
 function productionPanel(p) {
   const a=p.autonomous_production;
   if (!a) return '';
-  return `<section class="subpanel" id="production-detail"><h3>승인 대본 기반 실제 제작</h3>
+  const source=a.source_assessment;
+  const routeLabels={local_library:'로컬 자산 보관함', official_direct_media:'공식 직접 제공 자료',
+    public_metadata_search:'공개 메타데이터 검색 제안', own_capture:'권리 확인 자체 캡처', hold:'자산 대기'};
+  return `<section class="panel" id="production-detail"><h2>제작 상세</h2>
     <p>관리자 계획 Gemini 텍스트 최대 1회 · 현재 시도 ${h(a.attempts)}회.</p>
     <p>기존 Puck 7/10 평가는 이전 안내 영상 표본입니다. 이 영상의 보이스는 관리자 계획에서 선택합니다.</p>
-    ${a.plan?`<h4>관리자 제작 계획</h4>
+    ${a.plan?`<h3>관리자 제작 계획 원문</h3><p>기존 설명은 작성 언어로 보존합니다.</p>
       <p>${h(a.plan.voice.tool)} · ${h(a.plan.voice.model)} · ${h(a.plan.voice.voice)} · ${h(a.plan.voice.rationale)}</p>
       <p>${h(a.plan.timeline)}</p><ul>${a.plan.work_order.map(item=>`<li>${h(item)}</li>`).join('')}</ul>
       <p>검토 기준 · ${h(a.plan.review_criteria.join(' · '))}</p>
@@ -257,8 +260,18 @@ function productionPanel(p) {
         const voice=a.voices[s.scene_id];
         return `<article><p><strong>${h(s.scene_id)}</strong> · ${h(s.request)} · ${h(s.direction)}</p><p>${h(s.speech_style)}</p>
           <p>영상 · ${a.clips.includes(s.scene_id)?'인수 완료':'소스 확인 대기'}
-          ${voice?.attempted?` · 음성 시도 · ${h(voice.status||'결과 미확정')} · 재시도 없음`:''}</p></article>`;
+          ${voice?.attempted?` · 음성 시도 · ${h(({audio_validated:'파일 검사 완료',failed_or_uncertain:'실패 또는 미확정',
+            receipt_invalid:'음성 기록 검증 실패'})[voice.status]||'결과 미확정')} · 재시도 없음`:''}</p>
+          ${voice?.audio_url?`<p>${h(voice.duration_seconds)}초 / 승인 ${h(voice.approved_seconds)}초 · ${voice.fits_timeline?'길이 조건 충족 · 청취 평가 필요':'승인 길이 초과 · 합성 차단'}</p>
+            <audio controls preload="none" src="${h(voice.audio_url)}" aria-label="${h(s.scene_id)} 음성 검토"></audio>`:''}</article>`;
       }).join('')}`:''}
+    ${source?`<section class="subpanel"><h3>자산 확보 업무</h3>
+      <p>권리 정보가 등록된 로컬 자산 ${h(source.available_count??0)}개 · 신규 검색, 다운로드 및 생성은 승인 범위에 포함되지 않습니다.</p>
+      ${source.result?`<p>직원 확보 제안 · 직접 시청 및 사용권 확인 필요</p>
+        ${source.result.scenes.map(s=>`<article><p><strong>${h(s.scene_id)}</strong> · ${h(routeLabels[s.route])}
+          ${s.asset_id!=='none'?` · ${h(s.asset_id)}`:''}</p><p>${h(s.rationale)} · ${h(s.next_step)}</p><p>확인 기준 · ${h(s.suitability_check)}</p></article>`).join('')}
+        <p>검토 기준 · ${h(source.result.review_criteria.join(' · '))}</p>`:''}
+    </section>`:''}
   </section>`;
 }
 function operations(p) {
@@ -269,7 +282,7 @@ function operations(p) {
   if (attempt?.status === 'reserved') return '<p class="warning">로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단</p>';
   if (p.stage==='goal_submitted') return `<button class="button secondary" data-action="mission">${icon('folder')} 미션 01 준비</button><p class="muted">기획 작업만 준비합니다. 외부 전송은 별도 승인 후 실행합니다.</p>`;
   if (p.rework && p.stage==='plan_revision') return reworkPanel(p);
-  if (p.autonomous_production) return failed+productionPanel(p);
+  if (p.autonomous_production) return failed;
   if (p.production) {
     const prep=p.production;
     const direction=prep.direction;
@@ -400,7 +413,7 @@ function projectPage(p, chosen={}) {
   <h1>${h(p.goal)}</h1><p class="muted">${h(s[1])} · ${h(time(p.updated_at))}</p></section>
   <section class="panel next-work" id="next-work" aria-labelledby="next-heading"></section>
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
-  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
+  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${productionPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
   <aside class="stack"><section class="panel" id="work-detail"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
   ${operations(p)}${p.stage!=='plan_revision'?reworkPanel(p):''}${p.rework&&p.mission?`<details class="subpanel"><summary>이전 미션 기획 보존 · 참고용 (최신 재작업 아님)</summary><p>아래 내부 수락은 이전 버전의 기록입니다. 최신 진행 상황은 위 AI 재작업 현황을 확인하세요.</p>${missionStatus(p.mission)}</details>`:missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
@@ -411,7 +424,7 @@ const actionButton = (action,label,reason='',scene='') =>
   `<button class="button" data-action="${action}" data-scene="${h(scene)}"${reason?' disabled aria-describedby="next-reason"':''}>${h(label)}</button>`;
 const expired = at => Boolean(at && Date.parse(at)<=Date.now());
 
-function productionNext(a) {
+function productionNext(a,selected) {
   const keyReasons={
     missing_runtime_key:'서버에 GEMINI_API_KEY가 설정되어 있지 않습니다.',
     missing_comparison_key:'서버에 GEMINI_PRODUCTION_PROJECT_API_KEY가 없습니다. 기존 무료 프로젝트의 키를 대조용으로 설정하세요.',
@@ -419,7 +432,7 @@ function productionNext(a) {
   };
   const key = a.key_ready ? '' : (keyReasons[a.key_setup] ||
     '서버에서 GEMINI_API_KEY와 GEMINI_PRODUCTION_PROJECT_API_KEY가 일치해야 합니다.')+' 키 값은 컷룸에 입력하지 마세요.';
-  const choose=(action,label,message,reason='',scene='')=>({message,reason,buttons:actionButton(action,label,reason,scene)});
+  const choose=(action,label,message,reason='',scene='')=>({message,reason,scene,buttons:actionButton(action,label,reason,scene)});
   const refresh=actionButton('refresh','상태 새로고침');
   if (a.status==='stopped') return {message:a.manager_attempt==='reserved'?
     '관리자 요청 실행 중 또는 결과 미확정 · 중복 실행 차단':
@@ -439,31 +452,57 @@ function productionNext(a) {
     completed:'합성 기록 완료 · 대표 영상 검토 제출 상태 확인',
     failed:'로컬 합성 실패 · 자동 재실행 없음'
   })[a.render_attempt]||'로컬 합성 결과 미확정 · 중복 실행 차단',buttons:refresh};
-  const pending=[];
+  const clips=[], voices=[];
   for (const scene of a.plan.scenes) {
     if (scene.source==='operator_clip' && !a.clips.includes(scene.scene_id)) {
-      pending.push(choose('production-clip-import','로컬 클립 인수',`${scene.scene_id} · ${scene.request} · 인수 폴더에 권리를 확인한 MP4를 넣으세요.`,'',scene.scene_id));
+      clips.push(choose('production-clip-import','로컬 클립 인수',`${scene.scene_id} · 인수 폴더에 권리를 확인한 MP4가 있을 때 진행하세요.`,'',scene.scene_id));
     }
     if (a.plan.voice.tool!=='gemini_scene') continue;
     const voice=a.voices[scene.scene_id];
     if (voice?.attempted) continue;
-    if (!voice) pending.push(choose('production-voice-prepare','장면 음성 준비',`${scene.scene_id} · 승인 원문과 관리자 발화 지시로 요청을 준비합니다.`,key,scene.scene_id));
-    else if (!voice.review_hash || expired(voice.expires_at)) pending.push(choose('production-voice-consent','장면 음성 동의',
+    if (!voice) voices.push(choose('production-voice-prepare','장면 음성 준비',`${scene.scene_id} · 승인 원문과 관리자 발화 지시로 요청을 준비합니다.`,key,scene.scene_id));
+    else if (!voice.review_hash || expired(voice.expires_at)) voices.push(choose('production-voice-consent','장면 음성 동의',
       `${scene.scene_id} · 장면별 별도 승인`,'유효한 서명 제안이 필요합니다. 현재 요청은 실행할 수 없습니다.',scene.scene_id));
-    else if (!voice.consent) pending.push(choose('production-voice-consent','장면 음성 동의',
+    else if (!voice.consent) voices.push(choose('production-voice-consent','장면 음성 동의',
       `${scene.scene_id} · 이 장면의 요청 내용과 전송 조건만 승인합니다.`,key,scene.scene_id));
-    else pending.push(choose('production-voice-run','장면 음성 실행',
+    else voices.push(choose('production-voice-run','장면 음성 실행',
       `${scene.scene_id} · 동의한 음성 요청 1회입니다.`,key || (!a.tts_enabled?'Gemini 장면 음성 실행에 GEMINI_PRODUCTION_TTS_ENABLED=1 설정이 필요합니다.':''),scene.scene_id));
+  }
+  const sources=a.source_assessment;
+  let sourceWork;
+  if (sources?.status==='unprepared' || (sources?.status==='prepared' && (!sources.review_hash || expired(sources.expires_at)))) {
+    sourceWork=choose('production-source-prepare','자산 확보 업무 준비',`등록 자산 ${sources.available_count}개 · 기존 계획을 보존하고 자산 후보와 권리 확인 절차를 검토합니다.`,key);
+  } else if (sources?.status==='prepared') {
+    sourceWork=choose('production-source-consent','자산 확보 업무 외부 전송 동의','기존 계획·장면과 등록 자료 요약을 Gemini에 보낼 범위를 검토합니다.',key);
+  } else if (sources?.status==='approved') {
+    sourceWork=choose('production-source-run','자산 확보 직원 실행','별도 서명한 Gemini 텍스트 요청 최대 1회입니다.',
+      key || (expired(sources.expires_at)?'자산 확보 업무 동의가 만료되었습니다.':!a.manager_enabled?'Gemini 무료 실행 설정을 확인하세요.':''));
+  } else if (sources?.ready?.length) {
+    sourceWork=choose('production-source-import','선택된 로컬 자산 인수',`${sources.ready[0]} · 권리 기록과 파일 해시를 확인합니다. 외부 요청 0회.`,'',sources.ready[0]);
+  } else if (sources?.status==='completed') {
+    sourceWork={message:'자산 확보 업무 완료 · 상세의 확보 방법과 권리 확인 조건을 검토하세요.'};
+  } else if (sources?.status==='stopped' || sources?.status==='blocked') {
+    sourceWork={message:sources.reason || '자산 확보 요청이 실패했거나 결과가 미확정입니다. 자동 재시도는 없습니다.',buttons:refresh};
+  }
+  const options=[
+    ...voices.map(voice=>({...voice,choice:`voice-${voice.scene}`,label:`장면 음성 · ${voice.scene}`})),
+    ...(sourceWork?[{...sourceWork,choice:'sources',label:'자산 확보 업무'}]:[]),
+    ...clips.map(clip=>({...clip,choice:`clip-${clip.scene}`,label:`로컬 클립 인수 · ${clip.scene}`}))
+  ];
+  if (options.length) {
+    const defaultWork=options.find(item=>item.buttons && !item.reason) || options[0];
+    return {...(options.find(item=>item.choice===selected)||defaultWork),options};
   }
   const blockers={pending_external_clip:'사용권을 확인한 장면 클립이 필요합니다.',
     production_voice_unavailable:'선택된 음성 도구를 로컬에서 사용할 수 없습니다. 관리자 계획의 음성 조건을 확인하세요.',
-    production_voice_receipt_changed:'장면 음성의 검증 기록과 파일이 일치해야 합니다.'};
-  return pending.find(item=>!item.reason) || pending[0] || choose('production-render','인수한 클립과 음성으로 제작',
+    production_voice_receipt_changed:'장면 음성의 검증 기록과 파일이 일치해야 합니다.',
+    narration_exceeds_scene:'보존한 음성이 승인 장면 길이를 초과했습니다. 장면 길이 또는 대본을 바꾸려면 별도 대표 승인이 필요합니다.'};
+  return choose('production-render','인수한 클립과 음성으로 제작',
     '장면별 소스, 음성 및 타이밍 검증이 필요합니다. 아래 제작 계획과 장면 원장을 확인하세요.',
     blockers[a.render_blocker] || (a.render_blocker ? `제작 검증 대기 · ${a.render_blocker}` : '관리자 계획에 따라 사용 가능한 자산과 음성을 확보하세요.'));
 }
 
-function nextWork(p,controlSource) {
+function nextWork(p,controlSource,selected) {
   const f=p.flow, stage=p.stage, m=p.mission, r=p.rework;
   const select=(...actions)=>actions.map(name=>controlSource.querySelector(`[data-action="${name}"]`)?.outerHTML||'').join('');
   const refresh=actionButton('refresh','상태 새로고침');
@@ -478,7 +517,7 @@ function nextWork(p,controlSource) {
   }
   const attempt=f.render_attempts.at(-1);
   if (attempt?.status==='reserved') return {message:'로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단',buttons:refresh};
-  if (p.autonomous_production) return {...productionNext(p.autonomous_production),target:'production-detail'};
+  if (p.autonomous_production) return {...productionNext(p.autonomous_production,selected),target:'production-detail'};
   const budget=p.budget?.requests.find(request=>request.status==='pending');
   if (budget) return {message:'추가 예산의 사용 범위와 한도를 검토하세요.',target:'budget-panel',buttons:[...controlSource.querySelectorAll('[data-budget-decision]')].filter(button=>button.dataset.request===budget.id).map(button=>button.outerHTML).join('')};
   if (stage==='plan_revision' && r) {
@@ -508,12 +547,17 @@ function nextWork(p,controlSource) {
   return {message:'작업 보고 또는 제작 사양 등록 대기',buttons:refresh,target:'work-detail'};
 }
 
+let selectedWork;
 function showDetail() {
   main.innerHTML = projectPage(detail, selectedVersions);
   const next=main.querySelector('#next-work');
-  const work=nextWork(detail,main);
+  const work=nextWork(detail,main,selectedWork);
+  const overrun=Object.entries(detail.autonomous_production?.voices||{}).filter(([,voice])=>voice.fits_timeline===false);
   next.innerHTML=`<h2 id="next-heading">현재 상태 / 다음 작업</h2><p><strong>${h(statuses[detail.stage][0])}</strong> · ${h(work.message)}</p>
+    ${work.options?.length>1?`<label>제작 작업 선택 <select data-work-choice>${work.options.map(option=>
+      `<option value="${h(option.choice)}" ${option.choice===work.choice?'selected':''}>${h(option.label)}</option>`).join('')}</select></label>`:''}
     ${work.reason?`<p class="warning" id="next-reason">${h(work.reason)}</p>`:''}
+    ${overrun.length?`<p class="warning">${h(overrun.map(([scene])=>scene).join(', '))} · 승인 길이 초과로 합성 차단. 제작 상세에서 음성을 검토하세요.</p>`:''}
     <div class="actions">${work.buttons||''}${work.target?`<button class="button ghost" data-jump="${work.target}">관련 상세 보기</button>`:''}</div>`;
   const signature=button=>JSON.stringify([button.dataset.action,button.dataset.consent,button.dataset.budgetDecision,button.dataset.request]);
   const promoted=new Set([...next.querySelectorAll('[data-action], [data-consent], [data-budget-decision]')].map(signature));
@@ -535,6 +579,7 @@ async function route({focus=false}={}) {
     const dashboardData = await api('/api/studio');
     const projectData = view==='project' ? await api(detailApi({store,id:pid})) : null;
     if (current!==routeVersion) return;
+    if (detail?.id!==projectData?.id) selectedWork=undefined;
     studio=dashboardData; detail=projectData; selectedVersions={};
     if (detail) showDetail(); else main.innerHTML=dashboard(view);
     if (focus) { main.focus({preventScroll:true}); window.scrollTo(0,0); }
@@ -619,6 +664,9 @@ function productionCommand(action,scene) {
   const quota=check('quota','이 모델·지역의 요청 및 입출력 잔량을 확인했습니다.');
   const policy=check('policy','표시된 요청과 Google 무료 데이터 제공·인적 검토 정책에 동의합니다.');
   const plan=project.flow.plan_versions.at(-1);
+  const source=a.source_assessment;
+  const seconds=a.scope.storyboard.find(s=>s.scene_id===scene);
+  const window=seconds?seconds.end-seconds.start:null;
   const commands={
     'production-plan-prepare':['제작 계획 준비',free+quota+check('docs','현재 공급자 문서와 적용 조건을 확인했습니다.'),
       data=>({free:data.has('free'),quota:data.has('quota'),docs:data.has('docs')})],
@@ -626,11 +674,22 @@ function productionCommand(action,scene) {
       `<p>Gemini 텍스트 요청 1회 · 무료 전용 · 실제 요금 독립 검증 없음</p><details><summary>전송 입력</summary><pre>${h(JSON.stringify(a.scope,null,2))}</pre></details>`+free+policy,
       data=>({review_hash:a.review_hash,free:data.has('free'),policy:data.has('policy')})],
     'production-plan-run':['관리자 제작 계획 실행','<p>서명된 텍스트 요청 한 번을 실행합니다. 직원·음성·영상 생성 요청은 포함하지 않습니다.</p>',()=>({})],
-    'production-voice-prepare':['장면 음성 준비',free+quota+
+    'production-source-prepare':['자산 확보 업무 준비',free+quota+check('docs','현재 공급자 문서와 적용 조건을 확인했습니다.'),
+      data=>({free:data.has('free'),quota:data.has('quota'),docs:data.has('docs')})],
+    'production-source-consent':['자산 확보 업무 외부 전송 동의',
+      `<p>별도 Gemini 텍스트 1회 · 무료만 · 검색·다운로드·생성 요청 0회</p><details><summary>전송 입력</summary><pre>${h(JSON.stringify(source?.scope,null,2))}</pre></details>`+free+policy,
+      data=>({review_hash:source.review_hash,free:data.has('free'),policy:data.has('policy')})],
+    'production-source-run':['자산 확보 직원 실행','<p>서명된 별도 텍스트 요청 1회를 실행합니다. 후보와 확보 절차만 반환합니다.</p>',()=>({})],
+    'production-source-import':['선택된 로컬 자산 인수',
+      `<p>${h(scene)}의 직원 선택 자산 · ${h(source?.result?.scenes.find(s=>s.scene_id===scene)?.asset_id)} · 외부 요청 0회</p>`+
+      check('rights_ok','이 장면에 적합하고 등록 권리 기록에 따라 로컬 검토에 사용할 수 있음을 확인했습니다.'),
+      data=>({scene,confirmed:data.has('rights_ok')})],
+    'production-voice-prepare':['장면 음성 준비',
+      `<p>승인 장면 ${h(window)}초. 발화가 초과하면 합성을 막고 원본 음성·시도 기록을 보존합니다. 잘라내기·가속·자동 재시도는 없습니다.</p>`+free+quota+
       '<label>모델·지역·결제·잔량 확인 내용<textarea name="evidence" required minlength="20" maxlength="300"></textarea></label>',
       data=>({scene,free:data.has('free'),quota:data.has('quota'),evidence:data.get('evidence')})],
     'production-voice-consent':['장면 음성 동의',
-      `<p>이 장면만 1회. 미확정 결과도 차감합니다. 자동 재시도 없음.</p><pre>${h(JSON.stringify(a.voices[scene]?.payload,null,2))}</pre>`+policy,
+      `<p>이 장면만 1회. 미확정 결과도 차감합니다. 자동 재시도 없음.</p><pre>${h(JSON.stringify(a.voices[scene]?.payload,null,2))}</pre><p>승인 장면 ${h(a.voices[scene]?.approved_seconds)}초 · 응답 파일 수락 상한 ${h(a.voices[scene]?.diagnostic_max_seconds)}초</p>`+policy,
       data=>({scene,review_hash:a.voices[scene].review_hash,policy:data.has('policy')})],
     'production-voice-run':['장면 음성 실행','<p>이 장면에 서명한 요청 한 번을 실행합니다.</p>',()=>({scene})],
     'production-clip-import':['로컬 클립 인수','<label>인수 폴더의 MP4 파일명<input name="filename" required></label>'+
@@ -693,7 +752,11 @@ main.addEventListener('click',async event=>{
   const button=event.target.closest('button');
   if (!button || button.disabled) return;
   if (button.dataset.jump) {
-    document.getElementById(button.dataset.jump)?.scrollIntoView({block:'start'});
+    const target=document.getElementById(button.dataset.jump);
+    if (target) {
+      const header=main.querySelector('#next-work');
+      window.scrollTo(0,window.scrollY+target.getBoundingClientRect().top-header.offsetHeight-12);
+    }
     return;
   }
   if (button.dataset.filter || button.dataset.action==='clear') {
@@ -843,6 +906,12 @@ main.addEventListener('click',async event=>{
   }
 });
 main.addEventListener('change',event=>{
+  if (event.target.hasAttribute('data-work-choice')) {
+    selectedWork=event.target.value;
+    showDetail();
+    main.querySelector('[data-work-choice]')?.focus({preventScroll:true});
+    return;
+  }
   if (!event.target.dataset.version) return;
   const kind=event.target.dataset.version;
   selectedVersions[kind]=Number(event.target.value);

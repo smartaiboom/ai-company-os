@@ -627,10 +627,6 @@ main {
   cursor: not-allowed;
 }
 
-#plan-panel, #video-panel, #work-detail, #production-detail, #budget-panel, #budget-setup {
-  scroll-margin-top: 14rem;
-}
-
 .panel p,.panel li,.beat p {
   overflow-wrap: anywhere;
 }

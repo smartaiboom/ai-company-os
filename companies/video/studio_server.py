@@ -21,9 +21,12 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-source-prepare','production-source-consent','production-source-run','production-source-import',
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'production_source_asset_changed': '등록 당시의 권리 기록 또는 파일 해시와 일치하지 않습니다.',
+    'source_library_selection_invalid': '승인된 자산 확보 결과의 장면과 자산 ID를 확인하세요.',
     'technical_preview_not_approvable': '무음 카드 기술 시안은 영상 승인 대상이 아닙니다. 영상 수정 요청으로 제작을 이어가세요.',
     'production_project_key_unverified': '서버의 기존 API 키와 별도 확인한 제작 프로젝트 키가 일치해야 합니다.',
     'portrait_korean_font_missing': '로컬 세로 시안에 사용할 한글 글꼴을 찾을 수 없습니다.',
@@ -858,6 +861,12 @@ def make_server(host, port, studio):
                     return self.send_json(200, studio.dashboard())
                 if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})', path):
                     return self.send_json(200, studio.detail(*match.groups()))
+                if match := re.fullmatch(rf'/media/workspace/({PROJECT})/production-voice/(scene-[1-9][0-9]{{0,2}})', path):
+                    from mission_production import SceneSpeechReceipts, approved_manager_result, production_manager
+                    pid, scene = match.groups()
+                    manager = production_manager(studio.workflow, studio.workflow.store.load(pid))
+                    audio,_ = SceneSpeechReceipts(manager, approved_manager_result(manager)).validated(scene)
+                    return self.file(audio, 'audio/wav')
                 if match := re.fullmatch(rf'/media/([\w-]+)/({PROJECT})/([1-9][0-9]{{0,5}})/(video|thumbnail)', path):
                     key, pid, version, kind = match.groups()
                     return self.file(*studio.media(key, pid, int(version), kind))

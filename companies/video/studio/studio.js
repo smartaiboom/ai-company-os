@@ -181,6 +181,9 @@ function videoPanel(p, video) {
     <details class="subpanel"><summary>시각 소스·사용 권리</summary>
     ${r.source_licenses.map(item=>`<p>${h(item.file)} · ${h(item.creator)} · ${h(item.license)}</p>`).join('')}
     <p class="muted">글꼴 · ${h(r.font_license)}</p></details>
+    ${r.attribution?.length?`<details class="subpanel"><summary>Commons 표시 근거 · 게시 미승인</summary>
+      ${r.attribution.map(item=>`<p>${h(item.scene_id)} · ${h(item.creator)} · ${h(item.text)} ·
+      ${h(item.credit)} · ${sourceLink(item.original_page)} · ${sourceLink(item.license)}${item.share_alike?' · 동일조건변경허락':''}</p>`).join('')}</details>`:''}
     ${r.technical_quality?`<details class="subpanel"><summary>움직임·자막 기술 검토</summary>
       <p>고유 클립 ${h(r.technical_quality.unique_clip_hashes)}개 · 반복 ${h(r.technical_quality.repeats)}회 · 장면별 샘플 프레임 차이 ${h(r.review_material.map(x=>x.distinct_sampled_frames).join(', '))} / 3</p>
       <p>초당 자막 문자 수 ${h(r.technical_quality.caption_chars_per_second.join(', '))} · 읽기 편의·실제 청취는 대표 검토 필요</p>
@@ -249,7 +252,7 @@ function productionPanel(p) {
   const a=p.autonomous_production;
   if (!a) return '';
   const source=a.source_assessment;
-  const timing=a.timeline, operating=a.owner_policy, assets=a.asset_execution;
+  const timing=a.timeline, operating=a.owner_policy, assets=a.asset_execution, discovery=a.media_discovery;
   const policyStates={available:'승인 대기',active:'승인 범위 활성',expired:'만료',revoked:'철회',stopped:'실패 또는 미확정으로 중단',blocked:'현재 키 또는 계정 설정 확인 필요'};
   const routeLabels={local_library:'로컬 자산 보관함', official_direct_media:'공식 직접 제공 자료',
     public_metadata_search:'공개 메타데이터 검색 제안', own_capture:'권리 확인 자체 캡처', hold:'자산 대기'};
@@ -271,8 +274,17 @@ function productionPanel(p) {
           ${voice?.audio_url?`<p>${h(voice.duration_seconds)}초 / 승인 ${h(voice.approved_seconds)}초 · ${voice.fits_timeline?'길이 조건 충족 · 청취 평가 필요':'승인 길이 초과 · 합성 차단'}</p>
             <audio controls preload="none" src="${h(voice.audio_url)}" aria-label="${h(s.scene_id)} 음성 검토"></audio>`:''}</article>`;
       }).join('')}`:''}
+    ${discovery?`<section class="subpanel"><h3>Commons 영상 자동 탐색</h3>
+      <p>검색 메타데이터만으로 게임 IP, 음원 또는 타인의 영상 사용권은 확인되지 않습니다.</p>
+      ${discovery.result?`<p>후보 ${h(discovery.result.candidates.length)}개 · 안전 또는 형식 검증에서 제외 ${h(discovery.result.rejected_unsafe)}개</p>
+        ${discovery.result.candidates.map(c=>`<p>${h(c.scene_ids.join(', '))} · ${h(c.title)} · ${h(c.license_name||'라이선스 미확인')} ·
+          ${c.reviewable?'대표 권리 검토 대상':'권리·표시 근거 부족'} · ${sourceLink(c.original_page)}</p>`).join('')}`:''}
+      ${discovery.fallback?`<h4>편집 직원의 대안 제안</h4>${discovery.fallback.options.map(item=>
+        `<p>${h(item.scene_id)} · ${h(item.suggestion)} · 필요 권리 ${h(item.rights_needed)}</p>`).join('')}`:''}
+      ${discovery.status==='active'?'<button class="button secondary" data-action="production-discovery-revoke">영상 탐색 승인 철회</button>':''}
+    </section>`:''}
     ${assets?`<section class="subpanel"><h3>권리 확인 소스 인수·편집</h3>
-      <p>권리 근거를 등록한 공식 직접 MP4 또는 로컬 보관함을 사용합니다. 공개 영상·검색 메타데이터는 단서이며, 확인된 무료 생성 도구는 없습니다.</p>
+      <p>권리 근거를 등록한 공식 직접 MP4, 권리 확인 Commons 영상 또는 로컬 보관함을 사용합니다. 공개 영상·검색 메타데이터는 단서이며, 확인된 무료 생성 도구는 없습니다.</p>
       <p>지원 편집 · 24fps 구간, 중앙·상단 레터박스, 컷, 상·하단 자막. 시청 품질은 대표 검토가 필요합니다.</p>
       ${assets.decision?`<p>${h(assets.decision.review_criteria)}</p>${assets.decision.scenes.map(s=>`<p>${h(s.scene_id)} · ${h(s.asset_id)} · ${h(s.suitability)}</p>`).join('')}`:''}
       ${assets.expires_at && assets.status!=='revoked'?'<button class="button secondary" data-action="production-assets-revoke">자산 범위 승인 철회</button>':''}
@@ -529,6 +541,16 @@ function productionNext(a,selected) {
         operating.run_blocker?'서버의 무료 Gemini 실행 설정이 필요합니다.':
         !operating.can_run?'시간 조정안 승인 또는 권리가 확인된 영상 자산을 기다립니다.':'')
       :operating?.expires_at?{message:'운영 정책이 만료·철회·중단됐거나 키를 확인할 수 없습니다. 제작 상세에서 상태를 확인하세요.'}:null;
+  const discovery=a.media_discovery;
+  let discoverWork;
+  if (discovery?.status==='available') discoverWork=choose('production-discovery-approve','영상 자동 탐색 범위 검토·승인',
+    `Commons 검색·메타데이터 최대 ${discovery.proposal.max_searches}회 · 필요 시 대안 판단 최대 ${discovery.proposal.fallback_max_calls}회`,key);
+  if (discovery?.status==='active') discoverWork=choose('production-discovery-run','영상 자동 탐색 실행',
+    '승인된 장면별 검색어로 후보와 권리 메타데이터를 확인합니다.',key);
+  if (discovery?.status==='review') discoverWork=choose('production-discovery-rights','영상 후보 권리 검토',
+    '장면 적합성, 창작자·출처·편집 허용과 표시 의무를 확인한 후보만 선택하세요.');
+  if (discovery?.status==='empty') discoverWork={message:'권리 검토 가능한 영상 후보가 없습니다. 상세의 대안과 추가 권리 조건을 확인하세요.'};
+  if (['stopped','expired','revoked'].includes(discovery?.status)) discoverWork={message:'영상 탐색이 중단·만료 또는 철회됐습니다. 자동 재시도하지 않습니다.',buttons:refresh};
   let assetWork;
   if (assets?.status==='available') assetWork=choose('production-assets-approve','자산·편집 범위 검토·승인',
     `편집 판단 최대 1회 · 공식 MP4 다운로드 최대 ${assets.proposal.max_downloads}회 · 비용 $0`,key);
@@ -544,6 +566,7 @@ function productionNext(a,selected) {
       '자산 확보 범위가 중단·만료 또는 철회됐습니다. 기존 결과를 보존하고 후속 호출을 차단합니다.',buttons:refresh};
   const legacy=!operating?.expires_at && operating?.status!=='available';
   const options=[
+    ...(discoverWork?[{...discoverWork,choice:'discovery',label:'Commons 영상 자동 탐색'}]:[]),
     ...(assetWork?[{...assetWork,choice:'assets',label:'영상 자산 확보·편집'}]:[]),
     ...(operatingWork && !assets?.expires_at?[{...operatingWork,choice:'operating',label:'개인 운영 정책 · 제작 실행'}]:[]),
     ...(legacy && batchWork?[{...batchWork,choice:'batch',label:'남은 장면 음성 일괄'}]:[]),
@@ -557,8 +580,9 @@ function productionNext(a,selected) {
   ];
   if (options.length) {
     const assetDefault=assetWork && operating?.used>=operating?.proposal?.units.length;
-    const defaultWork=(assetDefault && options.find(item=>item.choice==='assets')) ||
-      options.find(item=>item.buttons && !item.reason) || options[0];
+    const discoveryDefault=discoverWork && (assets?.status==='waiting_rights' || discovery?.status==='review');
+    const defaultWork=(discoveryDefault && options.find(item=>item.choice==='discovery')) ||
+      (assetDefault && options.find(item=>item.choice==='assets')) || options.find(item=>item.buttons && !item.reason) || options[0];
     return {...(options.find(item=>item.choice===selected)||defaultWork),options};
   }
   const blockers={pending_external_clip:'사용권을 확인한 장면 클립이 필요합니다.',
@@ -742,12 +766,28 @@ function productionCommand(action,scene) {
     return `<li>${h(item.scene_id)} · ${h(before.original_frames/24)}초 → ${h((item.frames/24).toFixed(3))}초 · 자막 ${h((item.caption_frames/24).toFixed(3))}초</li>`;
   }).join('');
   const total=proposal?.decision.scenes.reduce((sum,item)=>sum+item.frames,0)/24;
-  const operating=a.owner_policy;
+  const operating=a.owner_policy, discovery=a.media_discovery;
   const commands={
     'production-listen':['청취 의견 저장',`<p>${h(scene)}의 검증된 음성에 연결합니다.</p><label>대표 청취 의견<textarea name="opinion" required maxlength="500"></textarea></label>`,
       data=>({scene,audio_sha256:a.voices[scene].audio_sha256,opinion:data.get('opinion')})],
+    'production-discovery-approve':['영상 자동 탐색 범위 검토·승인',
+      `<p>Commons 검색·메타데이터 최대 ${h(discovery?.proposal.max_searches)}회 · 최대 비용 $0 · 파일 다운로드 없음</p>
+        <ul>${(discovery?.proposal.queries||[]).map(row=>`<li>${h(row.scene_id)} · ${h(row.query)}</li>`).join('')}</ul>
+        <p>후보가 부족하면 승인 장면 요구와 후보 통계로 무료 Gemini 대안을 최대 ${h(discovery?.proposal.fallback_max_calls)}회 제안합니다. Google 무료 서비스 데이터 처리 범위도 포함합니다.</p>`+
+      check('confirmed','표시된 검색어와 대안 판단의 전송 범위를 승인합니다. Gemini 대안을 포함하는 경우 무료 적용, 결제 미연결 및 충분한 한도를 확인했습니다.'),
+      data=>({review_hash:discovery.review_hash,confirmed:data.has('confirmed')})],
+    'production-discovery-run':['영상 자동 탐색 실행','<p>정확히 승인한 검색어만 전송합니다. 결과는 내부에 저장합니다. 실제 영상은 다운로드하지 않습니다.</p>',()=>({})],
+    'production-discovery-revoke':['영상 탐색 승인 철회','<p>이후 새 검색 요청을 시작하지 않습니다. 기존 기록은 보존합니다.</p>',()=>({})],
+    'production-discovery-rights':['영상 후보 권리 검토',
+      `<p>원본 파일 페이지에서 출처와 편집·표시 의무를 확인하세요. 게임 IP, 음원 및 제3자 영상 권리를 확인한 후보만 선택합니다.</p>
+        ${(discovery?.result?.candidates||[]).filter(c=>c.reviewable).map(c=>`<div class="subpanel">
+          <label class="check"><input type="checkbox" name="asset" value="${h(c.id)}">${h(c.title)} · ${h(c.scene_ids.join(', '))}</label>
+          <p>${h(c.creator)} · ${h(c.credit)} · ${h(c.attribution)} · ${h(c.license_name)}
+          ${c.share_alike?' · 동일조건변경허락':''} · ${sourceLink(c.original_page)} · ${sourceLink(c.license_url)}</p></div>`).join('')}`+
+      check('confirmed','선택한 후보의 장면 적합성·저작자·출처·편집·표시 의무와 제3자 권리를 확인했고 로컬 편집·검토에 사용할 수 있음을 확인합니다.'),
+      data=>({result_sha256:discovery.result_sha256,accepted:data.getAll('asset'),confirmed:data.has('confirmed')})],
     'production-assets-approve':['자산·편집 범위 검토·승인',
-      `<p>Gemini 편집 판단 1회와 공식 HTTPS MP4 최대 ${h(a.asset_execution?.proposal?.max_downloads)}회. 24시간 유효 · 비용 $0 · 검색·영상 생성·게시 권한 없음.</p>
+      `<p>Gemini 편집 판단 1회와 권리 확인 HTTPS 영상 최대 ${h(a.asset_execution?.proposal?.max_downloads)}회. 24시간 유효 · 비용 $0 · 검색·영상 생성·게시 권한 없음.</p>
        <p>Gemini에는 승인 장면과 실측 요약, 등록 자료 설명·해시를 보냅니다. 공개 무료 서비스의 데이터 개선 활용과 사람에 의한 검토가 가능할 수 있습니다.</p>
        <details open><summary>검토할 제공처·공식 권리 근거·다운로드 및 모델 범위</summary><pre>${h(JSON.stringify(a.asset_execution?.proposal,null,2))}</pre></details>`+
       check('confirmed','공식 제공처와 명시된 로컬 편집·다운로드 허가, 무료 조건 및 범위를 확인하고 표시된 정책을 승인합니다.'),
@@ -814,7 +854,7 @@ function productionCommand(action,scene) {
     try {
       await api(detailApi(project)+'/'+action,body(data));
     } catch (error) {
-      if (action==='production-policy-run') await route();
+      if (['production-policy-run','production-discovery-run'].includes(action)) await route();
       throw error;
     }
     return {message:'제작 상태를 갱신했습니다.'};

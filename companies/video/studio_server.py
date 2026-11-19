@@ -21,6 +21,8 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-discovery-approve','production-discovery-run','production-discovery-rights',
+                      'production-discovery-revoke',
                       'production-assets-approve','production-assets-revoke',
                       'production-policy-approve','production-policy-run','production-policy-revoke',
                       'production-listen','production-timeline-prepare','production-timeline-consent',
@@ -30,6 +32,9 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'commons_rights_review_changed': '확인한 후보, 검색 결과 해시 또는 권리 검토 범위가 달라졌습니다.',
+    'commons_response_failed': 'Commons 검색 응답을 확인하지 못했습니다. 자동 재시도하지 않습니다.',
+    'commons_response_limit': 'Commons 응답이 허용된 크기 또는 시간 범위를 초과했습니다.',
     'asset_extension_not_ready': '장면별 길이와 사용권을 확인한 등록 소스 또는 무료 Gemini 설정이 필요합니다.',
     'official_rights_unverified': '공식 출처의 다운로드 허가와 로컬 편집·검토 사용권을 확인하세요.',
     'official_destination_blocked': '공식 제공 호스트가 안전한 공개 주소로 확인되지 않았습니다.',

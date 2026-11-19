@@ -146,7 +146,7 @@ def publishable(source):
             and source['watermark'] == 'absent')
 
 
-def probe(path):
+def probe(path, *, webm=False):
     raw = run_command(['ffprobe', '-v', 'error', '-protocol_whitelist', 'file,pipe', '-show_streams',
                        '-show_format', '-of', 'json', str(path)], stage='ffprobe_final')
     data = json.loads(raw)
@@ -154,8 +154,9 @@ def probe(path):
     audios = [s for s in data['streams'] if s['codec_type'] == 'audio']
     require(len(videos) == 1 and len(audios) <= 1, 'invalid_clip_streams')
     v = videos[0]; duration = float(data['format']['duration'])
-    require('mp4' in data['format']['format_name'] or 'mov' in data['format']['format_name'], 'invalid_clip_container')
-    require(v['codec_name'] in ('h264', 'hevc', 'mpeg4', 'vp9', 'av1', 'prores')
+    types=set(data['format']['format_name'].split(','))
+    require(bool(types & ({'webm'} if webm else {'mp4','mov'})), 'invalid_clip_container')
+    require(v['codec_name'] in (('vp8','vp9','av1') if webm else ('h264','hevc','mpeg4','vp9','av1','prores'))
             and 16 <= v['width'] <= 4096 and 16 <= v['height'] <= 4096
             and math.isfinite(duration) and .1 <= duration <= 120, 'invalid_clip_media')
     fps = float(Fraction(v['avg_frame_rate']))
@@ -173,7 +174,7 @@ def open_input(root, relative):
     for parent in (root, *root.parents): require(not parent.is_symlink(), 'symlink_input_forbidden')
     relative = PurePosixPath(relative)
     require(not relative.is_absolute() and relative.parts and '..' not in relative.parts
-            and '\\' not in str(relative) and relative.suffix.lower() in ('.mp4', '.mov'), 'invalid_clip_path')
+            and '\\' not in str(relative) and relative.suffix.lower() in ('.mp4', '.mov','.webm'), 'invalid_clip_path')
     descriptors = []
     try:
         fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW); descriptors.append(fd)
@@ -224,7 +225,7 @@ class ClipJob:
             finally: fcntl.flock(lock, fcntl.LOCK_UN)
 
     def import_generated_clip(self, inbox, relative, scene_id, source, *,
-                              expected_sha256=None, minimum_duration=0, direct_mp4=False):
+                              expected_sha256=None, minimum_duration=0, direct_mp4=False, direct_webm=False):
         validate_source(source)
         with self.lock():
             p = self.load()
@@ -232,7 +233,8 @@ class ClipJob:
             require(scene_id in {s['id'] for s in p['plan']['scenes']}, 'unknown_scene')
             require(not any(c['scene_id'] == scene_id for c in p['clips']), 'scene_already_imported')
             with tempfile.TemporaryDirectory(dir=self.root) as temporary:
-                staged = Path(temporary)/'clip.mp4'
+                suffix='.webm' if direct_webm else '.mp4'
+                staged = Path(temporary)/('clip'+suffix)
                 with open_input(inbox, relative) as src, staged.open('xb') as dst:
                     size=0
                     while True:
@@ -246,11 +248,16 @@ class ClipJob:
                 if direct_mp4:
                     with staged.open('rb') as sample:
                         require(sample.read(8)[4:8]==b'ftyp','official_media_response_invalid')
-                media = probe(staged)
+                if direct_webm:
+                    with staged.open('rb') as sample:
+                        header=sample.read(4096)
+                        require(header.startswith(bytes.fromhex('1a45dfa3')) and b'webm' in header[:64],
+                                'official_media_response_invalid')
+                media = probe(staged,webm=True) if direct_webm else probe(staged)
                 require(media['duration']>=minimum_duration,'clip_too_short_repeat_not_allowed')
                 run_command(['ffmpeg', '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
                              '-i', str(staged), '-f', 'null', '-'], stage='ffmpeg_decode')
-                asset = self.root/'assets'/(original_hash+'.mp4')
+                asset = self.root/'assets'/(original_hash+suffix)
                 require(not asset.exists() and not asset.is_symlink(), 'asset_exists')
                 staged.rename(asset)
             record = dict(scene_id=scene_id, file=asset.name, original_file=str(relative),
@@ -274,7 +281,7 @@ class ClipJob:
             require(not p['active_operation'] and not p['attempts'] and p['output'] is None, 'render_not_replayable')
             require(len(p['clips']) == len(p['plan']['scenes']), 'pending_external_clip')
             for clip in p['clips']:
-                require(clip['file'] == clip['sha256']+'.mp4' and len(clip['sha256']) == 64
+                require(clip['file'] in (clip['sha256']+'.mp4',clip['sha256']+'.webm') and len(clip['sha256']) == 64
                         and all(c in '0123456789abcdef' for c in clip['sha256'])
                         and not (self.root/'assets'/clip['file']).is_symlink(), 'invalid_asset_path')
                 require(file_hash(self.root/'assets'/clip['file']) == clip['sha256'], 'clip_changed')

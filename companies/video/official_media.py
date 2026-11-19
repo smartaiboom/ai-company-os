@@ -136,20 +136,28 @@ class _PinnedHTTPS(http.client.HTTPSConnection):
 
 def download_mp4(asset, destination):
     """One request, no cookies, credentials, proxy, redirects, or retries."""
-    url=official_url(asset['url'],media=True)
+    mime=asset.get('mime','video/mp4')
+    if asset.get('origin')=='commons_reviewed':
+        from commons_discovery import original_url, USER_AGENT
+        url=original_url(asset['url'],mime)
+        headers={'User-Agent':USER_AGENT}
+    else:
+        url=official_url(asset['url'],media=True)
+        headers={}
     deadline=monotonic()+TIMEOUT
     family,address=_global_addresses(url.hostname,deadline)
     connection=_PinnedHTTPS(url.hostname,family,address,deadline)
     try:
-        connection.request('GET',url.path,headers={'Accept':'video/mp4','Accept-Encoding':'identity'})
+        connection.request('GET',url.path,headers={**headers,'Accept':mime,'Accept-Encoding':'identity'})
         with connection.getresponse() as response:
-            require(response.status==200 and response.headers.get_content_type()=='video/mp4'
+            require(response.status==200 and response.headers.get_content_type()==mime
                     and response.getheader('Content-Encoding','identity').lower()=='identity',
                     'official_media_response_invalid')
             size=response.getheader('Content-Length')
             require(size is None or size.isascii() and size.isdecimal() and 0<int(size)<=MAX_BYTES,
                     'official_media_size_invalid')
             checksum=hashlib.sha256()
+            original_checksum=hashlib.sha1() if asset.get('origin')=='commons_reviewed' else None
             total=0
             with destination.open('xb') as output:
                 while block:=response.read1(65536):
@@ -157,11 +165,15 @@ def download_mp4(asset, destination):
                     total+=len(block)
                     require(total<=MAX_BYTES,'official_media_size_invalid')
                     checksum.update(block)
+                    if original_checksum:
+                        original_checksum.update(block)
                     output.write(block)
             require(monotonic()<=deadline,'official_download_timeout')
             require(total>0 and (size is None or total==int(size)),'official_media_size_invalid')
             sha=checksum.hexdigest()
             require(asset['sha256'] is None or sha==asset['sha256'],'production_source_asset_changed')
+            require(original_checksum is None or original_checksum.hexdigest()==asset['sha1'],
+                    'production_source_asset_changed')
             return dict(sha256=sha,bytes=total,http_status=200)
     except (OSError,http.client.HTTPException):
         raise CompanyError('official_download_failed_or_uncertain') from None

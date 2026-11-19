@@ -40,9 +40,13 @@ def extension_store(manager, plan):
         plan_sha256=inputs['approved_plan_hash'],direction_sha256=digest(plan),revision_scope=manager.root.name))
 
 
-def registries(root):
+def registries(root,manager,plan):
+    from commons_discovery import accepted_media
     library=root/'production_source_library'
-    return library,library_entries(library),registered_media(root/'production_official_media')
+    offices=registered_media(root/'production_official_media')
+    commons=accepted_media(manager,plan)
+    require(not offices.keys() & commons.keys(),'official_registry_invalid')
+    return library,library_entries(library),{**offices,**commons}
 
 
 def edit_context(manager, plan, constraints, clips, libraries, offices, source_result):
@@ -55,7 +59,10 @@ def edit_context(manager, plan, constraints, clips, libraries, offices, source_r
                                        content_sha256=item['sha256'],route=item['origin'])
     for name,item in offices.items():
         candidates['official:'+name]=dict(description=item['description'],frames=item['duration_frames'],
-                                          asset_hash=digest(item),content_sha256=item['sha256'],route='official_direct_media')
+                                          asset_hash=digest(item),content_sha256=item['sha256'],
+                                          route=item.get('origin','official_direct_media'))
+        if 'scene_ids' in item:
+            candidates['official:'+name]['scene_ids']=item['scene_ids']
     for clip in clips:
         candidates['existing:'+clip['scene_id']]=dict(description='Previously verified import for this scene',
             frames=int(clip['media']['duration']*24),asset_hash=clip['sha256'],content_sha256=clip['sha256'],
@@ -65,10 +72,14 @@ def edit_context(manager, plan, constraints, clips, libraries, offices, source_r
     for shot,length,row,direction in zip(manager.contract['input']['storyboard'],lengths,rows,plan['scenes'],strict=True):
         require(row['min_frames']<=length,'narration_exceeds_scene')
         scenes.append(dict(scene_id=shot['scene_id'],narration=shot['narration'],caption=shot['caption'],frames=length,
-                          narration_seconds=row['seconds'],narration_sha256=row['audio_sha256'],scene_goal=direction['request']))
+            narration_seconds=row['seconds'],narration_sha256=row['audio_sha256'],scene_goal=direction['request'],
+            voice_free_seconds=round(length/24-row['seconds'],3),
+            caption_frames=round(spec['approved_timeline'][len(scenes)].get('caption_seconds',row['seconds'])*24)))
     return dict(goal=manager.contract['input']['goal'],plan_sha256=manager.contract['input']['approved_plan_hash'],
                 direction_sha256=digest(plan),timeline_sha256=timeline_hash,scenes=scenes,candidates=candidates,
                 previous_source_assessment=source_result,
+                pacing_instruction='Use measured gaps for meaningful visual beats within existing scene boundaries. '
+                'Respect approved caption exposure; do not claim unviewed footage is gameplay.',
                 known_quality_issue='Procedural card preview and distractingly repeated imagery are unsuitable as gameplay evidence.')
 
 
@@ -99,6 +110,7 @@ class AssetEditor(ProductionManager):
             require(item is not None and 0<=start
                     and (scene['scene_id'] not in by_scene or choice['asset_id']==by_scene[scene['scene_id']])
                     and item.get('for_scene',scene['scene_id'])==scene['scene_id']
+                    and scene['scene_id'] in item.get('scene_ids',[scene['scene_id']])
                     and (start==0 if item['frames'] is None else start+scene['frames']<=item['frames']),
                     'invalid_source_edit')
             sha=item.get('content_sha256')
@@ -125,16 +137,22 @@ def transfer_unit(name, asset):
 
 
 def offer(manager,plan,root,constraints,clips,state):
+    from commons_discovery import unmatched_scenes
     if plan['voice']['tool']!='gemini_scene' or (state.get('timeline') or {}).get('status') not in ('approved','original_fits'):
         return dict(status='waiting_audio')
     try:
-        _,libraries,offices=registries(root)
+        _,libraries,offices=registries(root,manager,plan)
         context=edit_context(manager,plan,constraints,clips,libraries,offices,state['source_assessment'].get('result'))
     except (CompanyError,OSError,ValueError):
         return dict(status='registry_blocked')
     missing=len(plan['scenes'])-len(clips)
-    if len(libraries)+len(offices)<missing:
-        return dict(status='waiting_rights',local=len(libraries),official=len(offices),missing=missing)
+    existing={clip['scene_id'] for clip in clips}
+    needed={row['scene_id']:row['frames'] for row in context['scenes'] if row['scene_id'] not in existing}
+    uncovered=unmatched_scenes(needed,lambda scene:[
+        name for name,item in context['candidates'].items() if item['route']!='existing'
+        and scene in item.get('scene_ids',[scene]) and (item['frames'] is None or item['frames']>=needed[scene])])
+    if uncovered:
+        return dict(status='waiting_rights',local=len(libraries),official=len(offices),missing=missing,uncovered=uncovered)
     worker=editor(manager,context)
     units=[unit('editor',MODEL,ENDPOINT,['approved_storyboard','timing_and_voice_hashes','asset_descriptions_and_hashes',
             'existing_source_assignment'],payload_sha256=digest(worker._payload(None)),max_output_tokens=4096)]
@@ -171,13 +189,15 @@ def edit_status(manager,plan,root,constraints,clips,state):
 
 def import_selected(job,root,name,scene,source_hash,row,minimum_duration,receipt=None):
     rights=row.get('rights',row.get('rights_evidence'))
-    source=dict(provider='official_direct_https' if receipt else 'local_library',provenance=dict(
+    provider='commons_reviewed_https' if row.get('origin')=='commons_reviewed' else 'official_direct_https' if receipt else 'local_library'
+    source=dict(provider=provider,provenance=dict(
         kind='operator_provided_clip',evidence='registered rights record '+digest(row)),
         generated_at=None,license='registered for local edit review',terms_url=row.get('terms_url','local declaration'),
         usage_rights='local edit and review only',commercial_use='unknown',allowed_to_publish=False,watermark='unknown',
         rights_verified=False,rights_evidence=rights,estimated_cost=0,actual_cost=None)
+    webm=row.get('mime')=='video/webm'
     return job.import_generated_clip(root,name,scene,source,expected_sha256=source_hash,
-                                     minimum_duration=minimum_duration,direct_mp4=receipt is not None)
+        minimum_duration=minimum_duration,direct_mp4=receipt is not None and not webm,direct_webm=webm)
 
 
 def perform_extension(workflow,project,manager,plan,state,action,body):
@@ -199,7 +219,7 @@ def perform_extension(workflow,project,manager,plan,state,action,body):
     require(state['asset_execution']['status'] in ('active','hold')
             and all(item['result'] and item['result']['status']=='completed' for item in ledger.values()),
             'owner_policy_unresolved_attempt')
-    library,libraries,offices=registries(root)
+    library,libraries,offices=registries(root,manager,plan)
     if 'editor' not in ledger:
         context=edit_context(manager,plan,constraints,clips,libraries,offices,state['source_assessment'].get('result'))
         worker=editor(manager,context)
@@ -246,10 +266,12 @@ def perform_extension(workflow,project,manager,plan,state,action,body):
                     from pathlib import Path
                     folder=Path(directory)
                     check()
-                    receipt=download_mp4(row,folder/'asset.mp4')
+                    filename='asset.webm' if row.get('mime')=='video/webm' else 'asset.mp4'
+                    receipt=download_mp4(row,folder/filename)
                     store.write('download-'+asset_id+'.json',dict(policy_sha256=proof,asset=name,scene_id=scene,
-                        rights_sha256=digest(row),url=row['url'],terms_url=row['terms_url'],at=now(),**receipt))
-                    import_selected(job,folder,'asset.mp4',scene,receipt['sha256'],row,minimum_duration,receipt)
+                        rights_sha256=digest(row),url=row['url'],terms_url=row['terms_url'],at=now(),
+                        attribution=row.get('attribution'),**receipt))
+                    import_selected(job,folder,filename,scene,receipt['sha256'],row,minimum_duration,receipt)
             delegated_call(store,key,item,item['payload_sha256'],download)
     return True
 
@@ -273,6 +295,7 @@ def editing_handoff(manager,plan,clips,spec):
     selected=worker.contract['input']['candidates']
     by_scene={clip['scene_id']:clip for clip in clips}
     editing=[]
+    attribution=[]
     for choice in decision['scenes']:
         scene,name=choice['scene_id'],choice['asset_id']
         clip=by_scene[scene]
@@ -290,9 +313,11 @@ def editing_handoff(manager,plan,clips,spec):
             require(receipt and receipt['asset']==name and receipt['scene_id']==scene
                     and receipt['rights_sha256']==selected[name]['asset_hash']
                     and receipt['sha256']==clip['sha256'],'production_source_asset_changed')
+            if receipt.get('attribution'):
+                attribution.append(dict(scene_id=scene,**receipt['attribution']))
         editing.append(dict(scene_id=scene,clip_sha256=clip['sha256'],
                            **{k:choice[k] for k in ('in_frame','framing','transition','caption_position')}))
     validate_editing(spec,clips,editing)
-    return dict(direction_sha256=digest(decision),scenes=editing,
+    return dict(direction_sha256=digest(decision),scenes=editing,attribution=attribution,
                 review_criteria=decision['review_criteria'],
                 review_notes=[item['suitability'] for item in decision['scenes']])

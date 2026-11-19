@@ -311,6 +311,13 @@ function productionPanel(p) {
           ${voice?.audio_url?`<p>${h(voice.duration_seconds)}초 / 승인 ${h(voice.approved_seconds)}초 · ${voice.fits_timeline?'길이 조건 충족 · 청취 평가 필요':'승인 길이 초과 · 합성 차단'}</p>
             <audio controls preload="none" src="${h(voice.audio_url)}" aria-label="${h(s.scene_id)} 음성 검토"></audio>`:''}</article>`;
       }).join('')}`:''}
+    ${a.publisher_discovery?`<details class="subpanel"><summary>공식 제작사 자료</summary>
+      <p>정적 페이지에서 확인한 메타데이터입니다. 로컬 편집 권리는 별도 검토합니다.</p>
+      ${(a.publisher_discovery.result?.pages||[]).map(row=>`<p>${sourceLink(row.url)} · ${h(({robots_read:'robots 확인',robots_unavailable:'robots 확인 불가',robots_permission_unconfirmed:'robots 접근 허용 미확인',publisher_access_unconfirmed:'제작사 접근 허용 미확인',restricted_or_unavailable:'접근 제한 또는 응답 없음',restricted:'접근 제한',read:'페이지 확인'})[row.status])}</p>`).join('')}
+      ${(a.publisher_discovery.result?.media||[]).map(row=>`<p>${h(row.title)} · ${h(row.mime)} · ${sourceLink(row.page)} · ${row.asset_access?'권리 검토 필요':'파일 서버 접근 허용 미확인'}</p>`).join('')}
+      ${(a.publisher_discovery.result?.decisions||[]).map(row=>`<p>${h(row.scene_id)} · ${h(({publisher_candidate:'공식 후보',publisher_permission:'추가 허가 필요',manual_capture:'허가된 자체 캡처 검토',hold:'보류'})[row.route])} · ${h(row.evidence)} · ${h(row.reason)}</p>`).join('')}
+      ${a.publisher_discovery.status==='active'?'<button class="button secondary" data-action="production-publisher-revoke">공식 자료 탐색 승인 철회</button>':''}
+    </details>`:''}
     ${discovery?`<section class="subpanel"><h3>Commons 영상·이미지 탐색</h3>
       <p>검색 메타데이터만으로 게임 IP, 음원 또는 타인의 영상 사용권은 확인되지 않습니다.</p>
       ${a.media_discovery?.status==='empty' && a.adaptive_discovery?.status!=='unavailable'?
@@ -629,9 +636,21 @@ function productionNext(a,selected) {
     '실제 원본에서 장면 적합성·다운로드 및 편집 권리를 확인한 후보를 선택하세요.');
   if (['empty','reviewed','stopped','revoked','expired'].includes(relevance?.status))
     relevanceWork={message:'적합한 Commons 자료가 부족하거나 범위가 종료됐습니다. 공식 직접 자료의 허가 또는 권리가 확인된 자체 캡처가 필요합니다. 무료 생성 실행기는 미연결입니다.'};
+  const publisher=a.publisher_discovery;
+  let publisherWork;
+  if (publisher?.status==='available') publisherWork=choose('production-publisher-approve','공식 제작사 자료 탐색 검토·승인',
+    '공식 페이지와 개별 자료의 메타데이터를 확인합니다.',key||(!a.manager_enabled?'서버의 무료 Gemini 실행 설정이 필요합니다.':''));
+  if (publisher?.status==='active') publisherWork=choose('production-publisher-run','공식 제작사 자료 탐색 실행',
+    '승인한 URL에서만 접근 정책과 후보를 확인합니다.',key||(!a.manager_enabled?'서버의 무료 Gemini 실행 설정이 필요합니다.':''));
+  if (publisher?.status==='review') publisherWork=choose('production-publisher-rights','공식 자료 로컬 편집 권리 검토',
+    '공식 문구가 선택한 각 파일의 무료 다운로드와 로컬 편집을 허용하는지 확인하세요.');
+  if (['rights_wait','reviewed','empty','stopped','expired','revoked'].includes(publisher?.status))
+    publisherWork={message:publisher.status==='reviewed'?'검토한 자료가 자산·편집 범위에 반영됐습니다. 모든 장면에 사용 가능한 자료가 있어야 제작할 수 있습니다.':
+      publisher.status==='rights_wait'?'후보가 있으나 로컬 편집 허가 문서를 확인하지 못했습니다.':
+        '이 탐색 범위가 종료됐습니다. 제작 상세에서 접근 차단과 후보 결과를 확인하세요.'};
   let assetWork;
   if (assets?.status==='available') assetWork=choose('production-assets-approve','자산·편집 범위 검토·승인',
-    `편집 판단 최대 1회 · 공식 MP4 다운로드 최대 ${assets.proposal.max_downloads}회 · 비용 $0`,key);
+    `편집 판단 최대 1회 · 공식 영상·이미지 다운로드 최대 ${assets.proposal.max_downloads}회 · 비용 $0`,key);
   if (assets?.status==='active') assetWork=choose('production-policy-run','제작 실행',
     '등록 권리 범위에서 AI 편집·직접 인수·로컬 합성을 진행합니다.');
   if (assets?.status==='waiting_rights') assetWork=choose('production-assets-approve','자산·편집 범위 검토·승인',
@@ -644,6 +663,7 @@ function productionNext(a,selected) {
       '자산 확보 범위가 중단·만료 또는 철회됐습니다. 기존 결과를 보존하고 후속 호출을 차단합니다.',buttons:refresh};
   const legacy=!operating?.expires_at && operating?.status!=='available';
   const options=[
+    ...(publisherWork?[{...publisherWork,choice:'publisher',label:'공식 제작사 자료'}]:[]),
     ...(relevanceWork?[{...relevanceWork,choice:'commons-relevance',label:'장면 적합성 복구'}]:[]),
     ...(diagnosticWork?[{...diagnosticWork,choice:'commons-diagnostic',label:'Commons 제외 원인 진단'}]:[]),
     ...(discoverWork?[{...discoverWork,choice:'discovery',label:'Commons 영상 자동 탐색'}]:[]),
@@ -664,7 +684,9 @@ function productionNext(a,selected) {
     const diagnosticDefault=diagnosticWork && ['available','active','review','empty','stopped'].includes(diagnostic?.status)
       && assets?.status==='waiting_rights';
     const relevanceDefault=relevanceWork && (relevance?.status==='review' || assets?.status==='waiting_rights');
-    const defaultWork=(relevanceDefault && options.find(item=>item.choice==='commons-relevance')) ||
+    const defaultWork=(assets?.status==='waiting_rights' && options.find(item=>item.choice==='publisher' && item.buttons)) ||
+      (assets?.status==='waiting_rights' && publisherWork && options.find(item=>item.choice==='publisher')) ||
+      (relevanceDefault && options.find(item=>item.choice==='commons-relevance')) ||
       (diagnosticDefault && options.find(item=>item.choice==='commons-diagnostic')) ||
       (discoveryDefault && options.find(item=>item.choice==='discovery')) ||
       (assetDefault && options.find(item=>item.choice==='assets')) || options.find(item=>item.buttons && !item.reason) || options[0];
@@ -854,10 +876,27 @@ function productionCommand(action,scene) {
   const diagnostic=a.commons_diagnostic, relevance=a.commons_relevance;
   const operating=a.owner_policy, discovery=action==='production-relevance-rights'?relevance:
     action==='production-diagnostic-rights'?diagnostic:visualDiscovery(a);
+  const publisher=a.publisher_discovery;
   const diagnosticQuery=diagnostic?.proposal?.queries[0];
   const commands={
     'production-listen':['청취 의견 저장',`<p>${h(scene)}의 검증된 음성에 연결합니다.</p><label>대표 청취 의견<textarea name="opinion" required maxlength="500"></textarea></label>`,
       data=>({scene,audio_sha256:a.voices[scene].audio_sha256,opinion:data.get('opinion')})],
+    'production-publisher-approve':['공식 제작사 자료 탐색 검토·승인',
+      `<p>무료 GET 최대 ${h(publisher?.proposal.max_gets)}회 · 무료 Gemini 최대 1회 · 파일 다운로드 0회</p>
+      <ul>${(publisher?.proposal.entries||[]).map(row=>`<li>${h(row.url)}</li>`).join('')}</ul>
+      <p>Gemini에는 승인 장면 요구, 제작사 후보 제목과 파일 유형 및 이전 탐색 실패 요약을 보냅니다.</p>`+
+      check('confirmed','표시된 범위 및 Google 무료 서비스 데이터 처리를 승인하고 무료 적용·결제 미연결·충분한 한도를 확인했습니다.'),
+      data=>({review_hash:publisher.review_hash,confirmed:data.has('confirmed')})],
+    'production-publisher-run':['공식 제작사 자료 탐색 실행','<p>승인한 범위에서 한 번 탐색합니다. 접근 허용이 미확인된 페이지와 제한된 파일은 차단합니다.</p>',()=>({})],
+    'production-publisher-revoke':['공식 자료 탐색 승인 철회','<p>이 범위에서 이후 요청을 시작하지 않습니다.</p>',()=>({})],
+    'production-publisher-rights':['공식 자료 로컬 편집 권리 검토',
+      `<p>선택한 각 파일과 해당 게임 IP에 적용되는 문구만 기록하세요. 게시 권한은 부여되지 않습니다.</p>
+      ${(publisher?.result?.media||[]).filter(row=>publisher.result.eligible[row.id]).map(row=>`<label class="check"><input type="checkbox" name="asset" value="${h(row.id)}">${h(row.title)} · ${h(publisher.result.eligible[row.id].join(', '))}</label><p>${sourceLink(row.page)}</p>`).join('')}
+      <label>권리 근거 문서<select name="terms_url" required>${(publisher?.result?.policies||[]).map(row=>`<option value="${h(row.url)}">${h(row.url)}</option>`).join('')}</select></label>
+      ${(publisher?.result?.policies||[]).map(row=>`<details><summary>공식 문서 확인</summary><p>${sourceLink(row.url)}</p><p>${h(row.text)}</p></details>`).join('')}
+      <label>무료 다운로드 및 로컬 편집 허가 원문<textarea name="evidence" required minlength="20" maxlength="600"></textarea></label>`+
+      check('confirmed','선택한 모든 자료의 장면 적합성과 출처, 제3자 권리, 무료 다운로드 및 로컬 편집 허가를 확인했습니다.'),
+      data=>({result_sha256:publisher.result_sha256,accepted:data.getAll('asset'),terms_url:data.get('terms_url'),evidence:data.get('evidence'),confirmed:data.has('confirmed')})],
     'production-relevance-approve':['관련 영상·이미지 복구 검토·승인',
       `<p>Commons GET 최대 ${h(relevance?.proposal?.max_searches)}회 · 후보 제목·설명·카테고리로 Gemini 적합성 판단 최대 1회 · 비용 $0 · 다운로드 0회</p>
         <ul>${(relevance?.proposal?.queries||[]).map(row=>`<li>${h(row.scene_ids.join(', '))} · ${row.media==='image'?'이미지':'영상'} · ${h(row.query)}</li>`).join('')}</ul>
@@ -959,7 +998,7 @@ function productionCommand(action,scene) {
     try {
       await api(detailApi(project)+'/'+endpoint,body(data));
     } catch (error) {
-      if (['production-policy-run','production-discovery-run','production-diagnostic-run','production-relevance-run'].includes(action)) await route();
+      if (['production-policy-run','production-discovery-run','production-diagnostic-run','production-relevance-run','production-publisher-run'].includes(action)) await route();
       throw error;
     }
     return {message:'제작 상태를 갱신했습니다.'};

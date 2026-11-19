@@ -81,6 +81,11 @@ const recovery={...diagnosis,manager_enabled:true,commons_relevance:{status:'ava
 hasAction(ui.productionNext(recovery),'production-relevance-approve');
 hasAction(ui.productionNext({...recovery,commons_relevance:{status:'active'}}),'production-relevance-run');
 hasAction(ui.productionNext({...recovery,commons_relevance:{status:'review'}}),'production-relevance-rights');
+const publisher={...recovery,commons_relevance:{status:'empty'},publisher_discovery:{status:'available'}};
+hasAction(ui.productionNext(publisher),'production-publisher-approve');
+hasAction(ui.productionNext({...publisher,publisher_discovery:{status:'active'}}),'production-publisher-run');
+hasAction(ui.productionNext({...publisher,publisher_discovery:{status:'review'}}),'production-publisher-rights');
+assert.match(ui.productionNext({...publisher,publisher_discovery:{status:'rights_wait'}}).message,/허가 문서/);
 const blockedAssetWork = ui.productionNext(assetsBlocked);
 hasAction(blockedAssetWork,'production-assets-approve',true);
 assert.match(blockedAssetWork.reason,/공식 직접 다운로드/);
@@ -121,7 +126,10 @@ if (process.argv[2]) {
       hasAction(work,'production-voice-prepare');
     }
     if (live.autonomous_production.asset_execution?.status==='waiting_rights') {
-      if (live.autonomous_production.commons_relevance?.status==='available') {
+      if (live.autonomous_production.publisher_discovery?.status==='available') {
+        hasAction(work,'production-publisher-approve');
+        assert.match(page,/공식 제작사 자료/);
+      } else if (live.autonomous_production.commons_relevance?.status==='available') {
         hasAction(work,'production-relevance-approve');
         assert.match(page,/장면 적합성 판단/);
       } else if (live.autonomous_production.commons_diagnostic?.status==='available') {

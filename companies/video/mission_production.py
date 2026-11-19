@@ -471,6 +471,8 @@ def production_status(workflow,project):
     result['commons_diagnostic']=diagnostic_status(manager,plan)
     from commons_recovery import status as relevance_status
     result['commons_relevance']=relevance_status(manager,plan,clips)
+    from publisher_discovery import state as publisher_state
+    result['publisher_discovery']=publisher_state(manager,plan,clips)
     return result
 
 
@@ -494,12 +496,15 @@ def prepare_manager_request(manager,jid,body,*,operating_policy_hash=None):
 def production_action(workflow,pid,action,body):
     """Explicit owner operations. The representative project remains bound under its lock."""
     if action in ('production-policy-revoke','production-assets-revoke','production-discovery-revoke',
-                  'production-adaptive-revoke','production-diagnostic-revoke','production-relevance-revoke'):
+                  'production-adaptive-revoke','production-diagnostic-revoke','production-relevance-revoke','production-publisher-revoke'):
         from commons_discovery import store_for, diagnostic_store
         from asset_editing import extension_store
         from production_operating import policy_store
         exact(body,())
         manager=production_manager(workflow,workflow.store.load(pid))
+        if action=='production-publisher-revoke':
+            from publisher_discovery import store_for as publisher_store
+            return publisher_store(manager,approved_manager_result(manager)).revoke()
         if action=='production-relevance-revoke':
             from commons_recovery import store_for_recovery
             return store_for_recovery(manager,approved_manager_result(manager)).revoke()
@@ -529,8 +534,11 @@ def production_action(workflow,pid,action,body):
             (manager.root/'inbox').mkdir(mode=0o700,exist_ok=True)
             return result
         result=approved_manager_result(manager)
-        if action.startswith('production-relevance-'):
-            from commons_recovery import action as recover
+        if action.startswith(('production-relevance-','production-publisher-')):
+            if action.startswith('production-publisher-'):
+                from publisher_discovery import action as recover
+            else:
+                from commons_recovery import action as recover
             job,_=clip_job(manager,result)
             clips=job.load()['clips'] if job.root.exists() else []
             config=Gemini35Config.from_env()

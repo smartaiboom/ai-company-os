@@ -21,6 +21,7 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-publisher-approve','production-publisher-run','production-publisher-rights','production-publisher-revoke',
                       'production-relevance-approve','production-relevance-run','production-relevance-rights','production-relevance-revoke',
                       'production-diagnostic-approve','production-diagnostic-run','production-diagnostic-rights',
                       'production-diagnostic-revoke',
@@ -37,6 +38,11 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'publisher_rights_unverified': '후보에 적용되는 공식 무료 다운로드 및 로컬 편집 허가 문구를 확인해야 합니다.',
+    'publisher_url_blocked': '승인된 공식 제공처 또는 경로가 아닙니다.',
+    'publisher_http_failure': '제작사 응답을 검증하는 중 중단했습니다.',
+    'publisher_response_limit': '제작사 응답이 허용 한도를 초과했습니다.',
+    'publisher_plan_invalid': '장면 경로 또는 후보 근거가 유효하지 않습니다.',
     'commons_relevance_invalid': '장면 적합성 응답의 후보 ID, 실제 인용 근거 또는 화면 유형을 확인하지 못했습니다.',
     'still_image_pixels_invalid': '이미지 해상도 또는 총 픽셀 수가 로컬 검증 한도를 벗어났습니다.',
     'still_image_format_invalid': '지원되는 단일 PNG/JPEG 원본이 아닙니다.',

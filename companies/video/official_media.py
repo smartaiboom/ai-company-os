@@ -2,6 +2,7 @@
 import hashlib
 import http.client
 import ipaddress
+from datetime import datetime
 from queue import Empty, Queue
 import re
 import socket
@@ -10,7 +11,7 @@ from threading import Thread, Timer
 from time import monotonic
 from urllib.parse import urlsplit
 
-from autonomous_company import CompanyError, exact, parse, require
+from autonomous_company import CompanyError, exact, now, parse, require
 from goal_dialogue import safe_text
 
 MAX_BYTES = 64 * 1024 * 1024
@@ -142,6 +143,14 @@ def download_mp4(asset, destination):
         url=original_url(asset['url'],mime)
         headers={'User-Agent':USER_AGENT}
         limit=MAX_IMAGE_BYTES if mime.startswith('image/') else MAX_BYTES
+    elif asset.get('origin')=='publisher_reviewed':
+        from publisher_discovery import FORMATS, PROFILES, USER_AGENT, profile_url
+        require(datetime.fromisoformat(now())<datetime.fromisoformat(asset['access_expires_at']),
+                'publisher_rights_unverified')
+        url=profile_url(PROFILES[asset['publisher_profile']],asset['url'],'asset')
+        require(FORMATS.get('.'+url.path.rsplit('.',1)[-1].lower())==mime,'official_media_response_invalid')
+        headers={'User-Agent':USER_AGENT}
+        limit=8*1024*1024 if mime.startswith('image/') else MAX_BYTES
     else:
         url=official_url(asset['url'],media=True)
         headers={}

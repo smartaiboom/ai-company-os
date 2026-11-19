@@ -47,7 +47,11 @@ def registries(root,manager,plan):
     from commons_discovery import accepted_media
     from commons_recovery import recovery_media, required_relevance, store_for_recovery
     library=root/'production_source_library'
+    from publisher_discovery import publisher_media
     offices=registered_media(root/'production_official_media')
+    publisher=publisher_media(manager,plan)
+    require(not offices.keys() & publisher.keys(),'official_registry_invalid')
+    offices.update(publisher)
     relevance_required=required_relevance(manager,plan) and (
         not extension_store(manager,plan).read('policy.json') or store_for_recovery(manager,plan).read('policy.json'))
     diagnostic={} if relevance_required else accepted_media(manager,plan,diagnostic=True)
@@ -235,6 +239,12 @@ def import_selected(job,root,name,scene,source_hash,row,minimum_duration,receipt
         minimum_duration=minimum_duration,direct_mp4=receipt is not None and not webm,direct_webm=webm)
 
 
+def verify_publisher_bytes(store,row,checksum):
+    if row.get('origin')=='publisher_reviewed':
+        require(all(store.read(path.name)['sha256']!=checksum for path in store.root.glob('download-*.json')),
+                'invalid_source_edit')
+
+
 def import_motion(job,store,key,offices,catalog,choice,frames):
     from pathlib import Path
     from local_melo_tts import file_hash
@@ -258,6 +268,7 @@ def import_motion(job,store,key,offices,catalog,choice,frames):
             def fetch(proof,check):
                 check()
                 receipt=download_mp4(row,dest)
+                verify_publisher_bytes(store,row,receipt['sha256'])
                 image_dimensions(dest,mime)
                 require(all(entry['sha256']!=receipt['sha256'] for entry in items),'invalid_source_edit')
                 record=dict(policy_sha256=proof,asset=name,scene_id=scene,rights_sha256=digest(row),url=row['url'],
@@ -268,7 +279,7 @@ def import_motion(job,store,key,offices,catalog,choice,frames):
             originals.append((dest,mime))
         video=render_stills(originals,frames,choice['motion'],choice['label'],folder)
         checksum=file_hash(video)
-        rights=dict(rights_evidence='Illustrative motion from separately reviewed Commons stills. See acquisition receipts.')
+        rights=dict(rights_evidence='Illustrative motion from separately reviewed official stills. See acquisition receipts.')
         import_selected(job,folder,video.name,scene,checksum,rights,frames/24)
         store.write('local-completed-'+suffix,dict(scene_id=scene,assets=names,sha256=checksum,
             motion=choice['motion'],label=choice['label'],at=now()))
@@ -346,6 +357,7 @@ def perform_extension(workflow,project,manager,plan,state,action,body):
                     check()
                     filename='asset.webm' if row.get('mime')=='video/webm' else 'asset.mp4'
                     receipt=download_mp4(row,folder/filename)
+                    verify_publisher_bytes(store,row,receipt['sha256'])
                     store.write('download-'+asset_id+'.json',dict(policy_sha256=proof,asset=name,scene_id=scene,
                         rights_sha256=digest(row),url=row['url'],terms_url=row['terms_url'],at=now(),
                         attribution=row.get('attribution'),**receipt))

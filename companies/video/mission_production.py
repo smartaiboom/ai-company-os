@@ -322,13 +322,17 @@ def production_status(workflow,project):
     except CompanyError:
         return None
     jid=draft_id(manager)
+    config=Gemini35Config.from_env()
     result=dict(status='unprepared',scope=manager.contract['input'],attempts=0,plan=None,
-                manager_enabled=os.getenv('GEMINI35_AUTONOMOUS_FREE_ENABLED')=='1',
+                manager_enabled=os.getenv('GEMINI35_AUTONOMOUS_FREE_ENABLED')=='1'
+                and (config.model,config.endpoint)==(MODEL,ENDPOINT),
                 tts_enabled=os.getenv('GEMINI_PRODUCTION_TTS_ENABLED')=='1',
-                key_ready=False,render_ready=False,clips=[],voices={})
+                key_ready=False,key_setup='missing_runtime_key',render_ready=False,clips=[],voices={})
+    if os.getenv('GEMINI_API_KEY'):
+        result['key_setup']='mismatch' if os.getenv('GEMINI_PRODUCTION_PROJECT_API_KEY') else 'missing_comparison_key'
     try:
         production_keys()
-        result['key_ready']=True
+        result.update(key_ready=True,key_setup='ready')
     except CompanyError:
         pass
     if jid is None:
@@ -336,6 +340,8 @@ def production_status(workflow,project):
     draft=manager.load(jid)
     attempts=draft['real_ai']['attempts']
     result['attempts']=len(attempts)
+    if attempts:
+        result['manager_attempt']=attempts[-1]['status']
     result['status']='stopped' if attempts else 'approved' if draft['grants'] else 'prepared'
     proposal=manager._proposal_path(jid)
     if proposal.is_file():
@@ -369,8 +375,12 @@ def production_status(workflow,project):
             if not clip_state['attempts']:
                 imported_preview_inputs(workflow,project)
                 result['render_ready']=True
-    except (CompanyError,FileNotFoundError):
-        pass
+            else:
+                result['render_attempt']=clip_state['attempts'][-1]['status']
+    except CompanyError as exc:
+        result['render_blocker']=exc.code
+    except FileNotFoundError:
+        result['render_blocker']='pending_external_clip'
     return result
 
 

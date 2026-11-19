@@ -61,7 +61,7 @@ def registries(root,manager,plan):
     return library,library_entries(library),{**offices,**commons}
 
 
-def edit_context(manager, plan, constraints, clips, libraries, offices, source_result):
+def edit_context(manager, plan, constraints, clips, libraries, offices, source_result, research=None):
     _,base=clip_job(manager,plan)
     spec,timeline_hash=approved_clip_timeline(manager,plan,constraints,clips,base)
     lengths=[round((row['end']-row['start'])*24) for row in spec['approved_timeline']]
@@ -92,7 +92,7 @@ def edit_context(manager, plan, constraints, clips, libraries, offices, source_r
             narration_seconds=row['seconds'],narration_sha256=row['audio_sha256'],scene_goal=direction['request'],
             voice_free_seconds=round(length/24-row['seconds'],3),
             caption_frames=round(spec['approved_timeline'][len(scenes)].get('caption_seconds',row['seconds'])*24)))
-    return dict(goal=manager.contract['input']['goal'],plan_sha256=manager.contract['input']['approved_plan_hash'],
+    return dict(**({'cross_research':research} if research else {}),goal=manager.contract['input']['goal'],plan_sha256=manager.contract['input']['approved_plan_hash'],
                 direction_sha256=digest(plan),timeline_sha256=timeline_hash,scenes=scenes,candidates=candidates,
                 previous_source_assessment=source_result,
                 pacing_instruction='Use measured gaps for meaningful visual beats within existing scene boundaries. '
@@ -167,6 +167,13 @@ def editor(manager, context=None):
     return AssetEditor(root,dict(input=context,system=SYSTEM,schema=SCHEMA))
 
 
+def editor_unit(worker):
+    fields=['approved_storyboard','timing_and_voice_hashes','asset_descriptions_and_hashes','existing_source_assignment']
+    if worker.contract['input'].get('cross_research'):
+        fields.append('manager_reviewed_cross_research')
+    return unit('editor',MODEL,ENDPOINT,fields,payload_sha256=digest(worker._payload(None)),max_output_tokens=4096)
+
+
 def transfer_unit(name, asset):
     from still_motion import MAX_BYTES as IMAGE_BYTES
     return unit('download:'+name,'direct_https_get',asset['url'],['request_url','connection_metadata'],
@@ -180,7 +187,8 @@ def offer(manager,plan,root,constraints,clips,state):
         return dict(status='waiting_audio')
     try:
         _,libraries,offices=registries(root,manager,plan)
-        context=edit_context(manager,plan,constraints,clips,libraries,offices,state['source_assessment'].get('result'))
+        context=edit_context(manager,plan,constraints,clips,libraries,offices,state['source_assessment'].get('result'),
+                             state.get('cross_research_for_editor'))
     except (CompanyError,OSError,ValueError):
         return dict(status='registry_blocked')
     missing=len(plan['scenes'])-len(clips)
@@ -192,11 +200,12 @@ def offer(manager,plan,root,constraints,clips,state):
     if uncovered:
         return dict(status='waiting_rights',local=len(libraries),official=len(offices),missing=missing,uncovered=uncovered)
     worker=editor(manager,context)
-    units=[unit('editor',MODEL,ENDPOINT,['approved_storyboard','timing_and_voice_hashes','asset_descriptions_and_hashes',
-            'existing_source_assignment'],payload_sha256=digest(worker._payload(None)),max_output_tokens=4096)]
+    units=[editor_unit(worker)]
     units.extend(transfer_unit(name,asset) for name,asset in sorted(offices.items()))
     store=extension_store(manager,plan)
     proposal=store.proposal(units)
+    if context.get('cross_research'):
+        proposal['cross_research']=context['cross_research']
     multiple=any(row.get('mime','').startswith('image/') for row in offices.values())
     proposal.update(max_downloads=min(missing*(3 if multiple else 1),len(offices)),rights_review=list(offices.values()),
                     local_entries=[{k:item[k] for k in ('id','description','origin','rights','sha256')} for item in libraries.values()])
@@ -306,12 +315,12 @@ def perform_extension(workflow,project,manager,plan,state,action,body):
             'owner_policy_unresolved_attempt')
     library,libraries,offices=registries(root,manager,plan)
     if 'editor' not in ledger:
-        context=edit_context(manager,plan,constraints,clips,libraries,offices,state['source_assessment'].get('result'))
+        context=edit_context(manager,plan,constraints,clips,libraries,offices,state['source_assessment'].get('result'),
+                             grant['proposal'].get('cross_research'))
         worker=editor(manager,context)
         wire=digest(worker._payload(None))
         require(state['manager_enabled'] and draft_id(worker) is None,'asset_extension_not_ready')
-        item=unit('editor',MODEL,ENDPOINT,['approved_storyboard','timing_and_voice_hashes','asset_descriptions_and_hashes',
-            'existing_source_assignment'],payload_sha256=wire,max_output_tokens=4096)
+        item=editor_unit(worker)
         delegated_call(store,key,item,wire,lambda proof,check:run_worker(worker,key,proof,wire,check))
     worker=editor(manager)
     decision=approved_manager_result(worker)

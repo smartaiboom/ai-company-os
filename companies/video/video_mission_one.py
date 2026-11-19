@@ -93,7 +93,17 @@ class MissionOneStore(QualityProviderStore):
         self._check_mission_account(proof, p['limits']['max_calls'])
         require(key not in json.dumps(proof, ensure_ascii=False), 'secret_in_state')
         body = self.prepare(project_id, valid_hours=1, confirm_free_account=True)
-        return {**body, 'mission_account': proof, **({'mission_web':web, 'mission_research_review':research_review_policy()} if web else {}),
+        research=None
+        if web and p['quality_inputs']['answers'].get('representative_project'):
+            from research_workflow import planning_handoff
+            root=self.root.parent
+            representative_id=p['quality_inputs']['answers']['representative_project']
+            studio=Store(root)
+            from autonomous_company import ID
+            if isinstance(representative_id,str) and ID.fullmatch(representative_id) and studio.path(representative_id).is_file():
+                representative=studio.load(representative_id)
+                research=planning_handoff(root,representative,project_id)
+        return {**body, 'mission_account': proof, **({'mission_cross_research':research} if research else {}), **({'mission_web':web, 'mission_research_review':research_review_policy()} if web else {}),
                 **({'mission_resume':deepcopy(p['mission_resume'])} if 'mission_resume' in p else {}),
                 **({'mission_successor':deepcopy(p['mission_successor'])} if 'mission_successor' in p else {}),
                 **({'mission_writer_resume':deepcopy(p['mission_writer_resume'])} if 'mission_writer_resume' in p else {}),
@@ -622,8 +632,14 @@ class MissionOneStore(QualityProviderStore):
             require(body['mission_account']['account_project']==old['mission_account']['account_project']
                     and body['mission_web']['account_project']==old['mission_web']['account_project'],
                     'mission_writer_account_changed')
+        if 'mission_cross_research' in body:
+            from research_workflow import planning_handoff
+            root=self.root.parent
+            representative=Store(root).load(p['quality_inputs']['answers']['representative_project'])
+            require(body['mission_cross_research']==planning_handoff(root,representative,p['id'],fresh=False),
+                    'research_scope_invalid')
         self._check_mission_account(body.get('mission_account'), p['limits']['max_calls'])
-        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor','mission_topic_successor','mission_unified_successor')})
+        super()._check_contract(p, {k:v for k,v in body.items() if k not in ('mission_account','mission_cross_research','mission_web','mission_resume','mission_research_review','mission_successor','mission_writer_resume','mission_budget_writer','mission_free_writer','mission_audience_successor','mission_topic_successor','mission_unified_successor')})
 
 
 def validate_research(value):
@@ -905,6 +921,11 @@ class MissionOneCompany(VideoProviderQualityCompany):
         if (continuation.get('new_purpose')==CAPTION_REVISION_PURPOSE and phase=='execute'
                 and context['assignment']['role']=='writer'):
             context={**context,'revision_feedback':continuation['revision_feedback']}
+        if p['goal']==GAME_GOAL and (phase=='plan' or phase in ('execute','review') and
+                                     context['assignment']['role']=='research'):
+            research=self.store.grant(p)['body'].get('mission_cross_research')
+            if research:
+                context={**context,'quality':{**context['quality'],'cross_research':research}}
         selection = self._manager_selection(p)
         if selection:
             context = {**context,'quality':{**context['quality'],'manager_selection':selection}}

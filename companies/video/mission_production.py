@@ -463,6 +463,10 @@ def production_status(workflow,project):
     result['voice_batch']=batch_status(manager,plan,result['voices'])
     from production_operating import policy_status
     result['owner_policy']=policy_status(manager,plan,result)
+    from research_workflow import production_handoff
+    research=production_handoff(workflow,project)
+    if research:
+        result['cross_research_for_editor']=research
     from asset_editing import edit_status
     result['asset_execution']=edit_status(manager,plan,workflow.store.root,project['representative']['constraints'],clips,result)
     from commons_discovery import status as discovery_status, diagnostic_status

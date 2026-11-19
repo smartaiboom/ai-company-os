@@ -1,9 +1,7 @@
 """Bounded publisher-page extraction. Discovery grants no media download or licence."""
 from datetime import datetime, timedelta
 from html.parser import HTMLParser
-import http.client
 import re
-from time import monotonic
 import unicodedata
 from urllib.parse import urljoin, urlsplit
 
@@ -13,7 +11,7 @@ from commons_discovery import USER_AGENT, adaptive_queries, plain, status as dis
 from commons_recovery import status as relevance_status, terms
 from goal_dialogue import safe_text
 from mission_production import ProductionManager, approved_manager_result, canonical_bytes, production_keys
-from official_media import _PinnedHTTPS, _global_addresses
+from research_https import _PinnedHTTPS, _global_addresses, fetch_public_text, robots_allows
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import delegated_call, run_worker, unit
 from role_json_schema import S, arr, enum, obj
@@ -61,61 +59,8 @@ def profile_url(profile,value,kind):
 
 
 def fetch_public(profile,url,kind):
-    parsed=profile_url(profile,url,kind)
-    deadline=monotonic()+20
-    family,address=_global_addresses(parsed.hostname,deadline)
-    connection=_PinnedHTTPS(parsed.hostname,family,address,deadline)
-    limit=32768 if kind=='robots' else MAX_PAGE
-    try:
-        connection.request('GET',parsed.path,headers={'User-Agent':USER_AGENT,
-            'Accept':'text/plain' if kind=='robots' else 'text/html','Accept-Encoding':'identity'})
-        with connection.getresponse() as response:
-            if response.status in (401,403,404) or 300<=response.status<400:
-                return dict(status=response.status,text=None)
-            require(response.status==200,'publisher_http_failure')
-            mime='text/plain' if kind=='robots' else 'text/html'
-            if (response.headers.get_content_type()!=mime or
-                    response.getheader('Content-Encoding','identity').lower()!='identity'):
-                return dict(status=200,text=None)
-            data=response.read(limit+1)
-            require(len(data)<=limit and monotonic()<=deadline,'publisher_response_limit')
-            return dict(status=200,text=data.decode('utf-8',errors='strict'))
-    except (UnicodeError,OSError,http.client.HTTPException):
-        raise CompanyError('publisher_http_failure') from None
-    finally:
-        connection.close()
-        connection.cancel_timer()
-
-
-def robots_allows(text,path):
-    """Conservative consent gate. A missing/unverified file or matching denial blocks the path."""
-    if not isinstance(text,str) or not text.strip():
-        return False
-    agents=[]
-    previous=None
-    applicable=False
-    for raw in text.splitlines():
-        line=raw.split('#',1)[0].strip()
-        if ':' not in line:
-            continue
-        key,value=(part.strip() for part in line.split(':',1))
-        key=key.lower()
-        if key=='user-agent':
-            if previous!='user-agent':
-                agents=[]
-            agents.append(value.lower())
-        elif key in ('allow','disallow','crawl-delay') and any(a=='*' or a and a in 'aicompanyos-cutroom' for a in agents):
-            if key=='crawl-delay' and value!='0':
-                return False
-            applicable=True
-            if key=='disallow' and value:
-                tail='$' if value.endswith('$') else ''
-                literal=value[:-1] if tail else value
-                pattern=re.escape(literal).replace(r'\*','.*')+tail
-                if re.match(pattern,path):
-                    return False
-        previous=key
-    return applicable
+    return fetch_public_text(profile_url(profile,url,kind),kind,agent=USER_AGENT,
+                             connect=_PinnedHTTPS,resolve=_global_addresses,page_limit=MAX_PAGE)
 
 
 class Extract(HTMLParser):

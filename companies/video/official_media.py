@@ -1,18 +1,14 @@
 """Bounded direct MP4 transfer from a registered official publisher endpoint."""
 import hashlib
 import http.client
-import ipaddress
 from datetime import datetime
-from queue import Empty, Queue
 import re
-import socket
-import ssl
-from threading import Thread, Timer
 from time import monotonic
 from urllib.parse import urlsplit
 
 from autonomous_company import CompanyError, exact, now, parse, require
 from goal_dialogue import safe_text
+from research_https import _PinnedHTTPS, _global_addresses
 
 MAX_BYTES = 64 * 1024 * 1024
 TIMEOUT = 45
@@ -79,60 +75,6 @@ def registered_media(root):
         assets[row['id']]={**row,'identity_url':issuer['identity_url']}
     require(len({asset['url'] for asset in assets.values()})==len(assets),'official_registry_invalid')
     return assets
-
-
-def _global_addresses(host, deadline):
-    results=Queue(maxsize=1)
-    def resolve():
-        try:
-            results.put(socket.getaddrinfo(host,443,type=socket.SOCK_STREAM))
-        except OSError:
-            results.put([])
-    Thread(target=resolve,daemon=True).start()
-    try:
-        rows=results.get(timeout=max(0,deadline-monotonic()))
-    except Empty:
-        raise CompanyError('official_download_timeout') from None
-    addresses=[(family,address, ipaddress.ip_address(address[0]))
-               for family,_,_,_,address in rows if family in (socket.AF_INET,socket.AF_INET6)]
-    require(addresses and all(ip.is_global and not ip.is_multicast and not ip.is_reserved
-                and not getattr(ip,'ipv4_mapped',None) and not getattr(ip,'sixtofour',None)
-                and not getattr(ip,'teredo',None) and not ip.is_link_local and not ip.is_loopback
-                and (ip.version==4 or ip in ipaddress.ip_network('2000::/3'))
-                for _,_,ip in addresses),'official_destination_blocked')
-    return addresses[0][:2]
-
-
-class _PinnedHTTPS(http.client.HTTPSConnection):
-    def __init__(self, host, family, address, deadline):
-        super().__init__(host, timeout=max(.001,deadline-monotonic()),context=ssl.create_default_context())
-        self._family=family
-        self._address=address
-        self._deadline=deadline
-        self._timer=None
-
-    def connect(self):
-        raw=socket.socket(self._family,socket.SOCK_STREAM)
-        try:
-            raw.settimeout(max(.001,self._deadline-monotonic()))
-            raw.connect(self._address)
-            self.sock=self._context.wrap_socket(raw,server_hostname=self.host,do_handshake_on_connect=False)
-            self._timer=Timer(max(0,self._deadline-monotonic()),self._abort,args=(self.sock,))
-            self._timer.daemon=True
-            self._timer.start()
-            self.sock.do_handshake()
-        except BaseException:
-            raw.close()
-            raise
-
-    @staticmethod
-    def _abort(sock):
-        try: sock.shutdown(socket.SHUT_RDWR)
-        except OSError: pass
-
-    def cancel_timer(self):
-        if self._timer:
-            self._timer.cancel()
 
 
 def download_mp4(asset, destination):

@@ -111,6 +111,10 @@ assert.match(ui.nextWork({stage:'completed',flow},controlSource).message,/최종
 if (process.argv[2]) {
   const live = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   const page = ui.projectPage(live);
+  if (live.research?.status==='setup_required') {
+    assert.match(page,/웹·전문 자료 교차 조사/);
+    assert.doesNotMatch(page,/data-action="research-run"/);
+  }
   assert.ok(page.indexOf('id="next-work"') < page.indexOf('id="production-detail"'));
   assert.ok(page.indexOf('id="production-detail"') < page.indexOf('id="video-panel"'));
   if (live.autonomous_production?.status==='waiting_assets') {

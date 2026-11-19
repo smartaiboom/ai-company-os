@@ -35,10 +35,10 @@ class OfficialMediaTests(TestCase):
                 official_url(url,media=True)
         public=(socket.AF_INET,socket.SOCK_STREAM,6,'',('8.8.8.8',443))
         for blocked in ('127.0.0.1','10.1.2.3','169.254.169.254','224.0.0.1'):
-            with patch('official_media.socket.getaddrinfo',return_value=[public,(*public[:4],(blocked,443))]):
+            with patch('research_https.socket.getaddrinfo',return_value=[public,(*public[:4],(blocked,443))]):
                 with self.assertRaisesRegex(CompanyError,'official_destination_blocked'):
                     _global_addresses('publisher.example',monotonic()+2)
-        with patch('official_media.socket.getaddrinfo',return_value=[public]):
+        with patch('research_https.socket.getaddrinfo',return_value=[public]):
             self.assertEqual(_global_addresses('publisher.example',monotonic()+2), (socket.AF_INET,public[-1]))
 
     def test_one_get_rejects_redirects_wrong_type_size_and_hash(self):

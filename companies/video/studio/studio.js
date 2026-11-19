@@ -206,6 +206,7 @@ function missionProposal(proposal) {
   ])}
     <p>Gemini에 목표, 입력 조건, 직원 지시와 산출물, 선행 결과 및 검토 피드백을 보냅니다. 조사 직원이 작성한 검색어와 발견한 공개 영상 ID는 YouTube Data API로 보냅니다. 조회한 공개 메타데이터는 내부 조사·검토에 사용하며 동의 정책의 보존 기준은 ${h(proposal.metadata_retention_days)}일입니다.</p>
     <p>Google 무료 서비스의 입력과 출력은 서비스 개선에 사용되거나 사람이 검토할 수 있습니다. 키 소속과 무료 조건은 소유자 확인에 근거합니다. 실패한 시도도 차감되며 자동 재호출이나 유료 전환은 없습니다.</p>
+    ${proposal.cross_research?`<details><summary>Gemini에 함께 보내는 교차 조사 자료</summary><pre>${h(JSON.stringify(proposal.cross_research,null,2))}</pre></details>`:''}
     <p class="mono">동의 해시 ${h(proposal.review_hash)}</p>`;
 }
 function missionStatus(mission) {
@@ -493,6 +494,46 @@ function budgetPanel(p) {
     ${!p.readonly&&b.consent_state==='valid'?'<button class="button secondary" data-action="budget-run">승인된 예산으로 작업 시작·계속</button><button class="button ghost" data-action="budget-revoke">공급자 동의 철회</button>':''}
     <p class="muted">${h(b.provider_status)} · ${h(b.reason||'')}</p></section>`;
 }
+function researchPanel(p) {
+  const r=p.research;
+  if (!r) return '';
+  const actions={available:['research-approve','조사 범위 검토·승인'],active:['research-run','웹·전문 자료 조사 실행']};
+  const action=actions[r.status];
+  const labels={setup_required:'무료 Tavily Researcher 계정과 서버 설정이 필요합니다.',
+    available:'업무에 필요한 검색 또는 보존된 전문 자료를 직원이 선택합니다.',active:'승인한 범위 내에서 조사와 관리자 검토를 진행합니다.',
+    review:'관리자가 조사 결과와 미확인 항목을 검토했습니다.',revoked:'조사 승인이 철회됐습니다.',
+    expired:'조사 승인 유효 시간이 지났습니다.',stopped:'실패 또는 미확정 요청에서 조사를 중단했습니다.'};
+  return `<section class="panel" id="cross-research"><h2>웹·전문 자료 교차 조사</h2><p>${h(labels[r.status])}</p>
+    ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
+    ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
+    ${r.review?`<p><strong>관리자 의견</strong> ${h(r.review.decision.note)}</p>`:''}
+    ${r.result?`<p><strong>제작 가능성</strong> ${h(r.result.feasibility)}</p>
+      ${r.result.claims.map(c=>`<p><strong>${h(({supported:'근거 일치',conflicting:'근거 상충',unverified:'미확인'})[c.assessment])}</strong> ${h(c.statement)}
+        ${c.citations.map(ref=>`<span> · ${h(ref.source)} “${h(ref.quote)}”</span>`).join('')}</p>`).join('')}
+      `:''}
+    ${r.observations?.length?`<details><summary>실제 관측과 출처</summary>${r.observations.map(o=>`<p>${h(o.tool)} · ${h(o.at)} · ${o.status==='empty'?'결과 없음':''}</p>
+        ${o.sources.map(ref=>`<p>${h(ref.id)} · ${h(ref.title)} · ${h(ref.excerpt)} · ${sourceLink(ref.url)}</p>`).join('')}`).join('')}</details>`:''}
+    </section>`;
+}
+function researchCommand(action) {
+  const p=detail, r=p.research;
+  const titles={'research-approve':'조사 범위 검토·승인','research-run':'웹·전문 자료 조사 실행','research-revoke':'조사 범위 철회'};
+  const fields=action==='research-approve'?`<p>Tavily 기본 검색 최대 ${h(r.proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(r.proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
+    <ul>${r.proposal.tool_options.map(t=>`<li>${h(t.name)} · ${h(Object.values(t.options).join(' / '))}</li>`).join('')}</ul>
+    <p>Tavily에 선택한 공개 검색어만, Google에 업무 범위·출처 발췌·조사 결과를 보냅니다.</p>
+    <label class="check"><input type="checkbox" name="confirmed" required>Tavily Researcher 및 결제·종량제 비활성, Google 무료 프로젝트와 잔여 한도 및 두 제공처의 데이터 처리를 확인했습니다.</label>`:
+    '<p>현재 서명 범위에 적용됩니다.</p>';
+  modal(titles[action],fields,titles[action],async data=>{
+    const body=action==='research-approve'?{review_hash:r.review_hash,confirmed:data.has('confirmed')}:{};
+    try {
+      await api(detailApi(p)+'/'+action,body);
+    } catch (error) {
+      if (action==='research-run') await route();
+      throw error;
+    }
+    return {message:'조사 상태를 갱신했습니다.'};
+  });
+}
 function projectPage(p, chosen={}) {
   const f=p.flow;
   const plan=f.plan_versions.find(item=>item.version===chosen.plan) || f.plan_versions.at(-1);
@@ -507,7 +548,7 @@ function projectPage(p, chosen={}) {
   <h1>${h(p.goal)}</h1><p class="muted">${h(s[1])} · ${h(time(p.updated_at))}</p></section>
   <section class="panel next-work" id="next-work" aria-labelledby="next-heading"></section>
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
-  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${productionPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
+  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${researchPanel(p)}${productionPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
   <aside class="stack"><section class="panel" id="work-detail"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
   ${operations(p)}${p.stage!=='plan_revision'?reworkPanel(p):''}${p.rework&&p.mission?`<details class="subpanel"><summary>이전 미션 기획 보존 · 참고용 (최신 재작업 아님)</summary><p>아래 내부 수락은 이전 버전의 기록입니다. 최신 진행 상황은 위 AI 재작업 현황을 확인하세요.</p>${missionStatus(p.mission)}</details>`:missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
@@ -1063,6 +1104,7 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action?.startsWith('research-')) researchCommand(button.dataset.action);
   else if (button.dataset.action?.startsWith('production-')) productionCommand(button.dataset.action,button.dataset.scene);
   else if (button.dataset.action==='mission-preview') {
     const project=detail;

@@ -20,6 +20,8 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
+RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke')
+
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
                       'production-publisher-approve','production-publisher-run','production-publisher-rights','production-publisher-revoke',
                       'production-relevance-approve','production-relevance-run','production-relevance-rights','production-relevance-revoke',
@@ -38,6 +40,10 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'research_scope_invalid': '현재 업무와 조사 범위가 일치하지 않습니다.',
+    'research_search_disabled': '무료 전용 Tavily 계정과 서버 설정을 확인하세요.',
+    'research_search_failed': '검색 응답을 확인하지 못했습니다. 이 범위에서 후속 호출을 중단했습니다.',
+    'research_evidence_invalid': '인용 원문 또는 독립 출처 요건을 확인하지 못했습니다.',
     'publisher_rights_unverified': '후보에 적용되는 공식 무료 다운로드 및 로컬 편집 허가 문구를 확인해야 합니다.',
     'publisher_url_blocked': '승인된 공식 제공처 또는 경로가 아닙니다.',
     'publisher_http_failure': '제작사 응답을 검증하는 중 중단했습니다.',
@@ -224,7 +230,9 @@ class Studio:
         production = self.mission_production(p) if key=='workspace' and mission else None
         from mission_production import production_status
         autonomous_production = production_status(self.workflow,p) if production else None
-        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
+        from research_workflow import status as research_status
+        research=research_status(self.workflow,p) if key=='workspace' and mission else None
+        return {**self.card(key, p), 'research':research, 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
                 'autonomous_production': autonomous_production,
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
@@ -371,7 +379,8 @@ class Studio:
                           units_remaining=web['general_units_remaining'], searches=web['approved_max_searches'],
                           videos=web['approved_max_videos'],
                           metadata_retention_days=web['policy']['api_metadata_retention_days'],
-                          constraints=proposal['quality_contract']['inputs']['constraints'])
+                          constraints=proposal['quality_contract']['inputs']['constraints'],
+                          cross_research=proposal.get('mission_cross_research'))
         return dict(account_project=MISSION_ACCOUNT, supported=supported, proposal=review, running=running,
                     execution_error=error or ('mission_consent_incomplete' if eligible and consent_file
                                               and not job['real_ai']['consent'] else None),
@@ -749,6 +758,9 @@ class Studio:
         elif name=='rework-finalize-recover':
             from representative_rework import recover_finalization
             recover_finalization(self.workflow,pid,body)
+        elif name in RESEARCH_ACTIONS:
+            from research_workflow import action as research_action
+            research_action(self.workflow,pid,name,body)
         elif name in MISSION_ACTIONS:
             self.mission_action(pid, name, body)
         elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare',
@@ -933,7 +945,7 @@ def make_server(host, port, studio):
                     project = studio.project('workspace', match[1])
                     plan = matching_plan(project, body['version'], body['sha256'])
                     return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS+RESEARCH_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

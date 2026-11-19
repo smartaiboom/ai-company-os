@@ -304,6 +304,10 @@ def imported_preview_inputs(workflow,project):
         speech=MeloLocal()
         require(tool=='melo_local' and speech.available(),'production_voice_unavailable')
     handoff=dict(plan=spec,clips=[c['sha256'] for c in state['clips']],direction_hash=digest(result))
+    from asset_editing import editing_handoff
+    editing=editing_handoff(manager,result,state['clips'],spec)
+    if editing:
+        handoff['editing']=editing
     if timeline_hash:
         handoff['timeline_sha256']=timeline_hash
     return job,speech,handoff
@@ -316,7 +320,7 @@ def render_imported(job,speech,spec,folder):
     from local_melo_tts import file_hash
     from production_video import portrait_font
     edit={key:spec['plan'][key] for key in ('approved_timeline','total_seconds')} if spec.get('timeline_sha256') else None
-    media=job.render(synthesizer=speech,approved_edit=edit)
+    media=job.render(synthesizer=speech,approved_edit=edit,editing=(spec.get('editing') or {}).get('scenes'))
     require(media['audio'] and media['decoded'] and not media['synthetic_test_fixture'],
             'production_media_unverified')
     shutil.copyfile(job.root/media['file'],folder/'video.mp4')
@@ -337,9 +341,13 @@ def render_imported(job,speech,spec,folder):
             require(len(pixels)==1024,'production_motion_sample_missing')
             samples.append(sha(pixels))
         review[-1]['distinct_sampled_frames']=len(set(samples))
+        if spec.get('editing'):
+            review[-1].update({k:scene[k] for k in ('source_start_frames','framing','transition','caption_position')})
+            review[-1]['editing_note']=spec['editing']['review_notes'][i]
     # Asset metadata, review timing and subtitle file remain verifiable local artifacts.
     metadata=folder/'production-evidence.json'
-    metadata.write_text(json.dumps(dict(timing=timing,source_receipts=media['source_receipts']),ensure_ascii=False))
+    metadata.write_text(json.dumps(dict(timing=timing,source_receipts=media['source_receipts'],
+                                        editing=spec.get('editing')),ensure_ascii=False))
     shutil.copyfile(job.root/'captions.srt',folder/'captions.srt')
     receipt=dict(tool='approved_imported_portrait_v1',at=now(),input_hash=digest(spec),sha256=media['sha256'],
         duration_seconds=media['duration'],width=720,height=1280,audio=True,decoded=True,audio_mode='local_speech',
@@ -354,6 +362,9 @@ def render_imported(job,speech,spec,folder):
                          for name in ('production-evidence.json','captions.srt')])
     if spec.get('timeline_sha256'):
         receipt['timeline_sha256']=spec['timeline_sha256']
+    if spec.get('editing'):
+        receipt['editing_sha256']=spec['editing']['direction_sha256']
+        receipt['editing_review_criteria']=spec['editing']['review_criteria']
     (folder/'receipt.json').write_text(json.dumps(receipt,ensure_ascii=False))
     return receipt
 
@@ -448,6 +459,8 @@ def production_status(workflow,project):
     result['voice_batch']=batch_status(manager,plan,result['voices'])
     from production_operating import policy_status
     result['owner_policy']=policy_status(manager,plan,result)
+    from asset_editing import edit_status
+    result['asset_execution']=edit_status(manager,plan,workflow.store.root,project['representative']['constraints'],clips,result)
     return result
 
 
@@ -470,11 +483,13 @@ def prepare_manager_request(manager,jid,body,*,operating_policy_hash=None):
 
 def production_action(workflow,pid,action,body):
     """Explicit owner operations. The representative project remains bound under its lock."""
-    if action=='production-policy-revoke':
+    if action in ('production-policy-revoke','production-assets-revoke'):
+        from asset_editing import extension_store
         from production_operating import policy_store
         exact(body,())
         manager=production_manager(workflow,workflow.store.load(pid))
-        return policy_store(manager,approved_manager_result(manager)).revoke()
+        store=extension_store if action=='production-assets-revoke' else policy_store
+        return store(manager,approved_manager_result(manager)).revoke()
     with workflow.store.lock(pid):
         project=workflow.store.load(pid)
         manager=production_manager(workflow,project)
@@ -494,6 +509,10 @@ def production_action(workflow,pid,action,body):
             (manager.root/'inbox').mkdir(mode=0o700,exist_ok=True)
             return result
         result=approved_manager_result(manager)
+        from asset_editing import extension_store,perform_extension
+        if action=='production-assets-approve' or (
+                action=='production-policy-run' and extension_store(manager,result).root.exists()):
+            return perform_extension(workflow,project,manager,result,production_status(workflow,project),action,body)
         from production_operating import policy_action, policy_store
         if action.startswith('production-policy-'):
             return policy_action(workflow,project,manager,result,action,body)

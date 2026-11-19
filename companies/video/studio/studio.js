@@ -183,7 +183,10 @@ function videoPanel(p, video) {
     <p class="muted">글꼴 · ${h(r.font_license)}</p></details>
     ${r.technical_quality?`<details class="subpanel"><summary>움직임·자막 기술 검토</summary>
       <p>고유 클립 ${h(r.technical_quality.unique_clip_hashes)}개 · 반복 ${h(r.technical_quality.repeats)}회 · 장면별 샘플 프레임 차이 ${h(r.review_material.map(x=>x.distinct_sampled_frames).join(', '))} / 3</p>
-      <p>초당 자막 문자 수 ${h(r.technical_quality.caption_chars_per_second.join(', '))} · 읽기 편의·실제 청취는 대표 검토 필요</p></details>`:''}
+      <p>초당 자막 문자 수 ${h(r.technical_quality.caption_chars_per_second.join(', '))} · 읽기 편의·실제 청취는 대표 검토 필요</p>
+      ${r.editing_sha256?`<p>편집 직원의 검토 기준 · ${h(r.editing_review_criteria)}</p>
+        ${r.review_material.map((shot,i)=>`<p>장면 ${i+1} · 소스 시작 ${h(shot.source_start_frames)} 프레임 ·
+          ${h(shot.framing)} · ${h(shot.caption_position)} · ${h(shot.editing_note)}</p>`).join('')}`:''}</details>`:''}
     </section>`;
 }
 function missionProposal(proposal) {
@@ -246,7 +249,7 @@ function productionPanel(p) {
   const a=p.autonomous_production;
   if (!a) return '';
   const source=a.source_assessment;
-  const timing=a.timeline, operating=a.owner_policy;
+  const timing=a.timeline, operating=a.owner_policy, assets=a.asset_execution;
   const policyStates={available:'승인 대기',active:'승인 범위 활성',expired:'만료',revoked:'철회',stopped:'실패 또는 미확정으로 중단',blocked:'현재 키 또는 계정 설정 확인 필요'};
   const routeLabels={local_library:'로컬 자산 보관함', official_direct_media:'공식 직접 제공 자료',
     public_metadata_search:'공개 메타데이터 검색 제안', own_capture:'권리 확인 자체 캡처', hold:'자산 대기'};
@@ -260,7 +263,7 @@ function productionPanel(p) {
       <p>로컬 인수 폴더 <span class="mono">${h(a.inbox)}</span></p>
       ${a.plan.scenes.map(s=>{
         const voice=a.voices[s.scene_id];
-        return `<article><p><strong>${h(s.scene_id)}</strong> · ${h(s.request)} · ${h(s.direction)}</p><p>${h(s.speech_style)}</p>
+        return `<article><p><strong>${h(s.scene_id)}</strong> · ${h(s.request)} · ${h(s.direction)}</p><p>승인 장면 · ${h(a.scope.storyboard.find(shot=>shot.scene_id===s.scene_id)?.caption)}</p><p>${h(s.speech_style)}</p>
           <p>영상 · ${a.clips.includes(s.scene_id)?'인수 완료':'소스 확인 대기'}
           ${voice?.attempted?` · 음성 시도 · ${h(({audio_validated:'파일 검사 완료',failed_or_uncertain:'실패 또는 미확정',
             receipt_invalid:'음성 기록 검증 실패'})[voice.status]||'결과 미확정')} · 재시도 없음`:''}</p>
@@ -268,6 +271,12 @@ function productionPanel(p) {
           ${voice?.audio_url?`<p>${h(voice.duration_seconds)}초 / 승인 ${h(voice.approved_seconds)}초 · ${voice.fits_timeline?'길이 조건 충족 · 청취 평가 필요':'승인 길이 초과 · 합성 차단'}</p>
             <audio controls preload="none" src="${h(voice.audio_url)}" aria-label="${h(s.scene_id)} 음성 검토"></audio>`:''}</article>`;
       }).join('')}`:''}
+    ${assets?`<section class="subpanel"><h3>권리 확인 소스 인수·편집</h3>
+      <p>권리 근거를 등록한 공식 직접 MP4 또는 로컬 보관함을 사용합니다. 공개 영상·검색 메타데이터는 단서이며, 확인된 무료 생성 도구는 없습니다.</p>
+      <p>지원 편집 · 24fps 구간, 중앙·상단 레터박스, 컷, 상·하단 자막. 시청 품질은 대표 검토가 필요합니다.</p>
+      ${assets.decision?`<p>${h(assets.decision.review_criteria)}</p>${assets.decision.scenes.map(s=>`<p>${h(s.scene_id)} · ${h(s.asset_id)} · ${h(s.suitability)}</p>`).join('')}`:''}
+      ${assets.expires_at && assets.status!=='revoked'?'<button class="button secondary" data-action="production-assets-revoke">자산 범위 승인 철회</button>':''}
+    </section>`:''}
     ${operating && operating.status!=='unavailable'?`<section class="subpanel"><h3>개인 운영 설정</h3>
       <p>${h(policyStates[operating.status])} · 무료 전용 · 요청 사용 ${h(operating.used??0)}/${h(operating.proposal.units.length)} · 공급자 잔량·청구 미확인</p>
       ${operating.expires_at?`<p>유효 기한 ${h(time(operating.expires_at))}</p>`:''}
@@ -458,8 +467,8 @@ function productionNext(a,selected) {
   }
   if (!a.plan) return choose('production-plan-prepare','관리자 제작 계획 준비',
     '승인 대본을 유지합니다. 소유자가 무료 조건, 잔여 쿼터, 현행 문서를 확인합니다. 준비 단계의 외부 호출은 0회입니다.',key);
-  const operating=a.owner_policy;
-  if (a.render_ready && !operating?.expires_at) return choose('production-render','인수한 클립과 음성으로 제작','로컬 합성 후 대표 영상 검토로 제출합니다. 외부 호출은 0회입니다.');
+  const operating=a.owner_policy, assets=a.asset_execution;
+  if (a.render_ready && !assets?.expires_at && !operating?.expires_at) return choose('production-render','인수한 클립과 음성으로 제작','로컬 합성 후 대표 영상 검토로 제출합니다. 외부 호출은 0회입니다.');
   if (a.render_attempt) return {message:({
     reserved:'로컬 합성 실행 중 또는 결과 미확정 · 중복 실행 차단',
     completed:'합성 기록 완료 · 대표 영상 검토 제출 상태 확인',
@@ -520,9 +529,23 @@ function productionNext(a,selected) {
         operating.run_blocker?'서버의 무료 Gemini 실행 설정이 필요합니다.':
         !operating.can_run?'시간 조정안 승인 또는 권리가 확인된 영상 자산을 기다립니다.':'')
       :operating?.expires_at?{message:'운영 정책이 만료·철회·중단됐거나 키를 확인할 수 없습니다. 제작 상세에서 상태를 확인하세요.'}:null;
+  let assetWork;
+  if (assets?.status==='available') assetWork=choose('production-assets-approve','자산·편집 범위 검토·승인',
+    `편집 판단 최대 1회 · 공식 MP4 다운로드 최대 ${assets.proposal.max_downloads}회 · 비용 $0`,key);
+  if (assets?.status==='active') assetWork=choose('production-policy-run','제작 실행',
+    '등록 권리 범위에서 AI 편집·직접 인수·로컬 합성을 진행합니다.');
+  if (assets?.status==='waiting_rights') assetWork=choose('production-assets-approve','자산·편집 범위 검토·승인',
+    `미인수 장면 ${assets.missing}개 · 등록 로컬 ${assets.local}개 · 허용 공식 영상 ${assets.official}개`,
+    '등록된 소스가 부족합니다. 제작 상세의 장면 요구와 공식 직접 다운로드·로컬 편집 허가 조건을 확인하세요.');
+  if (assets?.status==='registry_blocked') assetWork=choose('production-assets-approve','자산·편집 범위 검토·승인',
+    '등록 소스 검증이 필요합니다.','공식 제공처, 권리 증빙 또는 로컬 목록을 확인하세요.');
+  if (['hold','stopped','expired','revoked'].includes(assets?.status)) assetWork={
+    message:assets.status==='hold'?'편집 직원이 확보·편집 가능한 소스 부족으로 보류했습니다.':
+      '자산 확보 범위가 중단·만료 또는 철회됐습니다. 기존 결과를 보존하고 후속 호출을 차단합니다.',buttons:refresh};
   const legacy=!operating?.expires_at && operating?.status!=='available';
   const options=[
-    ...(operatingWork?[{...operatingWork,choice:'operating',label:'개인 운영 정책 · 제작 실행'}]:[]),
+    ...(assetWork?[{...assetWork,choice:'assets',label:'영상 자산 확보·편집'}]:[]),
+    ...(operatingWork && !assets?.expires_at?[{...operatingWork,choice:'operating',label:'개인 운영 정책 · 제작 실행'}]:[]),
     ...(legacy && batchWork?[{...batchWork,choice:'batch',label:'남은 장면 음성 일괄'}]:[]),
     ...(timelineWork && (legacy || ['review','hold','stopped'].includes(timing?.status))?[{...timelineWork,choice:'timeline',label:'실측 시간 조정'}]:[]),
     ...(legacy?voices:[]).map(voice=>({...voice,choice:`voice-${voice.scene}`,label:`장면 음성 · ${voice.scene}`})),
@@ -530,10 +553,12 @@ function productionNext(a,selected) {
     ...Object.entries(a.voices).filter(([,voice])=>voice.audio_sha256 && !voice.listening)
       .map(([scene])=>({...choose('production-listen','청취 의견 저장',`${scene} 음성에 대한 대표 의견을 기록합니다.`,'',scene),
         choice:`listen-${scene}`,label:`청취 의견 · ${scene}`})),
-    ...clips.map(clip=>({...clip,choice:`clip-${clip.scene}`,label:`로컬 클립 인수 · ${clip.scene}`}))
+    ...(!assets?.expires_at?clips:[]).map(clip=>({...clip,choice:`clip-${clip.scene}`,label:`로컬 클립 인수 · ${clip.scene}`}))
   ];
   if (options.length) {
-    const defaultWork=options.find(item=>item.buttons && !item.reason) || options[0];
+    const assetDefault=assetWork && operating?.used>=operating?.proposal?.units.length;
+    const defaultWork=(assetDefault && options.find(item=>item.choice==='assets')) ||
+      options.find(item=>item.buttons && !item.reason) || options[0];
     return {...(options.find(item=>item.choice===selected)||defaultWork),options};
   }
   const blockers={pending_external_clip:'사용권을 확인한 장면 클립이 필요합니다.',
@@ -721,6 +746,13 @@ function productionCommand(action,scene) {
   const commands={
     'production-listen':['청취 의견 저장',`<p>${h(scene)}의 검증된 음성에 연결합니다.</p><label>대표 청취 의견<textarea name="opinion" required maxlength="500"></textarea></label>`,
       data=>({scene,audio_sha256:a.voices[scene].audio_sha256,opinion:data.get('opinion')})],
+    'production-assets-approve':['자산·편집 범위 검토·승인',
+      `<p>Gemini 편집 판단 1회와 공식 HTTPS MP4 최대 ${h(a.asset_execution?.proposal?.max_downloads)}회. 24시간 유효 · 비용 $0 · 검색·영상 생성·게시 권한 없음.</p>
+       <p>Gemini에는 승인 장면과 실측 요약, 등록 자료 설명·해시를 보냅니다. 공개 무료 서비스의 데이터 개선 활용과 사람에 의한 검토가 가능할 수 있습니다.</p>
+       <details open><summary>검토할 제공처·공식 권리 근거·다운로드 및 모델 범위</summary><pre>${h(JSON.stringify(a.asset_execution?.proposal,null,2))}</pre></details>`+
+      check('confirmed','공식 제공처와 명시된 로컬 편집·다운로드 허가, 무료 조건 및 범위를 확인하고 표시된 정책을 승인합니다.'),
+      data=>({review_hash:a.asset_execution.review_hash,confirmed:data.has('confirmed')})],
+    'production-assets-revoke':['자산 범위 승인 철회','<p>이 범위에서 새 외부 요청을 시작하지 않습니다. 확보한 파일과 기록은 보존됩니다.</p>',()=>({})],
     'production-policy-approve':['개인 운영 정책 검토·승인',
       `<p>현재 프로젝트의 승인 대본과 제작 계획에만 적용합니다. 24시간 유효하며 제작 상세에서 철회할 수 있습니다.</p>
         <p>Google Gemini 무료 전용 · 비용 상한 $0 · 최대 ${h(operating?.proposal.units.length)}회 · 공급자 잔량·청구는 독립 확인되지 않았습니다. Google의 무료 서비스 개선 활용 및 사람의 검토가 가능할 수 있습니다.</p>

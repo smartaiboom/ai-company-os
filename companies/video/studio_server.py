@@ -21,6 +21,7 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-assets-approve','production-assets-revoke',
                       'production-policy-approve','production-policy-run','production-policy-revoke',
                       'production-listen','production-timeline-prepare','production-timeline-consent',
                       'production-timeline-run','production-timeline-approve',
@@ -29,6 +30,12 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'asset_extension_not_ready': '장면별 길이와 사용권을 확인한 등록 소스 또는 무료 Gemini 설정이 필요합니다.',
+    'official_rights_unverified': '공식 출처의 다운로드 허가와 로컬 편집·검토 사용권을 확인하세요.',
+    'official_destination_blocked': '공식 제공 호스트가 안전한 공개 주소로 확인되지 않았습니다.',
+    'official_media_response_invalid': '직접 MP4 응답 검증에 실패했습니다. 리다이렉트는 허용되지 않습니다.',
+    'official_download_failed_or_uncertain': '직접 다운로드가 실패했거나 결과를 확인할 수 없습니다. 자동 재시도는 없습니다.',
+    'invalid_source_edit': '편집안의 장면, 구간 또는 배치가 승인된 소스·시간 범위를 벗어났습니다.',
     'owner_policy_required': '이 프로젝트에 적용할 개인 운영 정책을 검토하고 승인하세요.',
     'owner_policy_expired': '개인 운영 정책의 유효 시간이 지났습니다.',
     'owner_policy_revoked': '대표가 운영 정책을 철회했습니다.',

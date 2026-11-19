@@ -62,6 +62,16 @@ const timed = {...planned,timeline:{status:'unprepared'}};
 hasAction(ui.productionNext(timed,'timeline'),'production-timeline-prepare');
 hasAction(ui.productionNext({...timed,timeline:{status:'review'}},'timeline'),'production-timeline-approve');
 
+const assetsBlocked = {...planned,asset_execution:{status:'waiting_rights',missing:1,local:0,official:0},
+  owner_policy:{status:'active',used:1,expires_at:'future',proposal:{units:[{}]}}};
+const blockedAssetWork = ui.productionNext(assetsBlocked);
+hasAction(blockedAssetWork,'production-assets-approve',true);
+assert.match(blockedAssetWork.reason,/공식 직접 다운로드/);
+hasAction(ui.productionNext({...assetsBlocked,asset_execution:{status:'available',proposal:{max_downloads:1}}}),
+  'production-assets-approve');
+hasAction(ui.productionNext({...assetsBlocked,asset_execution:{status:'active',expires_at:'future'}}),
+  'production-policy-run');
+
 const review = ui.nextWork({stage:'awaiting_video_approval',flow:{...flow,
   video_versions:[{version:1,render_receipt:{visual_scope:'local_procedural_cards_no_game_footage'}}]}},controlSource);
 assert.match(review.buttons,/video:request_revision/);
@@ -90,10 +100,13 @@ if (process.argv[2]) {
         assert.match(page,/대표 청취 의견/);
       }
       assert.equal(live.autonomous_production.voices['scene-1'].duration_seconds,3.68);
-    } else {
+    } else if (!live.autonomous_production.asset_execution?.status) {
       hasAction(work,'production-voice-prepare');
     }
-    if (live.autonomous_production.owner_policy?.status==='available') {
+    if (live.autonomous_production.asset_execution?.status==='waiting_rights') {
+      hasAction(work,'production-assets-approve',true);
+      assert.match(page,/권리 확인 소스 인수·편집/);
+    } else if (live.autonomous_production.owner_policy?.status==='available') {
       hasAction(work,'production-policy-approve');
       assert.match(page,/개인 운영 설정/);
     } else {

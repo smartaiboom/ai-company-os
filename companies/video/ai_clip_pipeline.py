@@ -223,7 +223,8 @@ class ClipJob:
             try: yield
             finally: fcntl.flock(lock, fcntl.LOCK_UN)
 
-    def import_generated_clip(self, inbox, relative, scene_id, source, *, expected_sha256=None):
+    def import_generated_clip(self, inbox, relative, scene_id, source, *,
+                              expected_sha256=None, minimum_duration=0, direct_mp4=False):
         validate_source(source)
         with self.lock():
             p = self.load()
@@ -242,7 +243,11 @@ class ClipJob:
                 original_hash = file_hash(staged)
                 require(expected_sha256 is None or expected_sha256 == original_hash, 'production_source_asset_changed')
                 require(not any(c['sha256'] == original_hash for c in p['clips']), 'duplicate_clip')
+                if direct_mp4:
+                    with staged.open('rb') as sample:
+                        require(sample.read(8)[4:8]==b'ftyp','official_media_response_invalid')
                 media = probe(staged)
+                require(media['duration']>=minimum_duration,'clip_too_short_repeat_not_allowed')
                 run_command(['ffmpeg', '-nostdin', '-v', 'error', '-protocol_whitelist', 'file,pipe',
                              '-i', str(staged), '-f', 'null', '-'], stage='ffmpeg_decode')
                 asset = self.root/'assets'/(original_hash+'.mp4')
@@ -255,7 +260,7 @@ class ClipJob:
             p['clips'].append(record); self.save(p)
             return record
 
-    def render(self, synthesizer=None, *, approved_edit=None):
+    def render(self, synthesizer=None, *, approved_edit=None, editing=None):
         with self.lock():
             p = self.load(); validate_plan(p['plan'])
             render_plan=p['plan']
@@ -274,10 +279,14 @@ class ClipJob:
                         and not (self.root/'assets'/clip['file']).is_symlink(), 'invalid_asset_path')
                 require(file_hash(self.root/'assets'/clip['file']) == clip['sha256'], 'clip_changed')
                 if p['plan']['fit'] == 'crop': require(clip['source']['watermark'] == 'absent', 'watermark_crop_forbidden')
+            if editing is not None:
+                validate_editing(render_plan,p['clips'],editing)
             attempt = dict(id=uuid.uuid4().hex, status='reserved', at=now(), plan_hash=digest(render_plan))
+            if editing is not None:
+                attempt['editing_hash']=digest(editing)
             p['attempts'].append(attempt); p['active_operation'] = attempt['id']; self.save(p)
             try:
-                result = self._render({**p,'plan':render_plan}, synthesizer or MeloLocal())
+                result = self._render({**p,'plan':render_plan}, synthesizer or MeloLocal(),editing=editing)
                 attempt['status'] = 'completed'; p['active_operation'] = None
                 p['output'] = result
                 p['status'] = ('mixed_technical_preview' if result['mixed_source'] else
@@ -290,7 +299,7 @@ class ClipJob:
                 p['status'] = 'failed'; self.save(p)
                 raise CompanyError(attempt['reason']) from None
 
-    def _render(self, state, synthesizer):
+    def _render(self, state, synthesizer, *, editing=None):
         plan = state['plan']; audio_folder = self.root/'speech'; audio_folder.mkdir()
         texts = [t for s in plan['scenes'] for t in s['utterances']]
         speech = synthesizer.synthesize(texts, audio_folder)
@@ -346,6 +355,8 @@ class ClipJob:
                     for chunk in chunks:
                         duration = display_seconds*len(chunk.replace('\n',''))/weight
                         cues.append(dict(start=voice_start+elapsed, end=voice_start+elapsed+duration, text=chunk))
+                        if editing:
+                            cues[-1]['position']=editing[scene_index]['caption_position']
                         elapsed += duration
                     if number < len(scene['utterances'])-1:
                         out.writeframesraw(b'\0\0'*7938); scene_samples += 7938
@@ -356,6 +367,10 @@ class ClipJob:
                 timeline.append(dict(scene_id=scene['id'], start=start, end=end, width=720, height=1280,
                     speech_seconds=scene_samples/44100, clip_sha256=clip['sha256'], fit=plan['fit'],
                     repeat_count=max(0, math.ceil(length/clip['media']['duration'])-1)))
+                if editing:
+                    timeline[-1].update(source_start_frames=editing[scene_index]['in_frame'],
+                                        framing=editing[scene_index]['framing'],transition='cut',
+                                        caption_position=editing[scene_index]['caption_position'])
                 offset += length
         font_file=FONT
         font_name='Noto Sans CJK KR'
@@ -385,9 +400,12 @@ class ClipJob:
         args += ['-i', str(track)]
         filters = []
         for i, length in enumerate(allocated):
-            fit = ('scale=720:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=0x101820'
+            pad_y='0' if editing and editing[i]['framing']=='letterbox_top' else '(oh-ih)/2'
+            fit = (f'scale=720:1280:force_original_aspect_ratio=decrease:force_divisible_by=2,pad=720:1280:(ow-iw)/2:{pad_y}:color=0x101820'
                    if plan['fit'] == 'letterbox' else 'scale=720:1280:force_original_aspect_ratio=increase:force_divisible_by=2,crop=720:1280')
-            filters.append(f'[{i}:v]scale=trunc(iw*sar/2)*2:ih,setsar=1,{fit},setsar=1,fps=24,trim=duration={length:.9f},setpts=PTS-STARTPTS[v{i}]')
+            trim=f'duration={length:.9f}' if not editing else (
+                f"start_frame={editing[i]['in_frame']}:end_frame={editing[i]['in_frame']+round(length*24)}")
+            filters.append(f'[{i}:v]scale=trunc(iw*sar/2)*2:ih,setsar=1,{fit},setsar=1,fps=24,trim={trim},setpts=PTS-STARTPTS[v{i}]')
         filters.append(''.join(f'[v{i}]' for i in range(len(allocated)))+f'concat=n={len(allocated)}:v=1:a=0[joined]')
         overlay = ',drawtext=fontfile='+font_file+':textfile=fixture_notice.txt:expansion=none:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.7:x=48:y=100' if synthetic else ''
         notice = (f'혼합 기술 시안 · 사용자 제공 AI {ai_count} / 비AI {fixture_count}' if mixed else
@@ -424,6 +442,21 @@ class ClipJob:
         return result
 
 
+def validate_editing(plan, clips, editing):
+    require(plan.get('approved_timeline') and plan['fit']=='letterbox' and not plan['allow_repeat']
+            and [item['scene_id'] for item in editing]==[scene['id'] for scene in plan['scenes']],
+            'invalid_source_edit')
+    by_scene={clip['scene_id']:clip for clip in clips}
+    for item,cue in zip(editing,plan['approved_timeline'],strict=True):
+        exact(item,('scene_id','clip_sha256','in_frame','framing','transition','caption_position'))
+        clip=by_scene[item['scene_id']]
+        require(item['clip_sha256']==clip['sha256'] and type(item['in_frame']) is int and item['in_frame']>=0
+                and item['framing'] in ('letterbox_center','letterbox_top') and item['transition']=='cut'
+                and item['caption_position'] in ('safe_lower','safe_upper'),'invalid_source_edit')
+        require(item['in_frame']+round((cue['end']-cue['start'])*24)<=math.floor(clip['media']['duration']*24),
+                'clip_too_short_repeat_not_allowed')
+
+
 def write_captions(folder, cues, *, font='Noto Sans CJK KR'):
     header = '[Script Info]\nScriptType: v4.00+\nPlayResX: 720\nPlayResY: 1280\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Default,Noto Sans CJK KR,46,&H00FFFFFF,&H00FFFFFF,&H00101010,&H80101010,0,0,0,0,100,100,0,0,1,3,1,2,60,60,180,1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n'
     header = header.replace('Default,Noto Sans CJK KR,','Default,'+font+',')
@@ -434,6 +467,8 @@ def write_captions(folder, cues, *, font='Noto Sans CJK KR'):
     ass=[];srt=[]
     for i,cue in enumerate(cues,1):
         caption=cue['text'].replace('\n', r'\N')
+        if cue.get('position')=='safe_upper':
+            caption=r'{\an8}'+caption
         ass.append(f"Dialogue: 0,{stamp(cue['start'],True)},{stamp(cue['end'],True)},Default,,0,0,0,,{caption}\n")
         srt.append(f"{i}\n{stamp(cue['start'])} --> {stamp(cue['end'])}\n{cue['text']}\n")
     (folder/'captions.ass').write_text(header+''.join(ass)); (folder/'captions.srt').write_text('\n'.join(srt))

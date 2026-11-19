@@ -5,7 +5,7 @@ import re
 
 from autonomous_company import CompanyError, digest, exact, now, require
 from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config
-from mission_production import ProductionManager, approved_manager_result, canonical_bytes, production_keys
+from mission_production import ProductionManager, approved_manager_result, canonical_bytes, draft_id, production_keys
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import delegated_call, run_worker, unit
 from role_json_schema import S, arr, enum, obj
@@ -176,6 +176,52 @@ def available(workflow,project,inputs,search_key=None):
     return store,tools,model,scope
 
 
+RESEARCH_ERROR_STAGES={
+    'research_step_invalid':'step_validation',
+    'invalid_manager_plan_schema':'step_validation',
+    'research_evidence_invalid':'evidence_validation',
+    'research_search_failed':'search_response',
+    'transport_or_response_failed':'model_response',
+}
+
+
+def research_diagnostics(store, ledger):
+    providers={name:dict(reserved=0,completed=0,unresolved=0) for name in ('gemini','tavily')}
+    failure=None
+    for name,row in ledger.items():
+        provider='tavily' if name=='general-web' else 'gemini'
+        counts=providers[provider]
+        counts['reserved']+=1
+        if (row['result'] or {}).get('status')=='completed':
+            counts['completed']+=1
+            continue
+        counts['unresolved']+=1
+        failure=dict(stage='search_response' if provider=='tavily' else 'model_response',response_received=None)
+        if provider!='gemini':
+            continue
+        if name=='research-'+str(ROUNDS):
+            worker=ResearchReview(store.root/'manager-review',{})
+        elif re.fullmatch(r'research-[0-3]',name):
+            worker=ResearchStep(store.root/('step-'+name.rsplit('-',1)[1]),{})
+        else:
+            continue
+        try:
+            jid=draft_id(worker)
+            attempts=worker.load(jid)['real_ai']['attempts'] if jid else []
+        except (CompanyError,OSError,ValueError,KeyError,TypeError):
+            continue
+        if len(attempts)!=1 or attempts[0].get('payload_hash')!=row['reservation']['payload_sha256']:
+            continue
+        attempt=attempts[0]
+        code=attempt.get('reason')
+        if code in RESEARCH_ERROR_STAGES:
+            failure.update(code=code,stage=RESEARCH_ERROR_STAGES[code])
+        usage=attempt.get('usage')
+        if isinstance(usage,dict) and type(usage.get('total_tokens')) is int and usage['total_tokens']>=0:
+            failure.update(response_received=True,total_tokens=usage['total_tokens'])
+    return dict(providers=providers,failure=failure)
+
+
 def status(workflow,project):
     inputs=context(workflow,project)
     if inputs is None:
@@ -190,11 +236,13 @@ def status(workflow,project):
         return dict(status='available',proposal=scope,review_hash=digest(scope))
     result=store.read('research-result.json')
     review=store.read('manager-review.json')
+    ledger=store.attempts()
     observations=[store.read(path.name) for path in sorted(store.root.glob('observation-*.json'))]
     return dict(status='revoked' if store.read('revoked.json') else 'review' if result and review else
-                'stopped' if store.attempts() else
+                'stopped' if ledger else
                 'expired' if datetime.fromisoformat(now())>=datetime.fromisoformat(grant['expires_at']) else 'active',
-                result=result,review=review,observations=observations,proposal=grant['proposal'],used=len(store.attempts()))
+                result=result,review=review,observations=observations,proposal=grant['proposal'],used=len(ledger),
+                diagnostics=research_diagnostics(store,ledger) if ledger else None)
 
 
 def action(workflow,pid,name,body):

@@ -77,6 +77,40 @@ class ResearchTests(TestCase):
                 with self.assertRaisesRegex(CompanyError,'owner_policy_exhausted'):
                     action(workflow,pid,'research-run',{})
 
+    def test_invalid_first_worker_response_preserves_delivery_evidence(self):
+        with TemporaryDirectory() as tmp:
+            store=Store(Path(tmp))
+            project=store.create('A new game topic',opt_in=True)
+            workflow=SimpleNamespace(store=store)
+            pid=project['id']
+            base=dict(target='Release evidence',stage='research_planning')
+            options={'game':'new game release publisher and audience'}
+            env=dict(TAVILY_RESEARCHER_FREE_ONLY='1',GEMINI35_AUTONOMOUS_FREE_ENABLED='1',
+                GEMINI35_MODEL=MODEL,GEMINI35_ENDPOINT=ENDPOINT,TAVILY_API_KEY='fake-researcher-credential',
+                GEMINI_API_KEY='fake-gemini-credential-123456789',
+                GEMINI_PRODUCTION_PROJECT_API_KEY='fake-gemini-credential-123456789')
+            reply=dict(tool='web_search',option='not-an-approved-option',claims=[],feasibility='')
+            # The HTTP envelope and JSON schema are valid. The requested action fails semantic validation.
+            with patch.dict('os.environ',env),patch('research_workflow.context',return_value=(base,options,None,None)),patch(
+                'research_workflow.cached_youtube',return_value=[]),patch('research_workflow.tavily_search') as search,patch(
+                'goal_dialogue_live.send_once',return_value=Reply(reply)) as gemini,patch(
+                'socket.socket.connect',side_effect=AssertionError('network disabled')):
+                offer=status(workflow,project)
+                action(workflow,pid,'research-approve',dict(confirmed=True,review_hash=offer['review_hash']))
+                with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
+                    action(workflow,pid,'research-run',{})
+                state=status(workflow,project)
+                self.assertEqual(state['status'],'stopped')
+                self.assertEqual(state['diagnostics'],dict(
+                    providers=dict(gemini=dict(reserved=1,completed=0,unresolved=1),
+                                   tavily=dict(reserved=0,completed=0,unresolved=0)),
+                    failure=dict(stage='step_validation',response_received=True,total_tokens=60,
+                                 code='research_step_invalid')))
+                self.assertNotIn(reply['option'],json.dumps(state['diagnostics']))
+                self.assertEqual(state['observations'],[])
+                gemini.assert_called_once()
+                search.assert_not_called()
+
     def test_sources_and_quotes_fail_closed(self):
         from web_research import validate_step
         for url in ('https://127.0.0.1/page','https://x.example@other.example/path',

@@ -54,7 +54,11 @@ async function api(path, body) {
     body:JSON.stringify(body)
   });
   const value = await response.json();
-  if (!response.ok) throw new Error(value.error);
+  if (!response.ok) {
+    const error=new Error(value.error);
+    if (value.research) Object.assign(error,{code:value.code,research:value.research});
+    throw error;
+  }
   return value;
 }
 function notice(message, error=false) {
@@ -494,6 +498,20 @@ function budgetPanel(p) {
     ${!p.readonly&&b.consent_state==='valid'?'<button class="button secondary" data-action="budget-run">승인된 예산으로 작업 시작·계속</button><button class="button ghost" data-action="budget-revoke">공급자 동의 철회</button>':''}
     <p class="muted">${h(b.provider_status)} · ${h(b.reason||'')}</p></section>`;
 }
+function researchErrorText(code,stage,diagnostics) {
+  const labels={step_validation:'조사 도구 선택 검증',evidence_validation:'조사 근거 검증',
+    model_response:'Gemini 호출·응답',search_response:'Tavily 호출·응답',preflight:'승인·실행 조건 확인'};
+  const info=diagnostics?.providers;
+  const failure=diagnostics?.failure;
+  const parts=[code,labels[stage]].filter(Boolean);
+  if (info) {
+    parts.push(`Gemini 예약 ${info.gemini.reserved}회·완료 ${info.gemini.completed}회, Tavily 예약 ${info.tavily.reserved}회·완료 ${info.tavily.completed}회`);
+    if (failure?.response_received) parts.push(`Gemini 응답 수신 확인 · 기록 ${failure.total_tokens}토큰`);
+    else if (failure) parts.push('실패한 요청의 전송·응답은 기록만으로 확정할 수 없습니다.');
+  }
+  parts.push(failure?'기존 기록을 보존하고 복구 범위를 검토하세요.':'현재 조사 상태와 서버 설정을 확인하세요.');
+  return parts.join(' · ');
+}
 function researchPanel(p) {
   const r=p.research;
   if (!r) return '';
@@ -504,6 +522,7 @@ function researchPanel(p) {
     review:'관리자가 조사 결과와 미확인 항목을 검토했습니다.',revoked:'조사 승인이 철회됐습니다.',
     expired:'조사 승인 유효 시간이 지났습니다.',stopped:'실패 또는 미확정 요청에서 조사를 중단했습니다.'};
   return `<section class="panel" id="cross-research"><h2>웹·전문 자료 교차 조사</h2><p>${h(labels[r.status])}</p>
+    ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
     ${r.review?`<p><strong>관리자 의견</strong> ${h(r.review.decision.note)}</p>`:''}
@@ -529,6 +548,7 @@ function researchCommand(action) {
       await api(detailApi(p)+'/'+action,body);
     } catch (error) {
       if (action==='research-run') await route();
+      if (error.research) error.message+=' '+researchErrorText(error.code,error.research.stage,error.research.diagnostics);
       throw error;
     }
     return {message:'조사 상태를 갱신했습니다.'};

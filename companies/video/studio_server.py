@@ -39,6 +39,12 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-source-prepare','production-source-consent','production-source-run','production-source-import',
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
+RESEARCH_ERRORS = {
+    'owner_policy_exhausted': '이미 사용한 조사 범위입니다. 기존 기록을 보존하고 복구 범위를 검토하세요.',
+    'research_step_invalid': 'Gemini 응답이 허용된 조사 도구 또는 종료 규칙에 맞지 않습니다.',
+    'invalid_manager_plan_schema': 'Gemini 응답 형식이 필요한 구조와 일치하지 않습니다.',
+    'transport_or_response_failed': 'Gemini 호출 또는 응답 확인 중 중단됐습니다.',
+}
 ERRORS = {
     'research_scope_invalid': '현재 업무와 조사 범위가 일치하지 않습니다.',
     'research_search_disabled': '무료 전용 Tavily 계정과 서버 설정을 확인하세요.',
@@ -946,7 +952,24 @@ def make_server(host, port, studio):
                     plan = matching_plan(project, body['version'], body['sha256'])
                     return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
                 if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS+RESEARCH_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
-                    return self.send_json(200, studio.action(*match.groups(), body))
+                    try:
+                        result=studio.action(*match.groups(), body)
+                    except CompanyError as exc:
+                        if match[3] not in RESEARCH_ACTIONS or exc.code=='readonly_project':
+                            raise
+                        from research_workflow import status as research_status, RESEARCH_ERROR_STAGES
+                        error=dict(code=exc.code if exc.code in ERRORS or exc.code in RESEARCH_ERRORS or exc.code in RESEARCH_ERROR_STAGES
+                                   else 'research_error',
+                                   error=RESEARCH_ERRORS.get(exc.code,ERRORS.get(exc.code,'조사 작업을 완료하지 못했습니다.')))
+                        try:
+                            project=studio.project(match[1],match[2])
+                            state=research_status(studio.workflow,project)
+                        except (CompanyError,OSError,ValueError,KeyError,TypeError):
+                            state=None
+                        error['research']=dict(stage=RESEARCH_ERROR_STAGES.get(exc.code,'preflight'),
+                            diagnostics=state.get('diagnostics') if state else None)
+                        return self.send_json(409,error)
+                    return self.send_json(200,result)
             raise FileNotFoundError
 
         def handle_request(self):

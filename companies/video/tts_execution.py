@@ -75,6 +75,10 @@ class GeminiTTSAdapter:
 
 class TTSExecution:
     _sign = LiveStore._sign  # Same signing primitive; independent private signing key/root/scope.
+    scope_id = SCOPE
+
+    def execution_enabled(self):
+        return TTS_EXECUTION_ENABLED is True
 
     def __init__(self, folder):
         self.root = Path(folder).absolute()
@@ -148,7 +152,7 @@ class TTSExecution:
                 and isinstance(evidence.get('observation'), str) and 20 <= len(evidence['observation']) <= 1500,
                 'tts_account_observation_required')
         record = dict(scope_hash=digest(scope), root=str(self.root), evidence=evidence,
-            credential_binding=self._sign(dict(scope=SCOPE, project=scope['project'], credential=key), create=True))
+            credential_binding=self._sign(dict(scope=self.scope_id, project=scope['project'], credential=key), create=True))
         self._write('account.json', self._signed(record))
 
     def _account(self, scope, key):
@@ -156,7 +160,7 @@ class TTSExecution:
         require(proof['scope_hash'] == digest(scope) and proof['root'] == str(self.root), 'tts_account_binding')
         evidence = proof['evidence']
         require(fresh(evidence['checked_at'], evidence['expires_at']), 'tts_account_expired')
-        require(hmac.compare_digest(proof['credential_binding'], self._sign(dict(scope=SCOPE,
+        require(hmac.compare_digest(proof['credential_binding'], self._sign(dict(scope=self.scope_id,
                 project=scope['project'], credential=key))), 'tts_active_key_changed')
         return proof
 
@@ -173,7 +177,7 @@ class TTSExecution:
         require(owner_confirmed is True and accept_google_data_policy is True, 'tts_explicit_consent_required')
         require(digest(review) == review_hash and review['scope'] == scope and review['root'] == str(self.root)
                 and review['account_hash'] == digest(account) and fresh(review['issued_at'], review['expires_at']), 'tts_review_invalid')
-        self._write('consent.json', self._signed(dict(scope=SCOPE, review_hash=review_hash,
+        self._write('consent.json', self._signed(dict(scope=self.scope_id, review_hash=review_hash,
             account_hash=digest(account), root=str(self.root), owner_confirmed=True,
             accept_google_data_policy=True, issued_at=now(), expires_at=review['expires_at'])))
 
@@ -185,12 +189,12 @@ class TTSExecution:
             consent_record_present=(self.root/'consent.json').is_file(), quality='unassessed', publish_ready=False)
 
     def execute(self, key):
-        require(TTS_EXECUTION_ENABLED is True, 'tts_execution_disabled')
+        require(self.execution_enabled(), 'tts_execution_disabled')
         job, scope, raw = self._load(); account = self._account(scope, key)
         review = self._verified('review.json'); consent = self._verified('consent.json')
         require(review['scope'] == scope and review['root'] == str(self.root)
                 and review['account_hash'] == digest(account) and fresh(review['issued_at'], review['expires_at'])
-                and consent == dict(scope=SCOPE, review_hash=digest(review), account_hash=digest(account),
+                and consent == dict(scope=self.scope_id, review_hash=digest(review), account_hash=digest(account),
                     root=str(self.root), owner_confirmed=True, accept_google_data_policy=True,
                     issued_at=consent['issued_at'], expires_at=review['expires_at'])
                 and fresh(consent['issued_at'], consent['expires_at']), 'tts_consent_invalid')

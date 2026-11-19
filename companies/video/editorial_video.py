@@ -129,13 +129,19 @@ def scene_svg(scene,index,stage=2,total=10):
     return svg
 
 
-def verify_speech(plan,receipt,folder):
-    require(receipt.get('engine') in ('MeloTTS','synthetic_test_tone_not_tts'),'unsupported_speech_engine')
+def verify_speech(plan,receipt,folder,*,allowed_engines=('MeloTTS','synthetic_test_tone_not_tts')):
+    require(receipt.get('engine') in allowed_engines,'unsupported_speech_engine')
     items=receipt.get('utterances')
     require(isinstance(items,list) and len(items)==len(plan['scenes']),'speech_count_mismatch')
     for s,item in zip(plan['scenes'],items):
         require(item.get('text')==s['narration'],'narration_speech_text_mismatch')
-        require(item.get('spoken_text',item['text'])==s['narration'].replace('ChatGPT','챗지피티'),'spoken_text_mismatch')
+        expected=s['narration']
+        if receipt['engine']=='MeloTTS':
+            expected=expected.replace('ChatGPT','챗지피티')
+        elif receipt['engine']=='synthetic_test_tone_not_tts':
+            expected=item.get('spoken_text',expected)
+            require(expected in (s['narration'],s['narration'].replace('ChatGPT','챗지피티')),'spoken_text_mismatch')
+        require(item.get('spoken_text',item['text'])==expected,'spoken_text_mismatch')
         name=item.get('file');require(isinstance(name,str) and Path(name).name==name,'invalid_voice_path')
         path=folder/name;require(not path.is_symlink() and file_hash(path)==item['sha256'],'voice_changed')
         with wave.open(str(path),'rb') as f:

@@ -20,7 +20,12 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
+PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-voice-prepare','production-voice-consent','production-voice-run',
+                      'production-clip-import','production-render')
 ERRORS = {
+    'technical_preview_not_approvable': '무음 카드 기술 시안은 영상 승인 대상이 아닙니다. 영상 수정 요청으로 제작을 이어가세요.',
+    'production_project_key_unverified': '서버의 기존 API 키와 별도 확인한 제작 프로젝트 키가 일치해야 합니다.',
     'portrait_korean_font_missing': '로컬 세로 시안에 사용할 한글 글꼴을 찾을 수 없습니다.',
     'melo_runtime_missing': '로컬 MeloTTS 실행 환경 또는 모델이 준비되지 않았습니다.',
     'narration_exceeds_scene': '음성이 승인된 장면 시간을 초과했습니다. 장면을 자동으로 늘리거나 음성을 자르지 않았습니다.',
@@ -173,7 +178,10 @@ class Studio:
         from cutroom_review import revision_draft
         draft = revision_draft(store.root, p) if key == 'workspace' else None
         production = self.mission_production(p) if key=='workspace' and mission else None
+        from mission_production import production_status
+        autonomous_production = production_status(self.workflow,p) if production else None
         return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
+                'autonomous_production': autonomous_production,
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
                                            for t in j['assignments']]) for j in jobs]}
@@ -739,6 +747,13 @@ class Studio:
         elif name == 'decide':
             exact(body, ('stage', 'version', 'sha256', 'action', 'feedback', 'changes_plan'))
             self.workflow.decide(pid, **body)
+        elif name == 'production-render':
+            exact(body,('version','sha256'))
+            self.workflow.produce(pid,version=body['version'],sha256=body['sha256'],
+                changes='관리자 제작 계획·승인 대본과 로컬 인수 소스 결합',imported=True)
+        elif name in PRODUCTION_ACTIONS:
+            from mission_production import production_action
+            production_action(self.workflow,pid,name,body)
         elif name == 'mission-preview':
             exact(body, ('version', 'sha256', 'audio_mode'))
             require(body['audio_mode'] in ('none','local_speech'),'invalid_request')
@@ -863,7 +878,7 @@ def make_server(host, port, studio):
                     project = studio.project('workspace', match[1])
                     plan = matching_plan(project, body['version'], body['sha256'])
                     return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

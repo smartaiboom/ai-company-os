@@ -159,6 +159,9 @@ function versionSelect(kind, versions, chosen) {
 }
 function reviewActions(p, kind, report) {
   if (p.readonly || p.stage !== `awaiting_${kind}_approval` || p.flow[`${kind}_versions`].at(-1)?.version !== report.version) return '';
+  if(kind==='video' && report.render_receipt.visual_scope==='local_procedural_cards_no_game_footage') {
+    return '<div class="actions subpanel"><button class="button secondary" data-review="video:request_revision">영상 수정 · 실제 제작 준비</button></div>';
+  }
   const label = kind==='plan' ? '기획·대본 승인' : '최종 영상 승인';
   return `<div class="actions subpanel"><button class="button" data-review="${kind}:approve">${icon('check')}${label}</button>
     <button class="button secondary" data-review="${kind}:request_revision">${icon('revision')} 수정 요청</button></div>`;
@@ -170,7 +173,7 @@ function videoPanel(p, video) {
     <video class="player" controls playsinline preload="metadata" poster="${h(video.thumbnail)}" src="${h(video.url)}" aria-label="영상 버전 ${video.version}"></video>
     <div class="inline">${badge('전체 디코딩 통과','check','green')}${badge('기술 검증용','alert','amber')}${r.visual_scope?badge('자체 카드 · 게임 화면 미확보','film','amber'):''}</div>
     ${facts([['제작 입력',`승인 기획 v${video.plan_version}`],['영상',`${r.width}×${r.height} · ${Number(r.duration_seconds).toFixed(3)}초`],
-    ['음성',r.audio_mode==='espeak_reference'?'eSpeak 로컬 참조 음성':r.voice_engine==='synthetic_test_tone_not_tts'?'합성 테스트 신호':r.voice_engine|| (r.audio?'로컬 음성':'없음')],['자막','장면 단위'],
+    ['음성',r.audio_mode==='espeak_reference'?'eSpeak 로컬 참조 음성':r.voice_engine==='synthetic_test_tone_not_tts'?'합성 테스트 신호':r.voice_engine|| (r.audio?'로컬 음성':'없음')],['자막',r.subtitle_sync==='measured_scene_audio'?'장면별 실측 발화 길이':'장면 단위'],
     ['QA','기술 검사 완료 · 시청·청취 품질 미평가'],['비용',`$${video.cost_usd}`]])}
     <details class="subpanel"><summary>변경사항·파일 및 기획 SHA-256</summary><p>${h(video.changes)}</p>
     <p class="muted">영상 파일</p><p class="mono">${h(video.artifact_sha256)}</p>
@@ -178,6 +181,9 @@ function videoPanel(p, video) {
     <details class="subpanel"><summary>시각 소스·사용 권리</summary>
     ${r.source_licenses.map(item=>`<p>${h(item.file)} · ${h(item.creator)} · ${h(item.license)}</p>`).join('')}
     <p class="muted">글꼴 · ${h(r.font_license)}</p></details>
+    ${r.technical_quality?`<details class="subpanel"><summary>움직임·자막 기술 검토</summary>
+      <p>고유 클립 ${h(r.technical_quality.unique_clip_hashes)}개 · 반복 ${h(r.technical_quality.repeats)}회 · 장면별 샘플 프레임 차이 ${h(r.review_material.map(x=>x.distinct_sampled_frames).join(', '))} / 3</p>
+      <p>초당 자막 문자 수 ${h(r.technical_quality.caption_chars_per_second.join(', '))} · 읽기 편의·실제 청취는 대표 검토 필요</p></details>`:''}
     ${reviewActions(p,'video',video)}</section>`;
 }
 function missionProposal(proposal) {
@@ -236,6 +242,36 @@ function missionStatus(mission) {
     ${mission.can_report ? '<button class="button secondary" data-action="mission-report">내부 검토 결과 대표 제출</button>' : ''}
     <button class="button ghost" data-action="refresh">${icon('revision')} 상태 새로고침</button></div>`;
 }
+function productionPanel(p) {
+  const a=p.autonomous_production;
+  if (!a) return '';
+  const control=(action,label,scene='')=>`<button class="button secondary" data-action="${action}" data-scene="${h(scene)}">${label}</button>`;
+  const managerControls=!a.key_ready?'<p class="warning">제작 프로젝트 키의 로컬 대조 설정이 필요합니다. 키는 화면에 입력하지 않습니다.</p>':
+    a.status==='unprepared'||(a.status==='prepared'&&!a.review_hash)?control('production-plan-prepare','관리자 제작 계획 준비'):
+    a.status==='prepared'?control('production-plan-consent','제작 계획 외부 전송 동의'):
+    a.status==='approved'&&a.manager_enabled?control('production-plan-run','관리자 제작 계획 실행'): '';
+  return `<section class="subpanel"><h3>승인 대본 기반 실제 제작</h3>
+    <p>관리자 계획 Gemini 텍스트 최대 1회. 승인 내레이션·장면, 대표 의견, 과거 평가 범위, 소스와 도구 한계를 검토합니다.</p>
+    <p>기존 Puck 7/10 평가는 이전 안내 영상 표본입니다. 이 영상의 보이스는 관리자 계획에서 선택합니다.</p>
+    ${managerControls}${a.status==='stopped'?'<p class="warning">관리자 요청 중단 또는 미확정 · 자동 재시도 없음</p>':''}
+    ${a.plan?`<h4>관리자 제작 계획</h4>
+      <p>${h(a.plan.voice.tool)} · ${h(a.plan.voice.model)} · ${h(a.plan.voice.voice)} · ${h(a.plan.voice.rationale)}</p>
+      <p>${h(a.plan.timeline)}</p><ul>${a.plan.work_order.map(item=>`<li>${h(item)}</li>`).join('')}</ul>
+      <p>검토 기준 · ${h(a.plan.review_criteria.join(' · '))}</p>
+      <p>로컬 인수 폴더 <span class="mono">${h(a.inbox)}</span></p>
+      ${a.plan.scenes.map(s=>{
+        const voice=a.voices[s.scene_id];
+        const audio= a.plan.voice.tool!=='gemini_scene'?'':!a.key_ready?'':!voice
+          ?control('production-voice-prepare','장면 음성 준비',s.scene_id)
+          :voice.attempted?`<p>음성 원장 · ${h(voice.status||'미확정')} · 재시도 없음</p>`
+          :!voice.consent&&voice.review_hash?control('production-voice-consent','장면 음성 동의',s.scene_id)
+          :voice.consent&&a.tts_enabled?control('production-voice-run','장면 음성 실행',s.scene_id):'<p>실행 설정 또는 유효한 제안 확인 필요</p>';
+        return `<article><p><strong>${h(s.scene_id)}</strong> · ${h(s.request)} · ${h(s.direction)}</p><p>${h(s.speech_style)}</p>
+          ${s.source==='operator_clip'&&!a.clips.includes(s.scene_id)?control('production-clip-import','로컬 클립 인수',s.scene_id):''}${audio}</article>`;
+      }).join('')}
+      ${a.render_ready?control('production-render','인수한 클립과 음성으로 제작'):'<p>장면별 권리 확인 소스와 유효한 음성 확보 대기.</p>'}`:''}
+  </section>`;
+}
 function operations(p) {
   if (p.readonly) return '<p class="warning">기존 검증 사례 · 읽기 전용</p>';
   if (p.stage === 'completed') return '<p class="warning">최종 대표 승인이 기록되었습니다. 게시 작업은 별도입니다.</p>';
@@ -244,6 +280,7 @@ function operations(p) {
   if (attempt?.status === 'reserved') return '<p class="warning">로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단</p>';
   if (p.stage==='goal_submitted') return `<button class="button secondary" data-action="mission">${icon('folder')} 미션 01 준비</button><p class="muted">기획 작업만 준비합니다. 외부 전송은 별도 승인 후 실행합니다.</p>`;
   if (p.rework && p.stage==='plan_revision') return reworkPanel(p);
+  if (p.autonomous_production) return failed+productionPanel(p);
   if (p.production) {
     const prep=p.production;
     const direction=prep.direction;
@@ -458,9 +495,10 @@ function review(kind, action) {
   const draft=revise && kind==='plan' && project.revision_draft?.version===report.version
     && project.revision_draft.report_hash===report.sha256 ? project.revision_draft : null;
   const title=revise?'수정 요청':kind==='plan'?'기획·대본 승인':'최종 영상 승인';
+  const technical=kind==='video' && report.render_receipt.visual_scope==='local_procedural_cards_no_game_footage';
   modal(title,`<p class="muted">${kind==='plan'?'기획':'영상'} v${report.version} · SHA-256</p><p class="mono">${h(report.sha256)}</p>
     ${draft ? '<p>이 기획 버전의 로컬 검토 초안입니다. 내용을 확인하거나 편집한 뒤 수정 요청을 확정해 주세요.</p>' : ''}
-    ${revise ? `<label>수정 피드백<textarea required name="feedback" maxlength="2000" rows="${draft ? 9 : 4}">${h(draft?.feedback)}</textarea></label>` :
+    ${revise ? `<label>수정 피드백<textarea required name="feedback" maxlength="2000" rows="${draft ? 9 : 4}">${h(draft?.feedback || (technical?'기술 시안의 품질이 이상합니다. 승인된 대본으로 이전보다 나은 실제 영상과 음성을 제작해 주세요.':''))}</textarea></label>` :
       '<label>승인 메모 (선택)<textarea name="feedback" maxlength="2000" rows="2"></textarea></label>'}
     ${revise && kind==='video' ? '<label class="check"><input type="checkbox" name="changes_plan"> 대본·기획 변경이 필요합니다. 새 기획의 대표 승인 후 제작합니다.</label>' : ''}
     <p class="muted">이 결정은 외부 API 사용·결제·게시 권한을 부여하지 않습니다.</p>`,title,async data=>{
@@ -468,6 +506,42 @@ function review(kind, action) {
         action,feedback:data.get('feedback'),changes_plan:data.has('changes_plan')});
       return {message:revise?'수정 요청을 저장했습니다.':'승인을 기록했습니다.'};
     });
+}
+
+function productionCommand(action,scene) {
+  const project=detail;
+  const a=project.autonomous_production;
+  const check=(name,label)=>`<label class="check"><input type="checkbox" name="${name}" required>${label}</label>`;
+  const free=check('free','해당 계정에서 현재 무료 제공 및 결제 비활성화를 확인했습니다.');
+  const quota=check('quota','이 모델·지역의 요청 및 입출력 잔량을 확인했습니다.');
+  const policy=check('policy','표시된 요청과 Google 무료 데이터 제공·인적 검토 정책에 동의합니다.');
+  const plan=project.flow.plan_versions.at(-1);
+  const commands={
+    'production-plan-prepare':['제작 계획 준비',free+quota+check('docs','현재 공급자 문서와 적용 조건을 확인했습니다.'),
+      data=>({free:data.has('free'),quota:data.has('quota'),docs:data.has('docs')})],
+    'production-plan-consent':['제작 계획 외부 전송 동의',
+      `<p>Gemini 텍스트 요청 1회 · 무료 전용 · 실제 요금 독립 검증 없음</p><details><summary>전송 입력</summary><pre>${h(JSON.stringify(a.scope,null,2))}</pre></details>`+free+policy,
+      data=>({review_hash:a.review_hash,free:data.has('free'),policy:data.has('policy')})],
+    'production-plan-run':['관리자 제작 계획 실행','<p>서명된 텍스트 요청 한 번을 실행합니다. 직원·음성·영상 생성 요청은 포함하지 않습니다.</p>',()=>({})],
+    'production-voice-prepare':['장면 음성 준비',free+quota+
+      '<label>모델·지역·결제·잔량 확인 내용<textarea name="evidence" required minlength="20" maxlength="300"></textarea></label>',
+      data=>({scene,free:data.has('free'),quota:data.has('quota'),evidence:data.get('evidence')})],
+    'production-voice-consent':['장면 음성 동의',
+      `<p>이 장면만 1회. 미확정 결과도 차감합니다. 자동 재시도 없음.</p><pre>${h(JSON.stringify(a.voices[scene]?.payload,null,2))}</pre>`+policy,
+      data=>({scene,review_hash:a.voices[scene].review_hash,policy:data.has('policy')})],
+    'production-voice-run':['장면 음성 실행','<p>이 장면에 서명한 요청 한 번을 실행합니다.</p>',()=>({scene})],
+    'production-clip-import':['로컬 클립 인수','<label>인수 폴더의 MP4 파일명<input name="filename" required></label>'+
+      '<label>현 장면 적합성 및 사용권 근거<textarea name="rights" required maxlength="600"></textarea></label>'+
+      check('rights_ok','이 장면에 맞는 파일이며 로컬 제작·검토에 사용할 권리가 있습니다.'),
+      data=>({scene,filename:data.get('filename'),rights:data.get('rights'),confirmed:data.has('rights_ok')})],
+    'production-render':['로컬 영상 제작','<p>인수한 클립과 검증된 음성으로 로컬 제작을 시작합니다. 외부 요청은 없습니다.</p>',
+      ()=>({version:plan.version,sha256:plan.sha256})],
+  };
+  const [title,fields,body]=commands[action];
+  modal(title,fields,title,async data=>{
+    await api(detailApi(project)+'/'+action,body(data));
+    return {message:'제작 상태를 갱신했습니다.'};
+  });
 }
 function produce() {
   const project=detail;
@@ -520,6 +594,7 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action?.startsWith('production-')) productionCommand(button.dataset.action,button.dataset.scene);
   else if (button.dataset.action==='mission-preview') {
     const project=detail;
     const plan=project.flow.plan_versions.at(-1);

@@ -433,6 +433,8 @@ class RepresentativeVideoWorkflow:
             require(flow['stage'] == f'awaiting_{stage}_approval', 'representative_stage_mismatch')
             report = _match(flow[f'{stage}_versions'], version, sha256)
             if stage == 'video':
+                require(action!='approve' or report['render_receipt'].get('visual_scope')!='local_procedural_cards_no_game_footage',
+                        'technical_preview_not_approvable')
                 self._verify_video(p, report)
             event = dict(stage=stage, action=action, version=version, sha256=sha256,
                          feedback=feedback, changes_plan=changes_plan, provenance=provenance, at=now())
@@ -480,7 +482,8 @@ class RepresentativeVideoWorkflow:
         require(validate_portrait(spec)==plan['script']['target_duration'],'representative_render_script_mismatch')
         return spec
 
-    def produce(self, project_id, *, version, sha256, changes, palette=None, cameras=None, preview_audio=None):
+    def produce(self, project_id, *, version, sha256, changes, palette=None, cameras=None, preview_audio=None,
+                imported=False):
         """Render the approved narration/captions; a video revision may adjust visual styling."""
         text(changes, 2000)
         with self.store.lock(project_id):
@@ -491,7 +494,11 @@ class RepresentativeVideoWorkflow:
             require(not any(a['status'] == 'reserved' for a in flow['render_attempts']),
                     'representative_render_uncertain')
             speech=None
-            if preview_audio is not None:
+            if imported:
+                from mission_production import imported_preview_inputs,render_imported
+                require(preview_audio is None and palette is None and cameras is None,'invalid_request')
+                clip_job,speech,spec=imported_preview_inputs(self,p)
+            elif preview_audio is not None:
                 spec=self.mission_production_spec(flow,version,sha256,preview_audio)
                 require(portrait_font() is not None,'portrait_korean_font_missing')
                 if preview_audio=='local_speech':
@@ -510,7 +517,8 @@ class RepresentativeVideoWorkflow:
                         'representative_camera_count')
                 for scene, camera in zip(spec['scenes'], cameras):
                     scene['camera'] = camera
-            (validate if preview_audio is None else validate_portrait)(spec)
+            if not imported:
+                (validate if preview_audio is None else validate_portrait)(spec)
             number = len(flow['render_attempts']) + 1
             relative = Path('artifacts')/project_id/f'render-{number}'
             folder = self.store.root/relative
@@ -522,14 +530,17 @@ class RepresentativeVideoWorkflow:
             self.store.save(p)
             try:
                 folder.mkdir(parents=True, exist_ok=False)
-                receipt = render(spec, folder, speech=speech) if speech is not None else render(spec, folder)
+                if imported:
+                    receipt=render_imported(clip_job,speech,spec,folder)
+                else:
+                    receipt = render(spec, folder, speech=speech) if speech is not None else render(spec, folder)
                 require(receipt['input_hash'] == attempt['spec_sha256'], 'representative_render_receipt_mismatch')
                 feedback = flow['decisions'][-1] if flow['stage'] == 'video_revision' else None
                 report = _report(dict(plan_version=version, plan_sha256=sha256, changes=changes,
                     revision_feedback=feedback, previous_video_sha256=flow['video_versions'][-1]['sha256'] if flow['video_versions'] else None,
                     artifact=str(relative/'video.mp4'), artifact_sha256=receipt['sha256'],
                     receipt_sha256=_file_hash(folder/'receipt.json'), render_receipt=receipt,
-                    qa=dict(full_decode=True, perceptual_quality='unassessed', subtitles='scene_level_only'),
+                    qa=dict(full_decode=True, perceptual_quality='unassessed', subtitles=receipt['subtitle_sync']),
                     cost_usd=0, publish_authorized=False), flow['video_versions'])
                 self._verify_video(p, report)
             except (CompanyError, OSError) as exc:

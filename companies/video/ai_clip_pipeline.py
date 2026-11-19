@@ -70,7 +70,9 @@ def validate_request(request):
 
 
 def validate_plan(plan):
-    exact(plan, ('goal', 'decision_source', 'total_seconds', 'fit', 'allow_repeat', 'scenes'))
+    fixed=plan.get('approved_timeline')
+    exact(plan, ('goal', 'decision_source', 'total_seconds', 'fit', 'allow_repeat', 'scenes',
+                 *(['approved_timeline'] if fixed is not None else [])))
     safe_text(plan['goal'], 4000); safe_text(plan['decision_source'], 200)
     require(type(plan['total_seconds']) in (int, float) and math.isfinite(plan['total_seconds'])
             and 1 <= plan['total_seconds'] <= 120, 'invalid_total_duration')
@@ -89,6 +91,17 @@ def validate_plan(plan):
             require(not any(c in text for c in '{}\\'), 'caption_markup_forbidden')
             lines(text, 24, 100)  # Layout rejects long unbreakable words; never drops caption content.
     require(sum(len(s['utterances']) for s in plan['scenes']) <= 24, 'invalid_utterances')
+    if fixed is not None:
+        require(len(fixed)==len(plan['scenes']) and not plan['allow_repeat'],'invalid_approved_timeline')
+        cursor=0
+        for cue,scene in zip(fixed,plan['scenes']):
+            exact(cue,('start','end','caption'))
+            require(type(cue['start']) is int and type(cue['end']) is int and cue['start']==cursor
+                    and cue['end']>cursor and len(scene['utterances'])==1,'invalid_approved_timeline')
+            safe_text(cue['caption'],160)
+            require(not any(c in cue['caption'] for c in '{}\\'),'caption_markup_forbidden')
+            cursor=cue['end']
+        require(cursor==plan['total_seconds'],'invalid_approved_timeline')
     return plan
 
 
@@ -100,7 +113,7 @@ def validate_source(source):
         safe_text(source[field], 2000)
     provenance = source['provenance']
     exact(provenance, ('kind', 'evidence'))
-    require(provenance['kind'] in ('external_ai_clip', 'synthetic_test_fixture'), 'invalid_provenance')
+    require(provenance['kind'] in ('external_ai_clip', 'synthetic_test_fixture', 'operator_provided_clip'), 'invalid_provenance')
     safe_text(provenance['evidence'], 2000)
     require((source['provider'] == 'synthetic_test_fixture') == (provenance['kind'] == 'synthetic_test_fixture'), 'invalid_provenance')
     require(source['commercial_use'] in ('allowed', 'prohibited', 'unknown')
@@ -266,20 +279,28 @@ class ClipJob:
         plan = state['plan']; audio_folder = self.root/'speech'; audio_folder.mkdir()
         texts = [t for s in plan['scenes'] for t in s['utterances']]
         speech = synthesizer.synthesize(texts, audio_folder)
+        from editorial_video import verify_speech
+        fixed=plan.get('approved_timeline')
+        if fixed is not None:
+            verify_speech(dict(scenes=[dict(narration=t) for t in texts]),speech,audio_folder,
+                          allowed_engines=('MeloTTS','gemini_scene_receipt','synthetic_test_tone_not_tts'))
         durations = [x['duration'] for x in speech['utterances']]
         require(all(type(d) in (int, float) and math.isfinite(d) and d > 0 for d in durations), 'invalid_speech_duration')
-        minimum = []; index = 0
-        for scene in plan['scenes']:
-            count = len(scene['utterances'])
-            minimum.append(sum(durations[index:index+count]) + .18*(count-1) + .25); index += count
-        require(sum(minimum) <= plan['total_seconds'], 'narration_exceeds_target_revise_script')
-        # Quantize to 24fps, preserving enough time for every actual audio sample.
-        frame_min = [math.ceil(d*24) for d in minimum]
-        total_frames = round(plan['total_seconds']*24)
-        require(sum(frame_min) <= total_frames, 'narration_exceeds_target_revise_script')
-        extra = total_frames-sum(frame_min)
-        frames = [n + extra//len(frame_min) + (i < extra%len(frame_min)) for i,n in enumerate(frame_min)]
-        allocated = [n/24 for n in frames]
+        if fixed is not None:
+            allocated=[cue['end']-cue['start'] for cue in fixed]
+            require(all(d<=length for d,length in zip(durations,allocated)), 'narration_exceeds_scene')
+        else:
+            minimum = []; index = 0
+            for scene in plan['scenes']:
+                count = len(scene['utterances'])
+                minimum.append(sum(durations[index:index+count]) + .18*(count-1) + .25); index += count
+            # Quantize to 24fps, preserving enough time for every actual audio sample.
+            frame_min = [math.ceil(d*24) for d in minimum]
+            total_frames = round(plan['total_seconds']*24)
+            require(sum(frame_min) <= total_frames, 'narration_exceeds_target_revise_script')
+            extra = total_frames-sum(frame_min)
+            frames = [n + extra//len(frame_min) + (i < extra%len(frame_min)) for i,n in enumerate(frame_min)]
+            allocated = [n/24 for n in frames]
         clip_map = {c['scene_id']:c for c in state['clips']}
         for scene, length in zip(plan['scenes'], allocated):
             require(plan['allow_repeat'] or clip_map[scene['id']]['media']['duration']+.02 >= length, 'clip_too_short_repeat_not_allowed')
@@ -287,7 +308,7 @@ class ClipJob:
         track = self.root/'narration.wav'
         with wave.open(str(track), 'wb') as out:
             out.setnchannels(1); out.setsampwidth(2); out.setframerate(44100)
-            for scene, length in zip(plan['scenes'], allocated):
+            for scene_index,(scene, length) in enumerate(zip(plan['scenes'], allocated)):
                 start = offset; scene_samples = 0
                 for number, text in enumerate(scene['utterances']):
                     item = speech['utterances'][index]; index += 1
@@ -300,7 +321,8 @@ class ClipJob:
                     require(abs(measured-item['duration']) < .001, 'speech_receipt_mismatch')
                     voice_start = start+scene_samples/44100
                     out.writeframesraw(pcm); scene_samples += sample_count
-                    wrapped = lines(text, 24, 100); chunks = ['\n'.join(wrapped[i:i+2]) for i in range(0,len(wrapped),2)]
+                    wrapped = lines(text, 24, 100) if fixed is None else fixed[scene_index]['caption'].splitlines()
+                    chunks = ['\n'.join(wrapped[i:i+2]) for i in range(0,len(wrapped),2)]
                     weight = sum(len(t.replace('\n','')) for t in chunks); elapsed = 0
                     for chunk in chunks:
                         duration = measured*len(chunk.replace('\n',''))/weight
@@ -316,7 +338,21 @@ class ClipJob:
                     speech_seconds=scene_samples/44100, clip_sha256=clip['sha256'], fit=plan['fit'],
                     repeat_count=max(0, math.ceil(length/clip['media']['duration'])-1)))
                 offset += length
-        write_captions(self.root, cues)
+        font_file=FONT
+        font_name='Noto Sans CJK KR'
+        fonts_dir='/usr/share/fonts/opentype/noto'
+        if fixed is not None:
+            from production_video import portrait_font
+            selected=portrait_font()
+            require(selected is not None,'portrait_korean_font_missing')
+            font_file=selected[0]
+            if font_file.endswith('malgun.ttf'):
+                fonts_dir='render-font'
+                (self.root/fonts_dir).mkdir()
+                # Font bytes stay local and the temporary directory is removed after rendering.
+                font_name='Malgun Gothic'
+                shutil.copyfile(font_file,self.root/fonts_dir/'malgun.ttf')
+        write_captions(self.root, cues, font=font_name)
         Store.atomic(self.root/'timeline.json', dict(scenes=timeline, captions=cues, speech=speech,
                      alignment='measured_utterance_boundaries_phrase_timing_estimated', human_listening_verified=False))
         fixture_count = sum(c['source']['provenance']['kind'] == 'synthetic_test_fixture' for c in state['clips'])
@@ -334,16 +370,20 @@ class ClipJob:
                    if plan['fit'] == 'letterbox' else 'scale=720:1280:force_original_aspect_ratio=increase:force_divisible_by=2,crop=720:1280')
             filters.append(f'[{i}:v]scale=trunc(iw*sar/2)*2:ih,setsar=1,{fit},setsar=1,fps=24,trim=duration={length:.9f},setpts=PTS-STARTPTS[v{i}]')
         filters.append(''.join(f'[v{i}]' for i in range(len(allocated)))+f'concat=n={len(allocated)}:v=1:a=0[joined]')
-        overlay = ',drawtext=fontfile='+FONT+':textfile=fixture_notice.txt:expansion=none:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.7:x=48:y=100' if synthetic else ''
+        overlay = ',drawtext=fontfile='+font_file+':textfile=fixture_notice.txt:expansion=none:fontsize=24:fontcolor=white:box=1:boxcolor=black@0.7:x=48:y=100' if synthetic else ''
         notice = (f'혼합 기술 시안 · 사용자 제공 AI {ai_count} / 비AI {fixture_count}' if mixed else
                   '기술 시안 · 비AI 테스트 클립' if synthetic else '')
         (self.root/'fixture_notice.txt').write_text(notice)
-        filters.append("[joined]subtitles=filename=captions.ass:fontsdir=/usr/share/fonts/opentype/noto"+overlay+'[final]')
+        filters.append(f"[joined]subtitles=filename=captions.ass:fontsdir={fonts_dir}"+overlay+'[final]')
         args += ['-filter_complex_threads','1','-filter_complex',';'.join(filters),'-map','[final]',
                  '-map',f'{len(allocated)}:a','-t',f'{offset:.9f}','-c:v','libx264','-preset','veryfast',
                  '-threads','2','-crf','23','-pix_fmt','yuv420p','-c:a','aac','-ar','44100','-ac','1',
                  '-movflags','+faststart','preview.mp4']
-        run_command(args, stage='ffmpeg_segment', cwd=self.root, timeout=300)
+        try:
+            run_command(args, stage='ffmpeg_segment', cwd=self.root, timeout=300)
+        finally:
+            if fonts_dir=='render-font':
+                shutil.rmtree(self.root/fonts_dir)
         output = self.root/'preview.mp4'; media = probe(output)
         require(media['width'] == 720 and media['height'] == 1280 and media['audio']
                 and media['codec'] == 'h264' and abs(media['fps']-24) < .001
@@ -365,8 +405,9 @@ class ClipJob:
         return result
 
 
-def write_captions(folder, cues):
+def write_captions(folder, cues, *, font='Noto Sans CJK KR'):
     header = '[Script Info]\nScriptType: v4.00+\nPlayResX: 720\nPlayResY: 1280\nWrapStyle: 2\n\n[V4+ Styles]\nFormat: Name,Fontname,Fontsize,PrimaryColour,SecondaryColour,OutlineColour,BackColour,Bold,Italic,Underline,StrikeOut,ScaleX,ScaleY,Spacing,Angle,BorderStyle,Outline,Shadow,Alignment,MarginL,MarginR,MarginV,Encoding\nStyle: Default,Noto Sans CJK KR,46,&H00FFFFFF,&H00FFFFFF,&H00101010,&H80101010,0,0,0,0,100,100,0,0,1,3,1,2,60,60,180,1\n\n[Events]\nFormat: Layer,Start,End,Style,Name,MarginL,MarginR,MarginV,Effect,Text\n'
+    header = header.replace('Default,Noto Sans CJK KR,','Default,'+font+',')
     def stamp(value, ass=False):
         n=round(value*(100 if ass else 1000)); scale=100 if ass else 1000
         h=n//(3600*scale);m=n//(60*scale)%60;s=n//scale%60;f=n%scale

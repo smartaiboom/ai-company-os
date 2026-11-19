@@ -69,6 +69,10 @@ hasAction(ui.productionNext(discover),'production-discovery-approve');
 hasAction(ui.productionNext({...discover,media_discovery:{status:'active'}}),'production-discovery-run');
 hasAction(ui.productionNext({...discover,media_discovery:{status:'review'}}),'production-discovery-rights');
 assert.match(ui.productionNext({...discover,media_discovery:{status:'empty'}}).message,/후보가 없습니다/);
+const adaptive = ui.productionNext({...assetsBlocked, media_discovery:{status:'empty'},
+  adaptive_discovery:{status:'available',proposal:{max_searches:8,fallback_max_calls:0}}});
+hasAction(adaptive,'production-discovery-approve');
+assert.match(adaptive.buttons,/대안 영상·이미지/);
 const blockedAssetWork = ui.productionNext(assetsBlocked);
 hasAction(blockedAssetWork,'production-assets-approve',true);
 assert.match(blockedAssetWork.reason,/공식 직접 다운로드/);
@@ -109,9 +113,9 @@ if (process.argv[2]) {
       hasAction(work,'production-voice-prepare');
     }
     if (live.autonomous_production.asset_execution?.status==='waiting_rights') {
-      if (live.autonomous_production.media_discovery?.status==='available') {
+      if ([live.autonomous_production.media_discovery?.status,live.autonomous_production.adaptive_discovery?.status].includes('available')) {
         hasAction(work,'production-discovery-approve');
-        assert.match(page,/Commons 영상 자동 탐색/);
+        assert.match(page,/Commons 영상·이미지 탐색/);
       } else {
         hasAction(work,'production-assets-approve',true);
       }

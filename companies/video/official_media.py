@@ -138,12 +138,14 @@ def download_mp4(asset, destination):
     """One request, no cookies, credentials, proxy, redirects, or retries."""
     mime=asset.get('mime','video/mp4')
     if asset.get('origin')=='commons_reviewed':
-        from commons_discovery import original_url, USER_AGENT
+        from commons_discovery import original_url, USER_AGENT, MAX_IMAGE_BYTES
         url=original_url(asset['url'],mime)
         headers={'User-Agent':USER_AGENT}
+        limit=MAX_IMAGE_BYTES if mime.startswith('image/') else MAX_BYTES
     else:
         url=official_url(asset['url'],media=True)
         headers={}
+        limit=MAX_BYTES
     deadline=monotonic()+TIMEOUT
     family,address=_global_addresses(url.hostname,deadline)
     connection=_PinnedHTTPS(url.hostname,family,address,deadline)
@@ -154,7 +156,7 @@ def download_mp4(asset, destination):
                     and response.getheader('Content-Encoding','identity').lower()=='identity',
                     'official_media_response_invalid')
             size=response.getheader('Content-Length')
-            require(size is None or size.isascii() and size.isdecimal() and 0<int(size)<=MAX_BYTES,
+            require(size is None or size.isascii() and size.isdecimal() and 0<int(size)<=limit,
                     'official_media_size_invalid')
             checksum=hashlib.sha256()
             original_checksum=hashlib.sha1() if asset.get('origin')=='commons_reviewed' else None
@@ -163,7 +165,7 @@ def download_mp4(asset, destination):
                 while block:=response.read1(65536):
                     require(monotonic()<=deadline,'official_download_timeout')
                     total+=len(block)
-                    require(total<=MAX_BYTES,'official_media_size_invalid')
+                    require(total<=limit,'official_media_size_invalid')
                     checksum.update(block)
                     if original_checksum:
                         original_checksum.update(block)

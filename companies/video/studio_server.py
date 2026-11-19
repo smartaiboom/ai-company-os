@@ -21,6 +21,8 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-adaptive-approve','production-adaptive-run','production-adaptive-rights',
+                      'production-adaptive-revoke',
                       'production-discovery-approve','production-discovery-run','production-discovery-rights',
                       'production-discovery-revoke',
                       'production-assets-approve','production-assets-revoke',
@@ -32,6 +34,8 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'still_image_pixels_invalid': '이미지 해상도 또는 총 픽셀 수가 로컬 검증 한도를 벗어났습니다.',
+    'still_image_format_invalid': '지원되는 단일 PNG/JPEG 원본이 아닙니다.',
     'commons_rights_review_changed': '확인한 후보, 검색 결과 해시 또는 권리 검토 범위가 달라졌습니다.',
     'commons_response_failed': 'Commons 검색 응답을 확인하지 못했습니다. 자동 재시도하지 않습니다.',
     'commons_response_limit': 'Commons 응답이 허용된 크기 또는 시간 범위를 초과했습니다.',

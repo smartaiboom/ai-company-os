@@ -20,6 +20,9 @@ from tts_job import private_write
 SCHEMA=obj(action=enum('edit','hold'), review_criteria=S, scenes=arr(obj(scene_id=S,asset_id=S,
     in_frame={'type':'integer'},framing=enum('letterbox_center','letterbox_top'),
     transition=enum('cut'),caption_position=enum('safe_lower','safe_upper'),suitability=S)))
+STILL_SCHEMA=obj(action=enum('edit','hold'),review_criteria=S,scenes=arr(obj(
+    **SCHEMA['properties']['scenes']['items']['properties'],extra_images=arr(S),
+    motion=enum('pan','zoom','cut','none'),label=enum('illustration','reference','none'))))
 SYSTEM=(
     '당신은 영상 편집 직원입니다. JSON과 한국어 설명만 사용하고 ID는 원문으로 보존합니다. '
     '기존 승인 장면·자막 원문·순서와 실측 음성은 고정입니다. 권리가 등록된 후보 ID를 한 장면에 하나씩 사용하고 '
@@ -44,7 +47,7 @@ def registries(root,manager,plan):
     from commons_discovery import accepted_media
     library=root/'production_source_library'
     offices=registered_media(root/'production_official_media')
-    commons=accepted_media(manager,plan)
+    commons={**accepted_media(manager,plan),**accepted_media(manager,plan,adaptive=True)}
     require(not offices.keys() & commons.keys(),'official_registry_invalid')
     return library,library_entries(library),{**offices,**commons}
 
@@ -63,6 +66,9 @@ def edit_context(manager, plan, constraints, clips, libraries, offices, source_r
                                           route=item.get('origin','official_direct_media'))
         if 'scene_ids' in item:
             candidates['official:'+name]['scene_ids']=item['scene_ids']
+        if item.get('mime','').startswith('image/'):
+            candidates['official:'+name]['image']=True
+            candidates['official:'+name]['source_checksum']=item['sha1']
     for clip in clips:
         candidates['existing:'+clip['scene_id']]=dict(description='Previously verified import for this scene',
             frames=int(clip['media']['duration']*24),asset_hash=clip['sha256'],content_sha256=clip['sha256'],
@@ -103,6 +109,7 @@ class AssetEditor(ProductionManager):
         require([c['scene_id'] for c in choices]==[s['scene_id'] for s in inputs['scenes']]
                 and len({c['asset_id'] for c in choices})==len(choices),'invalid_source_edit')
         hashes=set()
+        used=set()
         for choice,scene in zip(choices,inputs['scenes'],strict=True):
             item=inputs['candidates'].get(choice['asset_id'])
             start=choice['in_frame']
@@ -113,10 +120,24 @@ class AssetEditor(ProductionManager):
                     and scene['scene_id'] in item.get('scene_ids',[scene['scene_id']])
                     and (start==0 if item['frames'] is None else start+scene['frames']<=item['frames']),
                     'invalid_source_edit')
-            sha=item.get('content_sha256')
-            if sha:
-                require(sha not in hashes,'invalid_source_edit')
-                hashes.add(sha)
+            extras=choice.get('extra_images',[])
+            if item.get('image'):
+                require(choice.get('motion') in ('pan','zoom','cut') and choice.get('label') in ('illustration','reference')
+                        and len(extras)<=2 and scene['frames']>=24*(1+len(extras)),
+                        'invalid_source_edit')
+            else:
+                require(not extras and choice.get('motion','none')==choice.get('label','none')=='none',
+                        'invalid_source_edit')
+            for name in [choice['asset_id'],*extras]:
+                candidate=inputs['candidates'].get(name)
+                require(candidate and name not in used and
+                        (not item.get('image') or candidate.get('image') and scene['scene_id'] in candidate['scene_ids']),
+                        'invalid_source_edit')
+                used.add(name)
+                sha=candidate.get('content_sha256') or candidate.get('source_checksum')
+                if sha:
+                    require(sha not in hashes,'invalid_source_edit')
+                    hashes.add(sha)
 
 
 def editor(manager, context=None):
@@ -127,13 +148,19 @@ def editor(manager, context=None):
         require(file.is_file() and file.stat().st_size<=65536,'invalid_source_edit')
         context=parse(file.read_text())
     require(context is not None,'asset_edit_missing')
+    if any(item.get('image') for item in context['candidates'].values()):
+        return AssetEditor(root,dict(input=context,system=SYSTEM+
+            ' 정지 이미지는 이미지 후보만 한 장 또는 여러 장(최대 3장) 선택하고 in_frame=0을 사용하세요. '
+            '실제 플레이가 아닌 적합한 설명·참고 시각일 때만 pan, zoom 또는 cut과 해당 라벨을 선택하세요. '
+            '동영상은 extra_images=[]와 motion=none, label=none을 사용하세요.',schema=STILL_SCHEMA))
     return AssetEditor(root,dict(input=context,system=SYSTEM,schema=SCHEMA))
 
 
 def transfer_unit(name, asset):
+    from still_motion import MAX_BYTES as IMAGE_BYTES
     return unit('download:'+name,'direct_https_get',asset['url'],['request_url','connection_metadata'],
                 payload_sha256=digest(dict(method='GET',url=asset['url'])),rights_sha256=digest(asset),
-                max_bytes=MAX_BYTES,publisher=asset['issuer'])
+                max_bytes=IMAGE_BYTES if asset.get('mime','').startswith('image/') else MAX_BYTES,publisher=asset['issuer'])
 
 
 def offer(manager,plan,root,constraints,clips,state):
@@ -159,7 +186,8 @@ def offer(manager,plan,root,constraints,clips,state):
     units.extend(transfer_unit(name,asset) for name,asset in sorted(offices.items()))
     store=extension_store(manager,plan)
     proposal=store.proposal(units)
-    proposal.update(max_downloads=min(missing,len(offices)),rights_review=list(offices.values()),
+    multiple=any(row.get('mime','').startswith('image/') for row in offices.values())
+    proposal.update(max_downloads=min(missing*(3 if multiple else 1),len(offices)),rights_review=list(offices.values()),
                     local_entries=[{k:item[k] for k in ('id','description','origin','rights','sha256')} for item in libraries.values()])
     return dict(status='available',proposal=proposal,review_hash=digest(proposal),local=len(libraries),official=len(offices))
 
@@ -200,6 +228,45 @@ def import_selected(job,root,name,scene,source_hash,row,minimum_duration,receipt
         minimum_duration=minimum_duration,direct_mp4=receipt is not None and not webm,direct_webm=webm)
 
 
+def import_motion(job,store,key,offices,catalog,choice,frames):
+    from pathlib import Path
+    from local_melo_tts import file_hash
+    from still_motion import image_dimensions, render_stills
+
+    scene=choice['scene_id']
+    suffix=digest(scene)+'.json'
+    names=[choice['asset_id'],*choice['extra_images']]
+    items=[]
+    with TemporaryDirectory(dir=store.root) as directory:
+        folder=Path(directory)
+        store.write('local-start-'+suffix,dict(scene_id=scene,assets=names,at=now()))
+        originals=[]
+        for name in names:
+            asset_id=name.removeprefix('official:')
+            row=offices.get(asset_id)
+            require(row and digest(row)==catalog[name]['asset_hash'],'production_source_asset_changed')
+            mime=row['mime']
+            dest=folder/(asset_id+('.png' if mime=='image/png' else '.jpg'))
+            item=transfer_unit(asset_id,row)
+            def fetch(proof,check):
+                check()
+                receipt=download_mp4(row,dest)
+                image_dimensions(dest,mime)
+                require(all(entry['sha256']!=receipt['sha256'] for entry in items),'invalid_source_edit')
+                record=dict(policy_sha256=proof,asset=name,scene_id=scene,rights_sha256=digest(row),url=row['url'],
+                            terms_url=row['terms_url'],attribution=row['attribution'],at=now(),**receipt)
+                store.write('download-'+asset_id+'.json',record)
+                items.append(record)
+            delegated_call(store,key,item,item['payload_sha256'],fetch)
+            originals.append((dest,mime))
+        video=render_stills(originals,frames,choice['motion'],choice['label'],folder)
+        checksum=file_hash(video)
+        rights=dict(rights_evidence='Illustrative motion from separately reviewed Commons stills. See acquisition receipts.')
+        import_selected(job,folder,video.name,scene,checksum,rights,frames/24)
+        store.write('local-completed-'+suffix,dict(scene_id=scene,assets=names,sha256=checksum,
+            motion=choice['motion'],label=choice['label'],at=now()))
+
+
 def perform_extension(workflow,project,manager,plan,state,action,body):
     store=extension_store(manager,plan)
     key,_=production_keys()
@@ -234,7 +301,8 @@ def perform_extension(workflow,project,manager,plan,state,action,body):
         return False
     catalog=worker.contract['input']['candidates']
     selected=decision['scenes']
-    require(sum(s['asset_id'].startswith('official:') for s in selected)<=grant['proposal']['max_downloads'],
+    require(sum(name.startswith('official:') for s in selected for name in
+                [s['asset_id'],*s.get('extra_images',[])])<=grant['proposal']['max_downloads'],
             'owner_policy_scope_changed')
     current={clip['scene_id']:clip for clip in clips}
     scene_frames={item['scene_id']:item['frames'] for item in worker.contract['input']['scenes']}
@@ -249,6 +317,9 @@ def perform_extension(workflow,project,manager,plan,state,action,body):
         require(row is not None and digest(row)==catalog[name]['asset_hash'],'production_source_asset_changed')
         if not job.root.exists():
             job.create(base)
+        if catalog[name].get('image'):
+            import_motion(job,store,key,offices,catalog,choice,scene_frames[scene])
+            continue
         if route=='local':
             suffix=digest(scene)+'.json'
             store.write('local-start-'+suffix,dict(scene_id=scene,asset=name,sha256=row['sha256'],at=now()))
@@ -302,6 +373,18 @@ def editing_handoff(manager,plan,clips,spec):
         route,asset_id=name.split(':',1)
         if route=='existing':
             require(clip['sha256']==selected[name]['asset_hash'],'production_source_asset_changed')
+        elif selected[name].get('image'):
+            motion=store.read('local-completed-'+digest(scene)+'.json')
+            names=[name,*choice['extra_images']]
+            require(motion and motion['assets']==names and motion['sha256']==clip['sha256'],
+                    'production_source_asset_changed')
+            for original in names:
+                asset=original.removeprefix('official:')
+                receipt=store.read('download-'+asset+'.json')
+                require(receipt and receipt['asset']==original and receipt['scene_id']==scene
+                        and receipt['rights_sha256']==selected[original]['asset_hash'],
+                        'production_source_asset_changed')
+                attribution.append(dict(scene_id=scene,visual='illustrative_still_motion',**receipt['attribution']))
         elif route=='local':
             require(clip['source']['provenance']['evidence']=='registered rights record '+selected[name]['asset_hash'],
                     'production_source_asset_changed')
@@ -319,5 +402,6 @@ def editing_handoff(manager,plan,clips,spec):
                            **{k:choice[k] for k in ('in_frame','framing','transition','caption_position')}))
     validate_editing(spec,clips,editing)
     return dict(direction_sha256=digest(decision),scenes=editing,attribution=attribution,
+                illustrative_scenes=[c['scene_id'] for c in decision['scenes'] if selected[c['asset_id']].get('image')],
                 review_criteria=decision['review_criteria'],
                 review_notes=[item['suitability'] for item in decision['scenes']])

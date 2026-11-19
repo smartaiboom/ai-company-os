@@ -22,7 +22,8 @@ API=f'https://{HOST}/w/api.php'
 USER_AGENT='AICompanyOS-Cutroom/1.0 (https://github.com/smartaiboom/ai-company-os)'
 LIMIT=5
 MAX_BYTES=131072
-FORMATS={'.mp4':'video/mp4','.webm':'video/webm'}
+FORMATS={'.mp4':'video/mp4','.webm':'video/webm','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg'}
+MAX_IMAGE_BYTES=8*1024*1024
 LICENSE=re.compile(r'https://creativecommons\.org/(licenses/(by|by-sa)/(2\.0|2\.5|3\.0|4\.0)|publicdomain/zero/1\.0)/?')
 FALLBACK_SCHEMA=obj(options=arr(obj(scene_id=S,route=enum('illustrative_footage','licensed_still_motion',
     'authorized_capture','verify_generation','hold'),suggestion=S,rights_needed=S)))
@@ -111,9 +112,49 @@ def queries(plan, clips):
     return terms[:6]
 
 
-def request_path(phrase):
+def adaptive_queries(plan, clips, previous):
+    existing={clip['scene_id'] for clip in clips}
+    choices={row['scene_id']:row['route'] for row in previous.get('fallback',{}).get('options',[])}
+    old={row['query'].casefold() for row in previous.get('proposal',{}).get('queries',[])}
+    rows=[]
+    for shot in plan['scenes']:
+        scene=shot['scene_id']
+        if scene in existing:
+            continue
+        phrase=re.split(r'\b(?:showing|showcasing|depicting|displaying|featuring)\b',shot['request'],maxsplit=1,flags=re.I)[-1]
+        phrase=re.sub(r'https?://\S+|\b[a-z][0-9]+:[\w-]+',' ',phrase).strip()
+        proper=re.match(r"[A-Z][\w'’]*(?:(?: (?:of|the|and))? [A-Z][\w'’]*){1,5}",phrase)
+        subject=proper[0] if proper else ''
+        words=re.findall(r"[^\W_]+(?:['’][^\W_]+)?",phrase,re.UNICODE)
+        stop={'a','and','the','use','operator','clip','with','show','of','montage','trending'}
+        terms=[w for w in words if w.casefold() not in stop and len(w)<=30]
+        short=(subject or ' '.join(terms[:3]))[:80].strip()
+        alias=(subject.rsplit(' ',1)[0] if len(subject.split())>=4 else
+               subject or ' '.join(terms[:2]))[:80].strip()
+        if not short:
+            continue
+        first='image' if choices.get(scene)=='licensed_still_motion' else 'video'
+        for wave,(query,media) in enumerate(((short,first),(alias or short,'video' if first=='image' else 'image'))):
+            if media=='video' and query.casefold() in old:
+                query=alias
+            if not query or (media=='video' and query.casefold() in old):
+                continue
+            safe_text(query,80)
+            prior=next((row for row in rows if row['query'].casefold()==query.casefold() and row['media']==media),None)
+            if prior:
+                prior['scene_ids'].append(scene)
+            else:
+                rows.append(dict(scene_id=scene,scene_ids=[scene],query=query,media=media,wave=wave,
+                                 subject=subject[:80],topic_terms=' '.join(terms[:3]),alternate_terms=alias,
+                                 unit_id=f'{scene}-{media}'))
+    return sorted(rows,key=lambda row:row['wave'])[:12]
+
+
+def request_path(phrase,media='video'):
+    require(media in ('video','image'),'commons_response_failed')
+    filetype='bitmap' if media=='image' else 'video'
     return '/w/api.php?'+urlencode(dict(action='query',generator='search',gsrnamespace=6,
-        gsrsearch=f'{phrase} filetype:video',gsrlimit=LIMIT,prop='imageinfo',iilimit=1,
+        gsrsearch=f'{phrase} filetype:{filetype}',gsrlimit=LIMIT,prop='imageinfo',iilimit=1,
         iiprop='url|mime|mediatype|size|sha1|extmetadata',iiextmetadatafilter=
         'LicenseShortName|LicenseUrl|Artist|Credit|Attribution|AttributionRequired|Restrictions',
         format='json',formatversion=2,maxlag=5))
@@ -158,7 +199,7 @@ def unmatched_scenes(scenes, compatible):
     return [scene for scene in scenes if not seat(scene,set())]
 
 
-def candidates(data, scene):
+def candidates(data, scene, media='video'):
     query=data.get('query',{})
     require(isinstance(query,dict),'commons_response_failed')
     pages=query.get('pages',[])
@@ -175,9 +216,11 @@ def candidates(data, scene):
         info=infos[0] if isinstance(infos,list) and len(infos)==1 and isinstance(infos[0],dict) else {}
         mime=info.get('mime')
         try:
-            require(mime in tuple(FORMATS.values()) and info.get('mediatype')=='VIDEO','commons_unsafe_file_url')
+            image=media=='image'
+            require(isinstance(mime,str) and mime in FORMATS.values() and mime.startswith('image/' if image else 'video/')
+                    and info.get('mediatype')==('BITMAP' if image else 'VIDEO'),'commons_unsafe_file_url')
             original_url(info.get('url'),mime)
-            require('size' not in info or type(info['size']) is int and 0<info['size']<=MAX_MEDIA_BYTES,
+            require('size' not in info or type(info['size']) is int and 0<info['size']<=(MAX_IMAGE_BYTES if image else MAX_MEDIA_BYTES),
                     'commons_unsafe_file_url')
         except (CompanyError,UnicodeError):
             rejected+=1
@@ -223,17 +266,17 @@ def candidates(data, scene):
     return found,rejected
 
 
-def store_for(manager, plan):
-    return OwnerOperatingPolicy(manager.root/'commons_discovery',dict(
-        mode='cutroom_commons_discovery_v1',project=manager.acceptance_project,
+def store_for(manager, plan, adaptive=False):
+    return OwnerOperatingPolicy(manager.root/('commons_adaptive' if adaptive else 'commons_discovery'),dict(
+        mode='cutroom_commons_adaptive_v1' if adaptive else 'cutroom_commons_discovery_v1',project=manager.acceptance_project,
         provider='Wikimedia Commons / Google Gemini only for fallback advice',
         plan_sha256=manager.contract['input']['approved_plan_hash'],
         direction_sha256=digest(plan),revision_scope=manager.root.name))
 
 
 def search_unit(row):
-    return unit('search:'+row['scene_id'],'mediawiki_action_api',API,['scene_search_terms'],
-                payload_sha256=digest(request_path(row['query'])),max_results=LIMIT)
+    return unit('search:'+row.get('unit_id',row['scene_id']),'mediawiki_action_api',API,['scene_search_terms'],
+                payload_sha256=digest(request_path(row['query'],row.get('media','video'))),max_results=LIMIT)
 
 
 def fallback_unit():
@@ -265,20 +308,21 @@ def fallback_worker(manager, contract=None):
     return FallbackWorker(root,dict(input=contract,system=FALLBACK_SYSTEM,schema=FALLBACK_SCHEMA))
 
 
-def proposal(manager,plan,clips,manager_enabled):
-    rows=queries(plan,clips)
+def proposal(manager,plan,clips,manager_enabled,adaptive=False):
+    previous=status(manager,plan,clips,manager_enabled) if adaptive else {}
+    rows=(adaptive_queries(plan,clips,previous) if previous['status']=='empty' else []) if adaptive else queries(plan,clips)
     units=[search_unit(row) for row in rows]
-    if rows and manager_enabled:
+    if rows and manager_enabled and not adaptive:
         units.append(fallback_unit())
-    offer=store_for(manager,plan).proposal(units)
-    return {**offer,'queries':rows,'max_searches':len(rows),'fallback_max_calls':int(bool(rows and manager_enabled))}
+    offer=store_for(manager,plan,adaptive).proposal(units)
+    return {**offer,'queries':rows,'max_searches':len(rows),'fallback_max_calls':int(bool(rows and manager_enabled and not adaptive))}
 
 
-def status(manager,plan,clips,manager_enabled):
-    store=store_for(manager,plan)
+def status(manager,plan,clips,manager_enabled,adaptive=False):
+    store=store_for(manager,plan,adaptive)
     grant=store.read('policy.json')
     if grant is None:
-        offer=proposal(manager,plan,clips,manager_enabled)
+        offer=proposal(manager,plan,clips,manager_enabled,adaptive)
         return dict(status='available' if offer['max_searches'] else 'unavailable',proposal=offer,review_hash=digest(offer))
     attempts=store.attempts()
     result=store.read('candidates.json')
@@ -300,8 +344,8 @@ def status(manager,plan,clips,manager_enabled):
     return answer
 
 
-def accepted_media(manager,plan):
-    store=store_for(manager,plan)
+def accepted_media(manager,plan,adaptive=False):
+    store=store_for(manager,plan,adaptive)
     review=store.read('rights.json')
     if not review:
         return {}
@@ -323,8 +367,8 @@ def accepted_media(manager,plan):
     return items
 
 
-def action(manager,plan,clips,manager_enabled,name,body):
-    store=store_for(manager,plan)
+def action(manager,plan,clips,manager_enabled,name,body,adaptive=False):
+    store=store_for(manager,plan,adaptive)
     if name=='production-discovery-rights':
         exact(body,('result_sha256','accepted','confirmed'))
         result=store.read('candidates.json')
@@ -341,23 +385,30 @@ def action(manager,plan,clips,manager_enabled,name,body):
     if name=='production-discovery-approve':
         exact(body,('confirmed','review_hash'))
         require(body['confirmed'] is True,'owner_policy_required')
-        return store.approve(proposal(manager,plan,clips,manager_enabled),body['review_hash'],key)
+        return store.approve(proposal(manager,plan,clips,manager_enabled,adaptive),body['review_hash'],key)
     exact(body,())
     require(name=='production-discovery-run','invalid_request')
     grant=store.active(key)['proposal']
     require(not store.attempts(),'owner_policy_exhausted')
     lookup={}
     blocked=0
+    missing=sorted({scene for row in grant['queries'] for scene in row['scene_ids']})
     for row in grant['queries']:
-        path=request_path(row['query'])
+        media=row.get('media','video')
+        if adaptive and row['wave']:
+            deficient=unmatched_scenes(missing,lambda scene:[
+                c['id'] for c in lookup.values() if c['reviewable'] and scene in c['scene_ids']])
+            if not set(row['scene_ids']).intersection(deficient):
+                continue
+        path=request_path(row['query'],media)
         def search(proof,check):
             nonlocal blocked
             check()
-            found,rejected=candidates(search_commons(path),row['scene_id'])
+            found,rejected=candidates(search_commons(path),row['scene_id'],media)
             for item in found:
                 item['scene_ids']=row['scene_ids']
             blocked+=rejected
-            store.write('metadata-'+row['scene_id']+'.json',dict(candidates=found,rejected=rejected,at=now()))
+            store.write('metadata-'+row.get('unit_id',row['scene_id'])+'.json',dict(candidates=found,rejected=rejected,at=now()))
             for item in found:
                 old=lookup.get(item['id']) or next((v for v in lookup.values() if v['url']==item['url']),None)
                 if old:
@@ -369,9 +420,8 @@ def action(manager,plan,clips,manager_enabled,name,body):
         delegated_call(store,key,search_unit(row),digest(path),search)
     result=dict(candidates=list(lookup.values()),rejected_unsafe=blocked)
     store.write('candidates.json',result)
-    missing={scene for row in grant['queries'] for scene in row['scene_ids']}
     eligible=[item for item in lookup.values() if item['reviewable']]
-    deficient=unmatched_scenes(sorted(missing),lambda scene:[
+    deficient=unmatched_scenes(missing,lambda scene:[
         item['id'] for item in eligible if scene in item['scene_ids']])
     if deficient and grant['fallback_max_calls'] and manager_enabled:
         context=dict(goal='승인 영상 장면의 합법적인 시각 대안',scenes=[

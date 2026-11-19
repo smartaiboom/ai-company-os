@@ -246,7 +246,8 @@ function productionPanel(p) {
   const a=p.autonomous_production;
   if (!a) return '';
   const source=a.source_assessment;
-  const timing=a.timeline;
+  const timing=a.timeline, operating=a.owner_policy;
+  const policyStates={available:'승인 대기',active:'승인 범위 활성',expired:'만료',revoked:'철회',stopped:'실패 또는 미확정으로 중단',blocked:'현재 키 또는 계정 설정 확인 필요'};
   const routeLabels={local_library:'로컬 자산 보관함', official_direct_media:'공식 직접 제공 자료',
     public_metadata_search:'공개 메타데이터 검색 제안', own_capture:'권리 확인 자체 캡처', hold:'자산 대기'};
   return `<section class="panel" id="production-detail"><h2>제작 상세</h2>
@@ -267,6 +268,11 @@ function productionPanel(p) {
           ${voice?.audio_url?`<p>${h(voice.duration_seconds)}초 / 승인 ${h(voice.approved_seconds)}초 · ${voice.fits_timeline?'길이 조건 충족 · 청취 평가 필요':'승인 길이 초과 · 합성 차단'}</p>
             <audio controls preload="none" src="${h(voice.audio_url)}" aria-label="${h(s.scene_id)} 음성 검토"></audio>`:''}</article>`;
       }).join('')}`:''}
+    ${operating && operating.status!=='unavailable'?`<section class="subpanel"><h3>개인 운영 설정</h3>
+      <p>${h(policyStates[operating.status])} · 무료 전용 · 요청 사용 ${h(operating.used??0)}/${h(operating.proposal.units.length)} · 공급자 잔량·청구 미확인</p>
+      ${operating.expires_at?`<p>유효 기한 ${h(time(operating.expires_at))}</p>`:''}
+      ${operating.expires_at && operating.status!=='revoked'?'<button class="button secondary" data-action="production-policy-revoke">운영 정책 철회</button>':''}
+    </section>`:''}
     ${timing?.proposal?`<section class="subpanel"><h3>실측 시간 조정안 v${h(timing.proposal.version)}</h3>
       <p>${timing.status==='approved'?'대표 승인 완료':timing.status==='hold'?'관리자 보류':'대표 승인 대기'}</p>
       <p>${h(timing.proposal.decision.rationale)}</p><p>${h(timing.proposal.decision.quality_checks)}</p>
@@ -452,7 +458,8 @@ function productionNext(a,selected) {
   }
   if (!a.plan) return choose('production-plan-prepare','관리자 제작 계획 준비',
     '승인 대본을 유지합니다. 소유자가 무료 조건, 잔여 쿼터, 현행 문서를 확인합니다. 준비 단계의 외부 호출은 0회입니다.',key);
-  if (a.render_ready) return choose('production-render','인수한 클립과 음성으로 제작','로컬 합성 후 대표 영상 검토로 제출합니다. 외부 호출은 0회입니다.');
+  const operating=a.owner_policy;
+  if (a.render_ready && !operating?.expires_at) return choose('production-render','인수한 클립과 음성으로 제작','로컬 합성 후 대표 영상 검토로 제출합니다. 외부 호출은 0회입니다.');
   if (a.render_attempt) return {message:({
     reserved:'로컬 합성 실행 중 또는 결과 미확정 · 중복 실행 차단',
     completed:'합성 기록 완료 · 대표 영상 검토 제출 상태 확인',
@@ -492,8 +499,6 @@ function productionNext(a,selected) {
   }
   const batch=a.voice_batch, timing=a.timeline;
   let batchWork, timelineWork;
-  if (batch?.status==='available') batchWork=choose('production-batch-prepare','남은 장면 음성 일괄 준비',
-    `${batch.scenes.join(', ')} · 기존 완료 음성 보존 · 현재 무료 조건과 전체 잔량 확인`,key);
   if (batch?.status==='prepared') batchWork=choose('production-batch-consent','남은 장면 음성 일괄 동의',
     '장면별 정확한 요청의 묶음을 한 번 검토합니다.',key || (expired(batch.review.expires_at)?'일괄 검토 유효 시간이 지났습니다.':''));
   if (batch?.status==='approved') batchWork=choose('production-batch-run','남은 장면 음성 일괄 실행',
@@ -506,11 +511,22 @@ function productionNext(a,selected) {
       (expired(timing.expires_at)?'전송 동의가 만료되었습니다.':!a.manager_enabled?'Gemini 무료 실행 설정이 필요합니다.':''));
   if (timing?.status==='review') timelineWork=choose('production-timeline-approve','대표 시간 조정안 검토·승인','시간 조정만 별도 승인합니다. 기존 대본과 관리자 계획은 유지됩니다.');
   if (timing?.status==='hold' || timing?.status==='stopped') timelineWork={message:'시간 조정 관리자가 보류했거나 요청 결과가 미확정입니다. 상세에서 결과를 확인하세요.',buttons:refresh};
+  const operatingWork=operating?.status==='available'
+    ?choose('production-policy-approve','개인 운영 정책 검토·승인',
+      `이 제작의 범위를 한 번 검토합니다. 무료 전용 · 외부 요청 최대 ${operating.proposal.units.length}회`,key)
+    :operating?.status==='active'
+      ?choose('production-policy-run','제작 실행','승인한 범위에서 가능한 단계까지 진행합니다.',
+        operating.run_blocker==='tts_execution_disabled'?'서버의 장면 TTS 실행 설정이 필요합니다.':
+        operating.run_blocker?'서버의 무료 Gemini 실행 설정이 필요합니다.':
+        !operating.can_run?'시간 조정안 승인 또는 권리가 확인된 영상 자산을 기다립니다.':'')
+      :operating?.expires_at?{message:'운영 정책이 만료·철회·중단됐거나 키를 확인할 수 없습니다. 제작 상세에서 상태를 확인하세요.'}:null;
+  const legacy=!operating?.expires_at && operating?.status!=='available';
   const options=[
-    ...(batchWork?[{...batchWork,choice:'batch',label:'남은 장면 음성 일괄'}]:[]),
-    ...(timelineWork?[{...timelineWork,choice:'timeline',label:'실측 시간 조정'}]:[]),
-    ...voices.map(voice=>({...voice,choice:`voice-${voice.scene}`,label:`장면 음성 · ${voice.scene}`})),
-    ...(sourceWork?[{...sourceWork,choice:'sources',label:'자산 확보 업무'}]:[]),
+    ...(operatingWork?[{...operatingWork,choice:'operating',label:'개인 운영 정책 · 제작 실행'}]:[]),
+    ...(legacy && batchWork?[{...batchWork,choice:'batch',label:'남은 장면 음성 일괄'}]:[]),
+    ...(timelineWork && (legacy || ['review','hold','stopped'].includes(timing?.status))?[{...timelineWork,choice:'timeline',label:'실측 시간 조정'}]:[]),
+    ...(legacy?voices:[]).map(voice=>({...voice,choice:`voice-${voice.scene}`,label:`장면 음성 · ${voice.scene}`})),
+    ...(sourceWork && (legacy || ['completed','blocked','stopped'].includes(sources?.status))?[{...sourceWork,choice:'sources',label:'자산 확보 업무'}]:[]),
     ...Object.entries(a.voices).filter(([,voice])=>voice.audio_sha256 && !voice.listening)
       .map(([scene])=>({...choose('production-listen','청취 의견 저장',`${scene} 음성에 대한 대표 의견을 기록합니다.`,'',scene),
         choice:`listen-${scene}`,label:`청취 의견 · ${scene}`})),
@@ -701,14 +717,18 @@ function productionCommand(action,scene) {
     return `<li>${h(item.scene_id)} · ${h(before.original_frames/24)}초 → ${h((item.frames/24).toFixed(3))}초 · 자막 ${h((item.caption_frames/24).toFixed(3))}초</li>`;
   }).join('');
   const total=proposal?.decision.scenes.reduce((sum,item)=>sum+item.frames,0)/24;
-  const quotaFields=[['remaining_requests','잔여 요청'],['remaining_input_tokens','잔여 입력 토큰'],['remaining_output_tokens','잔여 출력 토큰']];
+  const operating=a.owner_policy;
   const commands={
     'production-listen':['청취 의견 저장',`<p>${h(scene)}의 검증된 음성에 연결합니다.</p><label>대표 청취 의견<textarea name="opinion" required maxlength="500"></textarea></label>`,
       data=>({scene,audio_sha256:a.voices[scene].audio_sha256,opinion:data.get('opinion')})],
-    'production-batch-prepare':['남은 장면 음성 일괄 준비',
-      `<p>${h(batch?.scenes?.join(', '))}의 요청만 준비합니다. 기존 모델·프로젝트의 확인 기록을 사용합니다.</p>`+free+quota+
-      quotaFields.map(([name,label])=>`<label>${label}<input name="${name}" type="number" min="1" max="1000000000" required></label>`).join(''),
-      data=>({free:data.has('free'),quota:data.has('quota'),...Object.fromEntries(quotaFields.map(([name])=>[name,Number(data.get(name))]))})],
+    'production-policy-approve':['개인 운영 정책 검토·승인',
+      `<p>현재 프로젝트의 승인 대본과 제작 계획에만 적용합니다. 24시간 유효하며 제작 상세에서 철회할 수 있습니다.</p>
+        <p>Google Gemini 무료 전용 · 비용 상한 $0 · 최대 ${h(operating?.proposal.units.length)}회 · 공급자 잔량·청구는 독립 확인되지 않았습니다. Google의 무료 서비스 개선 활용 및 사람의 검토가 가능할 수 있습니다.</p>
+        <details open><summary>프로젝트·모델·전송 범위와 내부 상한</summary><pre>${h(JSON.stringify(operating?.proposal,null,2))}</pre></details>`+
+      check('confirmed','무료 적용·결제 미연결 및 이 작업에 충분한 현재 사용 한도를 확인했으며 표시된 데이터 전송 정책과 제작 범위를 승인합니다.'),
+      data=>({review_hash:operating.review_hash,confirmed:data.has('confirmed')})],
+    'production-policy-run':['제작 실행','<p>서명된 운영 범위에서 가능한 다음 단계로 진행합니다. 실패·미확정이면 후속 외부 요청을 중단합니다.</p>',()=>({})],
+    'production-policy-revoke':['운영 정책 철회','<p>이 정책의 이후 외부 요청을 차단합니다. 기존 승인과 시도 기록은 보존합니다.</p>',()=>({})],
     'production-batch-consent':['남은 장면 음성 일괄 동의',
       `<p>최대 ${h(batch?.review?.max_requests)}회 · 무료 전용 · 실패·미확정 시 중단 · 재시도 없음</p><details open><summary>장면별 정확한 요청과 해시</summary><pre>${h(JSON.stringify(batch?.review?.requests,null,2))}</pre></details>`+policy,
       data=>({review_hash:batch.review_hash,policy:data.has('policy')})],
@@ -759,7 +779,12 @@ function productionCommand(action,scene) {
   };
   const [title,fields,body]=commands[action];
   modal(title,fields,title,async data=>{
-    await api(detailApi(project)+'/'+action,body(data));
+    try {
+      await api(detailApi(project)+'/'+action,body(data));
+    } catch (error) {
+      if (action==='production-policy-run') await route();
+      throw error;
+    }
     return {message:'제작 상태를 갱신했습니다.'};
   });
 }

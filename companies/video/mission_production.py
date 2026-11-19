@@ -446,10 +446,12 @@ def production_status(workflow,project):
     result['source_assessment']=source_status(manager,plan,workflow.store.root/'production_source_library',result['clips'])
     result['timeline']=timeline_status(manager,plan,project['representative']['constraints'],clips,result['voices'])
     result['voice_batch']=batch_status(manager,plan,result['voices'])
+    from production_operating import policy_status
+    result['owner_policy']=policy_status(manager,plan,result)
     return result
 
 
-def prepare_manager_request(manager,jid,body):
+def prepare_manager_request(manager,jid,body,*,operating_policy_hash=None):
     exact(body,('free','quota','docs'))
     require(all(body[k] is True for k in body),'current_docs_and_quota_confirmation_required')
     key,independent=production_keys()
@@ -461,12 +463,18 @@ def prepare_manager_request(manager,jid,body):
     current=manager.load(jid)
     require(not current['grants'] and not current['real_ai']['attempts'],'consent_replay')
     manager.verify_project_key(jid,api_key=key,project_api_key=independent,project=MISSION_ACCOUNT,
-        free_tier_confirmed=True,billing_disabled=True,quota_available=True,official_docs_reviewed=True)
+        free_tier_confirmed=True,billing_disabled=True,quota_available=True,official_docs_reviewed=True,
+        operating_policy_hash=operating_policy_hash)
     return manager.prepare_consent(jid)
 
 
 def production_action(workflow,pid,action,body):
     """Explicit owner operations. The representative project remains bound under its lock."""
+    if action=='production-policy-revoke':
+        from production_operating import policy_store
+        exact(body,())
+        manager=production_manager(workflow,workflow.store.load(pid))
+        return policy_store(manager,approved_manager_result(manager)).revoke()
     with workflow.store.lock(pid):
         project=workflow.store.load(pid)
         manager=production_manager(workflow,project)
@@ -486,6 +494,13 @@ def production_action(workflow,pid,action,body):
             (manager.root/'inbox').mkdir(mode=0o700,exist_ok=True)
             return result
         result=approved_manager_result(manager)
+        from production_operating import policy_action, policy_store
+        if action.startswith('production-policy-'):
+            return policy_action(workflow,project,manager,result,action,body)
+        if action.startswith(('production-batch-','production-voice-')) or action in (
+            'production-source-prepare','production-source-consent','production-source-run',
+            'production-timeline-prepare','production-timeline-consent','production-timeline-run'):
+            require(not policy_store(manager,result).root.exists(),'owner_policy_manages_execution')
         if action.startswith('production-batch-'):
             from production_voice_batch import batch_action
             return batch_action(manager,result,action,body)

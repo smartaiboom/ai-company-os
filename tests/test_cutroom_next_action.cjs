@@ -52,7 +52,10 @@ hasAction(ui.productionNext({...planned,render_ready:true}),'production-render')
 assert.match(ui.productionNext({...planned,render_attempt:'failed'}).message,/합성 실패/);
 
 const batchReady = {...planned,key_ready:true,voice_batch:{status:'available',scenes:['scene-2','scene-3']}};
-hasAction(ui.productionNext(batchReady),'production-batch-prepare');
+const offer={status:'available',proposal:{units:[{id:'voice:scene-2'}]}};
+hasAction(ui.productionNext({...batchReady,owner_policy:offer}),'production-policy-approve');
+hasAction(ui.productionNext({...batchReady,owner_policy:{status:'active',expires_at:'future',can_run:true}}),'production-policy-run');
+assert.doesNotMatch(source,/name="\$\{name\}" type="number" min="1" max="1000000000"/);
 hasAction(ui.productionNext({...batchReady,voice_batch:{status:'prepared',review:{}}}),'production-batch-consent');
 hasAction(ui.productionNext({...batchReady,voice_batch:{status:'approved',review:{max_requests:2}}},'batch'),'production-batch-run',true);
 const timed = {...planned,timeline:{status:'unprepared'}};
@@ -81,13 +84,21 @@ if (process.argv[2]) {
   if (live.autonomous_production?.status==='waiting_assets') {
     const work = ui.nextWork(live,controlSource);
     if (live.autonomous_production.voice_batch?.status==='available') {
-      hasAction(work,'production-batch-prepare');
-      hasAction(ui.nextWork(live,controlSource,'listen-scene-1'),'production-listen');
+      if (!live.autonomous_production.voices['scene-1'].listening) {
+        hasAction(ui.nextWork(live,controlSource,'listen-scene-1'),'production-listen');
+      } else {
+        assert.match(page,/대표 청취 의견/);
+      }
       assert.equal(live.autonomous_production.voices['scene-1'].duration_seconds,3.68);
     } else {
       hasAction(work,'production-voice-prepare');
     }
-    hasAction(ui.nextWork(live,controlSource,'sources'),'production-source-prepare');
+    if (live.autonomous_production.owner_policy?.status==='available') {
+      hasAction(work,'production-policy-approve');
+      assert.match(page,/개인 운영 설정/);
+    } else {
+      hasAction(ui.nextWork(live,controlSource,'sources'),'production-source-prepare');
+    }
     assert.match(page,/관리자 제작 계획 원문/);
   } else {
     hasAction(ui.nextWork(live,controlSource),'production-plan-prepare',true);

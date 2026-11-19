@@ -21,6 +21,7 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-policy-approve','production-policy-run','production-policy-revoke',
                       'production-listen','production-timeline-prepare','production-timeline-consent',
                       'production-timeline-run','production-timeline-approve',
                       'production-batch-prepare','production-batch-consent','production-batch-run',
@@ -28,6 +29,13 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'owner_policy_required': '이 프로젝트에 적용할 개인 운영 정책을 검토하고 승인하세요.',
+    'owner_policy_expired': '개인 운영 정책의 유효 시간이 지났습니다.',
+    'owner_policy_revoked': '대표가 운영 정책을 철회했습니다.',
+    'owner_policy_key_changed': '현재 제작 키가 승인한 운영 정책의 키와 일치하지 않습니다.',
+    'owner_policy_scope_changed': '검토한 프로젝트·요청 범위와 현재 준비 상태가 일치하지 않습니다.',
+    'owner_policy_unresolved_attempt': '실패했거나 미확정인 요청이 있습니다. 후속 외부 호출과 자동 재시도를 중단했습니다.',
+    'owner_policy_manages_execution': '이 제작의 외부 요청은 개인 운영 정책에 연결되어 있습니다.',
     'timeline_proposal_mismatch': '검토한 시간 조정안 버전과 해시를 확인하세요.',
     'invalid_measured_timeline': '제안된 장면·자막 시간이 실측 음성 또는 소스 범위와 일치하지 않습니다.',
     'voice_batch_scene_reserved': '이 장면은 일괄 승인 범위에 속합니다.',
@@ -762,7 +770,12 @@ class Studio:
                 changes='관리자 제작 계획·승인 대본과 로컬 인수 소스 결합',imported=True)
         elif name in PRODUCTION_ACTIONS:
             from mission_production import production_action
-            production_action(self.workflow,pid,name,body)
+            ready=production_action(self.workflow,pid,name,body)
+            if name=='production-policy-run' and ready is True:
+                p=self.project(key,pid)
+                plan=p['representative']['plan_versions'][-1]
+                self.workflow.produce(pid,version=plan['version'],sha256=plan['sha256'],
+                    changes='개인 운영 정책에 따른 기존 승인 소스·대본·음성 로컬 합성',imported=True)
         elif name == 'mission-preview':
             exact(body, ('version', 'sha256', 'audio_mode'))
             require(body['audio_mode'] in ('none','local_speech'),'invalid_request')

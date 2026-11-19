@@ -139,13 +139,24 @@ class TTSExecution:
         GeminiTTSAdapter.request(raw, key)  # Local encoding validation only.
         require(isinstance(project_key, str) and hmac.compare_digest(key.encode(), project_key.encode()), 'tts_project_key_mismatch')
         require(key not in canonical_bytes(evidence).decode(), 'tts_secret_in_evidence')
+        method=evidence.get('method')
+        delegated=method=='owner_operating_policy_v1'
         require(evidence.get('project') == scope['project'] and evidence.get('model') == job['model']
-                and evidence.get('method') == 'owner_aistudio_review_not_independent_verification'
+                and method in ('owner_aistudio_review_not_independent_verification','owner_operating_policy_v1')
                 and evidence.get('tier') == 'Free' and evidence.get('billing') == 'disabled'
                 and evidence.get('model_access') == 'available' and evidence.get('region_supported') is True
                 and evidence.get('paid_fallback') is False, 'tts_account_evidence_required')
-        for field, minimum in [('remaining_requests', 1), ('remaining_input_tokens', 2048), ('remaining_output_tokens', 1024)]:
-            require(type(evidence.get(field)) is int and evidence[field] >= minimum, 'tts_quota_evidence_required')
+        if delegated:
+            require(self.scope_id=='mission_production_scene_tts_once_v1'
+                    and evidence.get('provider_quota')=='unknown' and evidence.get('provider_billing')=='unknown'
+                    and evidence.get('internal_limit')==dict(requests=1,input_tokens=2048,output_tokens=1024)
+                    and evidence.get('delegated_payload_sha256')==scope['payload_sha256']
+                    and isinstance(evidence.get('policy_sha256'),str)
+                    and re.fullmatch('[a-f0-9]{64}',evidence['policy_sha256']),
+                    'tts_account_evidence_required')
+        else:
+            for field, minimum in [('remaining_requests', 1), ('remaining_input_tokens', 2048), ('remaining_output_tokens', 1024)]:
+                require(type(evidence.get(field)) is int and evidence[field] >= minimum, 'tts_quota_evidence_required')
         require(fresh(evidence.get('checked_at'), evidence.get('expires_at')), 'tts_account_expired')
         require(isinstance(evidence.get('evidence_sha256'), str) and re.fullmatch('[a-f0-9]{64}', evidence['evidence_sha256'])
                 and evidence.get('source_url') == 'https://aistudio.google.com/'

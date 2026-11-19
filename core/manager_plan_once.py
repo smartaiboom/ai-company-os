@@ -93,7 +93,7 @@ class ManagerPlanAcceptanceStore(OneCallAcceptanceStore):
         return result
 
     def verify_project_key(self,project_id,*,api_key,project_api_key,project,free_tier_confirmed=False,
-                           billing_disabled=False,quota_available=False,official_docs_reviewed=False):
+                           billing_disabled=False,quota_available=False,official_docs_reviewed=False,operating_policy_hash=None):
         require(quota_available is True and official_docs_reviewed is True,'current_docs_and_quota_confirmation_required')
         # Parent requires local key comparison and signed Free/Billing evidence; never calls an API.
         super().verify_project_key(project_id,api_key=api_key,project_api_key=project_api_key,project=project,
@@ -103,6 +103,8 @@ class ManagerPlanAcceptanceStore(OneCallAcceptanceStore):
             proof=dict(scope_hash=self.acceptance_scope_hash,project_id=project_id,
                        verification_hash=digest(p['acceptance']['verification']),quota_available=True,
                        official_docs_reviewed=True,method='owner_attestation_not_independent_verification',checked_at=now())
+            if operating_policy_hash is not None:
+                proof.update(operating_policy_hash=operating_policy_hash,provider_quota='unknown',provider_billing='unknown')
             p['acceptance']['account_evidence']=dict(record=proof,signature=self._sign(proof))
             return self._event(p,'manager_account_attested')
 

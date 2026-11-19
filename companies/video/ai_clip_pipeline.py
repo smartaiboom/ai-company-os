@@ -95,9 +95,15 @@ def validate_plan(plan):
         require(len(fixed)==len(plan['scenes']) and not plan['allow_repeat'],'invalid_approved_timeline')
         cursor=0
         for cue,scene in zip(fixed,plan['scenes']):
-            exact(cue,('start','end','caption'))
-            require(type(cue['start']) is int and type(cue['end']) is int and cue['start']==cursor
+            exact(cue,('start','end','caption',*(['caption_seconds'] if 'caption_seconds' in cue else [])))
+            require(all(type(cue[key]) in (int,float) and math.isfinite(cue[key])
+                        and abs(cue[key]*24-round(cue[key]*24))<1e-8 for key in ('start','end'))
+                    and cue['start']==cursor
                     and cue['end']>cursor and len(scene['utterances'])==1,'invalid_approved_timeline')
+            if 'caption_seconds' in cue:
+                visibility=cue['caption_seconds']
+                require(type(visibility) in (int,float) and 0<visibility<=cue['end']-cue['start']+1e-9,
+                        'invalid_approved_timeline')
             safe_text(cue['caption'],160)
             require(not any(c in cue['caption'] for c in '{}\\'),'caption_markup_forbidden')
             cursor=cue['end']
@@ -249,9 +255,17 @@ class ClipJob:
             p['clips'].append(record); self.save(p)
             return record
 
-    def render(self, synthesizer=None):
+    def render(self, synthesizer=None, *, approved_edit=None):
         with self.lock():
             p = self.load(); validate_plan(p['plan'])
+            render_plan=p['plan']
+            if approved_edit is not None:
+                require('approved_timeline' in p['plan'] and set(approved_edit)=={'approved_timeline','total_seconds'},
+                        'invalid_approved_timeline')
+                render_plan={**p['plan'],**approved_edit}
+                validate_plan(render_plan)
+                require([c['caption'] for c in render_plan['approved_timeline']]==
+                        [c['caption'] for c in p['plan']['approved_timeline']],'invalid_approved_timeline')
             require(not p['active_operation'] and not p['attempts'] and p['output'] is None, 'render_not_replayable')
             require(len(p['clips']) == len(p['plan']['scenes']), 'pending_external_clip')
             for clip in p['clips']:
@@ -260,10 +274,10 @@ class ClipJob:
                         and not (self.root/'assets'/clip['file']).is_symlink(), 'invalid_asset_path')
                 require(file_hash(self.root/'assets'/clip['file']) == clip['sha256'], 'clip_changed')
                 if p['plan']['fit'] == 'crop': require(clip['source']['watermark'] == 'absent', 'watermark_crop_forbidden')
-            attempt = dict(id=uuid.uuid4().hex, status='reserved', at=now(), plan_hash=digest(p['plan']))
+            attempt = dict(id=uuid.uuid4().hex, status='reserved', at=now(), plan_hash=digest(render_plan))
             p['attempts'].append(attempt); p['active_operation'] = attempt['id']; self.save(p)
             try:
-                result = self._render(p, synthesizer or MeloLocal())
+                result = self._render({**p,'plan':render_plan}, synthesizer or MeloLocal())
                 attempt['status'] = 'completed'; p['active_operation'] = None
                 p['output'] = result
                 p['status'] = ('mixed_technical_preview' if result['mixed_source'] else
@@ -289,7 +303,7 @@ class ClipJob:
         require(all(type(d) in (int, float) and math.isfinite(d) and d > 0 for d in durations), 'invalid_speech_duration')
         if fixed is not None:
             allocated=[cue['end']-cue['start'] for cue in fixed]
-            require(all(d<=length for d,length in zip(durations,allocated)), 'narration_exceeds_scene')
+            require(all(d<=length+1e-9 for d,length in zip(durations,allocated)), 'narration_exceeds_scene')
         else:
             minimum = []; index = 0
             for scene in plan['scenes']:
@@ -310,7 +324,9 @@ class ClipJob:
         with wave.open(str(track), 'wb') as out:
             out.setnchannels(1); out.setsampwidth(2); out.setframerate(44100)
             for scene_index,(scene, length) in enumerate(zip(plan['scenes'], allocated)):
-                start = offset; scene_samples = 0
+                start = offset if fixed is None else fixed[scene_index]['start']
+                end = start+length if fixed is None else fixed[scene_index]['end']
+                scene_samples = 0
                 for number, text in enumerate(scene['utterances']):
                     item = speech['utterances'][index]; index += 1
                     voice_file = audio_folder/item['file']
@@ -324,18 +340,20 @@ class ClipJob:
                     out.writeframesraw(pcm); scene_samples += sample_count
                     wrapped = lines(text, 24, 100) if fixed is None else fixed[scene_index]['caption'].splitlines()
                     chunks = ['\n'.join(wrapped[i:i+2]) for i in range(0,len(wrapped),2)]
+                    display_seconds=measured if fixed is None else fixed[scene_index].get('caption_seconds',measured)
+                    require(display_seconds+1e-9>=measured,'invalid_approved_timeline')
                     weight = sum(len(t.replace('\n','')) for t in chunks); elapsed = 0
                     for chunk in chunks:
-                        duration = measured*len(chunk.replace('\n',''))/weight
+                        duration = display_seconds*len(chunk.replace('\n',''))/weight
                         cues.append(dict(start=voice_start+elapsed, end=voice_start+elapsed+duration, text=chunk))
                         elapsed += duration
                     if number < len(scene['utterances'])-1:
                         out.writeframesraw(b'\0\0'*7938); scene_samples += 7938
-                target = round((start+length)*44100)-round(start*44100)
+                target = round(end*44100)-round(start*44100)
                 require(scene_samples <= target, 'narration_exceeds_scene')
                 out.writeframesraw(b'\0\0'*(target-scene_samples))
                 clip = clip_map[scene['id']]
-                timeline.append(dict(scene_id=scene['id'], start=start, end=start+length, width=720, height=1280,
+                timeline.append(dict(scene_id=scene['id'], start=start, end=end, width=720, height=1280,
                     speech_seconds=scene_samples/44100, clip_sha256=clip['sha256'], fit=plan['fit'],
                     repeat_count=max(0, math.ceil(length/clip['media']['duration'])-1)))
                 offset += length

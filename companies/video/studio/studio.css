@@ -788,6 +788,17 @@ dialog {
   width: min(520px,calc(100vw - 26px));
   color: var(--ink);
   max-height: 90vh;
+  overflow: auto;
+}
+
+dialog form {
+  grid-template-columns: minmax(0,1fr);
+  overflow-wrap: anywhere;
+}
+
+dialog pre {
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
 }
 
 dialog::backdrop {
@@ -848,6 +859,7 @@ textarea {
 
 .dialog-actions {
   justify-content: flex-end;
+  flex-wrap: wrap;
 }
 
 @media(max-width:1000px) {

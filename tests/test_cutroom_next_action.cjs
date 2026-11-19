@@ -51,6 +51,14 @@ hasAction(ui.productionNext({...voiceApproved,tts_enabled:true}),'production-voi
 hasAction(ui.productionNext({...planned,render_ready:true}),'production-render');
 assert.match(ui.productionNext({...planned,render_attempt:'failed'}).message,/합성 실패/);
 
+const batchReady = {...planned,key_ready:true,voice_batch:{status:'available',scenes:['scene-2','scene-3']}};
+hasAction(ui.productionNext(batchReady),'production-batch-prepare');
+hasAction(ui.productionNext({...batchReady,voice_batch:{status:'prepared',review:{}}}),'production-batch-consent');
+hasAction(ui.productionNext({...batchReady,voice_batch:{status:'approved',review:{max_requests:2}}},'batch'),'production-batch-run',true);
+const timed = {...planned,timeline:{status:'unprepared'}};
+hasAction(ui.productionNext(timed,'timeline'),'production-timeline-prepare');
+hasAction(ui.productionNext({...timed,timeline:{status:'review'}},'timeline'),'production-timeline-approve');
+
 const review = ui.nextWork({stage:'awaiting_video_approval',flow:{...flow,
   video_versions:[{version:1,render_receipt:{visual_scope:'local_procedural_cards_no_game_footage'}}]}},controlSource);
 assert.match(review.buttons,/video:request_revision/);
@@ -72,7 +80,13 @@ if (process.argv[2]) {
   assert.ok(page.indexOf('id="production-detail"') < page.indexOf('id="video-panel"'));
   if (live.autonomous_production?.status==='waiting_assets') {
     const work = ui.nextWork(live,controlSource);
-    hasAction(work,'production-voice-prepare');
+    if (live.autonomous_production.voice_batch?.status==='available') {
+      hasAction(work,'production-batch-prepare');
+      hasAction(ui.nextWork(live,controlSource,'listen-scene-1'),'production-listen');
+      assert.equal(live.autonomous_production.voices['scene-1'].duration_seconds,3.68);
+    } else {
+      hasAction(work,'production-voice-prepare');
+    }
     hasAction(ui.nextWork(live,controlSource,'sources'),'production-source-prepare');
     assert.match(page,/관리자 제작 계획 원문/);
   } else {

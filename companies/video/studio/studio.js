@@ -246,6 +246,7 @@ function productionPanel(p) {
   const a=p.autonomous_production;
   if (!a) return '';
   const source=a.source_assessment;
+  const timing=a.timeline;
   const routeLabels={local_library:'로컬 자산 보관함', official_direct_media:'공식 직접 제공 자료',
     public_metadata_search:'공개 메타데이터 검색 제안', own_capture:'권리 확인 자체 캡처', hold:'자산 대기'};
   return `<section class="panel" id="production-detail"><h2>제작 상세</h2>
@@ -262,9 +263,14 @@ function productionPanel(p) {
           <p>영상 · ${a.clips.includes(s.scene_id)?'인수 완료':'소스 확인 대기'}
           ${voice?.attempted?` · 음성 시도 · ${h(({audio_validated:'파일 검사 완료',failed_or_uncertain:'실패 또는 미확정',
             receipt_invalid:'음성 기록 검증 실패'})[voice.status]||'결과 미확정')} · 재시도 없음`:''}</p>
+          ${voice?.listening?`<p>대표 청취 의견 · ${h(voice.listening.opinion)} · 이 장면에 한함</p>`:''}
           ${voice?.audio_url?`<p>${h(voice.duration_seconds)}초 / 승인 ${h(voice.approved_seconds)}초 · ${voice.fits_timeline?'길이 조건 충족 · 청취 평가 필요':'승인 길이 초과 · 합성 차단'}</p>
             <audio controls preload="none" src="${h(voice.audio_url)}" aria-label="${h(s.scene_id)} 음성 검토"></audio>`:''}</article>`;
       }).join('')}`:''}
+    ${timing?.proposal?`<section class="subpanel"><h3>실측 시간 조정안 v${h(timing.proposal.version)}</h3>
+      <p>${timing.status==='approved'?'대표 승인 완료':timing.status==='hold'?'관리자 보류':'대표 승인 대기'}</p>
+      <p>${h(timing.proposal.decision.rationale)}</p><p>${h(timing.proposal.decision.quality_checks)}</p>
+      <p class="mono">${h(timing.proposal.sha256)}</p></section>`:''}
     ${source?`<section class="subpanel"><h3>자산 확보 업무</h3>
       <p>권리 정보가 등록된 로컬 자산 ${h(source.available_count??0)}개 · 신규 검색, 다운로드 및 생성은 승인 범위에 포함되지 않습니다.</p>
       ${source.result?`<p>직원 확보 제안 · 직접 시청 및 사용권 확인 필요</p>
@@ -459,7 +465,7 @@ function productionNext(a,selected) {
     }
     if (a.plan.voice.tool!=='gemini_scene') continue;
     const voice=a.voices[scene.scene_id];
-    if (voice?.attempted) continue;
+    if (voice?.attempted || a.voice_batch?.review?.requests?.some(item=>item.scene_id===scene.scene_id)) continue;
     if (!voice) voices.push(choose('production-voice-prepare','장면 음성 준비',`${scene.scene_id} · 승인 원문과 관리자 발화 지시로 요청을 준비합니다.`,key,scene.scene_id));
     else if (!voice.review_hash || expired(voice.expires_at)) voices.push(choose('production-voice-consent','장면 음성 동의',
       `${scene.scene_id} · 장면별 별도 승인`,'유효한 서명 제안이 필요합니다. 현재 요청은 실행할 수 없습니다.',scene.scene_id));
@@ -484,9 +490,30 @@ function productionNext(a,selected) {
   } else if (sources?.status==='stopped' || sources?.status==='blocked') {
     sourceWork={message:sources.reason || '자산 확보 요청이 실패했거나 결과가 미확정입니다. 자동 재시도는 없습니다.',buttons:refresh};
   }
+  const batch=a.voice_batch, timing=a.timeline;
+  let batchWork, timelineWork;
+  if (batch?.status==='available') batchWork=choose('production-batch-prepare','남은 장면 음성 일괄 준비',
+    `${batch.scenes.join(', ')} · 기존 완료 음성 보존 · 현재 무료 조건과 전체 잔량 확인`,key);
+  if (batch?.status==='prepared') batchWork=choose('production-batch-consent','남은 장면 음성 일괄 동의',
+    '장면별 정확한 요청의 묶음을 한 번 검토합니다.',key || (expired(batch.review.expires_at)?'일괄 검토 유효 시간이 지났습니다.':''));
+  if (batch?.status==='approved') batchWork=choose('production-batch-run','남은 장면 음성 일괄 실행',
+    `승인된 최대 ${batch.review.max_requests}회 · 실패 또는 미확정 시 중단`,key ||
+      (expired(batch.review.expires_at)?'일괄 동의가 만료되었습니다.':!a.tts_enabled?'Gemini 장면 음성 실행 설정이 필요합니다.':''));
+  if (batch?.status==='stopped') batchWork={message:'일괄 음성 작업이 중단됐거나 결과가 미확정입니다. 자동 재시도는 없습니다.',buttons:refresh};
+  if (timing?.status==='unprepared') timelineWork=choose('production-timeline-prepare','실측 시간 조정안 준비','실측 발화와 기존 승인 길이, 소스 길이와 자막 노출 조건을 묶어 보완 판단을 준비합니다.',key);
+  if (timing?.status==='prepared') timelineWork=choose('production-timeline-consent','시간 조정안 전송 동의','Gemini 텍스트 1회에 보낼 대본·실측 자료를 확인합니다.',key);
+  if (timing?.status==='authorized') timelineWork=choose('production-timeline-run','관리자 시간 조정 판단 실행','서명한 텍스트 요청 1회 · 음성 재합성 없음',key ||
+      (expired(timing.expires_at)?'전송 동의가 만료되었습니다.':!a.manager_enabled?'Gemini 무료 실행 설정이 필요합니다.':''));
+  if (timing?.status==='review') timelineWork=choose('production-timeline-approve','대표 시간 조정안 검토·승인','시간 조정만 별도 승인합니다. 기존 대본과 관리자 계획은 유지됩니다.');
+  if (timing?.status==='hold' || timing?.status==='stopped') timelineWork={message:'시간 조정 관리자가 보류했거나 요청 결과가 미확정입니다. 상세에서 결과를 확인하세요.',buttons:refresh};
   const options=[
+    ...(batchWork?[{...batchWork,choice:'batch',label:'남은 장면 음성 일괄'}]:[]),
+    ...(timelineWork?[{...timelineWork,choice:'timeline',label:'실측 시간 조정'}]:[]),
     ...voices.map(voice=>({...voice,choice:`voice-${voice.scene}`,label:`장면 음성 · ${voice.scene}`})),
     ...(sourceWork?[{...sourceWork,choice:'sources',label:'자산 확보 업무'}]:[]),
+    ...Object.entries(a.voices).filter(([,voice])=>voice.audio_sha256 && !voice.listening)
+      .map(([scene])=>({...choose('production-listen','청취 의견 저장',`${scene} 음성에 대한 대표 의견을 기록합니다.`,'',scene),
+        choice:`listen-${scene}`,label:`청취 의견 · ${scene}`})),
     ...clips.map(clip=>({...clip,choice:`clip-${clip.scene}`,label:`로컬 클립 인수 · ${clip.scene}`}))
   ];
   if (options.length) {
@@ -552,7 +579,7 @@ function showDetail() {
   main.innerHTML = projectPage(detail, selectedVersions);
   const next=main.querySelector('#next-work');
   const work=nextWork(detail,main,selectedWork);
-  const overrun=Object.entries(detail.autonomous_production?.voices||{}).filter(([,voice])=>voice.fits_timeline===false);
+  const overrun=Object.entries(detail.autonomous_production?.timeline?.status==='approved'?{}:detail.autonomous_production?.voices||{}).filter(([,voice])=>voice.fits_timeline===false);
   next.innerHTML=`<h2 id="next-heading">현재 상태 / 다음 작업</h2><p><strong>${h(statuses[detail.stage][0])}</strong> · ${h(work.message)}</p>
     ${work.options?.length>1?`<label>제작 작업 선택 <select data-work-choice>${work.options.map(option=>
       `<option value="${h(option.choice)}" ${option.choice===work.choice?'selected':''}>${h(option.label)}</option>`).join('')}</select></label>`:''}
@@ -667,7 +694,38 @@ function productionCommand(action,scene) {
   const source=a.source_assessment;
   const seconds=a.scope.storyboard.find(s=>s.scene_id===scene);
   const window=seconds?seconds.end-seconds.start:null;
+  const batch=a.voice_batch, timing=a.timeline;
+  const proposal=timing?.proposal;
+  const adjustments=proposal?.decision.scenes.map((item,index)=>{
+    const before=timing.measurements[index];
+    return `<li>${h(item.scene_id)} · ${h(before.original_frames/24)}초 → ${h((item.frames/24).toFixed(3))}초 · 자막 ${h((item.caption_frames/24).toFixed(3))}초</li>`;
+  }).join('');
+  const total=proposal?.decision.scenes.reduce((sum,item)=>sum+item.frames,0)/24;
+  const quotaFields=[['remaining_requests','잔여 요청'],['remaining_input_tokens','잔여 입력 토큰'],['remaining_output_tokens','잔여 출력 토큰']];
   const commands={
+    'production-listen':['청취 의견 저장',`<p>${h(scene)}의 검증된 음성에 연결합니다.</p><label>대표 청취 의견<textarea name="opinion" required maxlength="500"></textarea></label>`,
+      data=>({scene,audio_sha256:a.voices[scene].audio_sha256,opinion:data.get('opinion')})],
+    'production-batch-prepare':['남은 장면 음성 일괄 준비',
+      `<p>${h(batch?.scenes?.join(', '))}의 요청만 준비합니다. 기존 모델·프로젝트의 확인 기록을 사용합니다.</p>`+free+quota+
+      quotaFields.map(([name,label])=>`<label>${label}<input name="${name}" type="number" min="1" max="1000000000" required></label>`).join(''),
+      data=>({free:data.has('free'),quota:data.has('quota'),...Object.fromEntries(quotaFields.map(([name])=>[name,Number(data.get(name))]))})],
+    'production-batch-consent':['남은 장면 음성 일괄 동의',
+      `<p>최대 ${h(batch?.review?.max_requests)}회 · 무료 전용 · 실패·미확정 시 중단 · 재시도 없음</p><details open><summary>장면별 정확한 요청과 해시</summary><pre>${h(JSON.stringify(batch?.review?.requests,null,2))}</pre></details>`+policy,
+      data=>({review_hash:batch.review_hash,policy:data.has('policy')})],
+    'production-batch-run':['남은 장면 음성 일괄 실행',
+      `<p>서명된 장면 요청 최대 ${h(batch?.review?.max_requests)}회를 순서대로 실행합니다.</p>`,()=>({})],
+    'production-timeline-prepare':['실측 시간 조정안 준비',free+quota+check('docs','현재 공급자 문서와 적용 조건을 확인했습니다.'),
+      data=>({free:data.has('free'),quota:data.has('quota'),docs:data.has('docs')})],
+    'production-timeline-consent':['시간 조정안 전송 동의',
+      `<p>Gemini 텍스트 최대 1회 · 무료 전용 · WAV 파일 전송 없음</p><details><summary>전송 입력</summary><pre>${h(JSON.stringify(timing?.scope,null,2))}</pre></details>`+free+policy,
+      data=>({review_hash:timing.review_hash,free:data.has('free'),policy:data.has('policy')})],
+    'production-timeline-run':['관리자 시간 조정 판단 실행','<p>서명된 관리자 보완 요청 한 번을 실행합니다. 원본 음성과 장면 순서를 유지합니다.</p>',()=>({})],
+    'production-timeline-approve':['대표 시간 조정안 검토·승인',
+      `<p>기존 ${h((timing?.scope?.approved_total_frames||0)/24)}초 → 제안 ${h(total.toFixed(3))}초</p><ul>${adjustments||''}</ul>
+        <p>${h(proposal?.decision.rationale)}</p><p>${h(proposal?.decision.quality_checks)}</p>
+        <p class="mono">v${h(proposal?.version)} · ${h(proposal?.sha256)}</p>`+
+      check('confirmed','이 시간 조정안을 승인합니다. 대본·음성은 그대로 유지합니다.'),
+      data=>({version:proposal.version,sha256:proposal.sha256,confirmed:data.has('confirmed')})],
     'production-plan-prepare':['제작 계획 준비',free+quota+check('docs','현재 공급자 문서와 적용 조건을 확인했습니다.'),
       data=>({free:data.has('free'),quota:data.has('quota'),docs:data.has('docs')})],
     'production-plan-consent':['제작 계획 외부 전송 동의',

@@ -21,10 +21,16 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-listen','production-timeline-prepare','production-timeline-consent',
+                      'production-timeline-run','production-timeline-approve',
+                      'production-batch-prepare','production-batch-consent','production-batch-run',
                       'production-source-prepare','production-source-consent','production-source-run','production-source-import',
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 ERRORS = {
+    'timeline_proposal_mismatch': '검토한 시간 조정안 버전과 해시를 확인하세요.',
+    'invalid_measured_timeline': '제안된 장면·자막 시간이 실측 음성 또는 소스 범위와 일치하지 않습니다.',
+    'voice_batch_scene_reserved': '이 장면은 일괄 승인 범위에 속합니다.',
     'production_source_asset_changed': '등록 당시의 권리 기록 또는 파일 해시와 일치하지 않습니다.',
     'source_library_selection_invalid': '승인된 자산 확보 결과의 장면과 자산 ID를 확인하세요.',
     'technical_preview_not_approvable': '무음 카드 기술 시안은 영상 승인 대상이 아닙니다. 영상 수정 요청으로 제작을 이어가세요.',

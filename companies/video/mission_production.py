@@ -293,14 +293,20 @@ def imported_preview_inputs(workflow,project):
     require(all(c['source']['provenance']['kind']=='operator_provided_clip' for c in state['clips']),
             'invalid_provenance')
     tool=result['voice']['tool']
+    timeline_hash=None
     if tool=='gemini_scene':
+        from measured_timeline import approved_clip_timeline
+        spec,timeline_hash=approved_clip_timeline(manager,result,project['representative']['constraints'],state['clips'],spec)
         speech=SceneSpeechReceipts(manager,result)
-        for scene in manager.contract['input']['storyboard']:
-            require(speech.duration(scene['scene_id'])<=scene['end']-scene['start'],'narration_exceeds_scene')
+        for scene,cue in zip(manager.contract['input']['storyboard'],spec['approved_timeline'],strict=True):
+            require(speech.duration(scene['scene_id'])<=cue['end']-cue['start']+1e-9,'narration_exceeds_scene')
     else:
         speech=MeloLocal()
         require(tool=='melo_local' and speech.available(),'production_voice_unavailable')
-    return job,speech,dict(plan=spec,clips=[c['sha256'] for c in state['clips']],direction_hash=digest(result))
+    handoff=dict(plan=spec,clips=[c['sha256'] for c in state['clips']],direction_hash=digest(result))
+    if timeline_hash:
+        handoff['timeline_sha256']=timeline_hash
+    return job,speech,handoff
 
 
 def render_imported(job,speech,spec,folder):
@@ -309,7 +315,8 @@ def render_imported(job,speech,spec,folder):
     from local_artifacts import run_command
     from local_melo_tts import file_hash
     from production_video import portrait_font
-    media=job.render(synthesizer=speech)
+    edit={key:spec['plan'][key] for key in ('approved_timeline','total_seconds')} if spec.get('timeline_sha256') else None
+    media=job.render(synthesizer=speech,approved_edit=edit)
     require(media['audio'] and media['decoded'] and not media['synthetic_test_fixture'],
             'production_media_unverified')
     shutil.copyfile(job.root/media['file'],folder/'video.mp4')
@@ -345,6 +352,8 @@ def render_imported(job,speech,spec,folder):
         source_licenses=[dict(file=name,sha256=file_hash(folder/name),creator='로컬 제작 도구',
                              license='소스 사용권은 제공자 진술 · 게시 미승인')
                          for name in ('production-evidence.json','captions.srt')])
+    if spec.get('timeline_sha256'):
+        receipt['timeline_sha256']=spec['timeline_sha256']
     (folder/'receipt.json').write_text(json.dumps(receipt,ensure_ascii=False))
     return receipt
 
@@ -386,6 +395,7 @@ def production_status(workflow,project):
     plan=approved_manager_result(manager)
     result.update(status='waiting_assets',plan=plan,inbox=str(manager.root/'inbox'))
     if plan['voice']['tool']=='gemini_scene':
+        from measured_timeline import listening_note
         speech=SceneSpeechReceipts(manager,plan)
         for scene in plan['scenes']:
             voice=voice_scene(manager,plan,scene['scene_id'])
@@ -402,19 +412,24 @@ def production_status(workflow,project):
                 review=voice._verified('review.json')
                 info.update(review_hash=digest(review),expires_at=review['expires_at'])
             if (voice.root/'result.json').is_file():
-                info['status']=parse(voice._read('result.json').decode()).get('status')
+                voice_result=parse(voice._read('result.json').decode())
+                info['status']=voice_result.get('status')
                 if info['status']=='audio_validated':
                     try:
                         measured=speech.duration(scene['scene_id'])
                         info.update(duration_seconds=round(measured,3),fits_timeline=measured<=duration,
+                                    audio_sha256=voice_result['audio_sha256'],
+                                    listening=listening_note(manager,plan,scene['scene_id']),
                                     audio_url=f'/media/workspace/{project["id"]}/production-voice/{scene["scene_id"]}')
                     except (CompanyError,FileNotFoundError):
                         info['status']='receipt_invalid'
             result['voices'][scene['scene_id']]=info
+    clips=[]
     try:
         job,_=clip_job(manager,plan)
         if job.root.exists():
             clip_state=job.load()
+            clips=clip_state['clips']
             result['clips']=[c['scene_id'] for c in clip_state['clips']]
             if not clip_state['attempts']:
                 imported_preview_inputs(workflow,project)
@@ -426,7 +441,11 @@ def production_status(workflow,project):
     except FileNotFoundError:
         result['render_blocker']='pending_external_clip'
     from production_sources import source_status
+    from measured_timeline import timeline_status
+    from production_voice_batch import batch_status
     result['source_assessment']=source_status(manager,plan,workflow.store.root/'production_source_library',result['clips'])
+    result['timeline']=timeline_status(manager,plan,project['representative']['constraints'],clips,result['voices'])
+    result['voice_batch']=batch_status(manager,plan,result['voices'])
     return result
 
 
@@ -467,6 +486,14 @@ def production_action(workflow,pid,action,body):
             (manager.root/'inbox').mkdir(mode=0o700,exist_ok=True)
             return result
         result=approved_manager_result(manager)
+        if action.startswith('production-batch-'):
+            from production_voice_batch import batch_action
+            return batch_action(manager,result,action,body)
+        if action.startswith('production-timeline-') or action=='production-listen':
+            from measured_timeline import run_timeline_action
+            job,_=clip_job(manager,result)
+            clips=job.load()['clips'] if job.root.exists() else []
+            return run_timeline_action(manager,result,project['representative']['constraints'],clips,action,body)
         if action.startswith('production-source-'):
             from production_sources import run_source_action
             return run_source_action(manager,result,workflow.store.root/'production_source_library',action,body)
@@ -476,6 +503,8 @@ def production_action(workflow,pid,action,body):
             return import_operator_clip(manager,result,body['scene'],body['filename'],body['rights'])
         require(isinstance(body,dict) and isinstance(body.get('scene'),str),'production_scene_mismatch')
         voice=voice_scene(manager,result,body['scene'])
+        from production_voice_batch import batch_member
+        require(not batch_member(manager,body['scene']),'voice_batch_scene_reserved')
         key,independent=production_keys()
         if action=='production-voice-prepare':
             exact(body,('scene','evidence','free','quota'))

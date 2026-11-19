@@ -99,3 +99,24 @@ class MissionProductionTests(TestCase):
             recovered = voice_scene(manager,result,'scene-1')
             self.assertEqual(recovered._load()[1], legacy.scope)
             self.assertEqual(recovered.scope['local_max_seconds'], 3)
+
+    def test_measured_manager_keeps_frame_bounds_and_requires_a_distinct_total_choice(self):
+        from measured_timeline import TimelineManager
+
+        with TemporaryDirectory() as temp:
+            worker = TimelineManager(Path(temp),dict(input=dict(approved_total_frames=840,measurements=[
+                dict(scene_id='scene-1',min_frames=89,clip_max_frames=100),
+                dict(scene_id='scene-2',min_frames=300,clip_max_frames=None)])))
+            scenes=[dict(scene_id='scene-1',frames=90,caption_frames=90),
+                    dict(scene_id='scene-2',frames=750,caption_frames=400)]
+            valid=dict(decision='keep_total',rationale='실측 타임라인',quality_checks='자막 검토',scenes=scenes)
+            worker.validate_plan(valid)
+            worker.validate_plan({**valid,'decision':'hold','scenes':[]})
+            worker.validate_plan({**valid,'decision':'change_total',
+                'scenes':[scenes[0],{**scenes[1],'frames':760}]})
+            for result in ({**valid,'decision':'change_total'}, {**valid,'decision':'hold'},
+                           {**valid,'scenes':list(reversed(scenes))},
+                           {**valid,'scenes':[{**scenes[0],'caption_frames':88},scenes[1]]},
+                           {**valid,'scenes':[{**scenes[0],'frames':101},{**scenes[1],'frames':739}]}):
+                with self.assertRaisesRegex(CompanyError,'invalid_measured_timeline'):
+                    worker.validate_plan(result)

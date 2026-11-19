@@ -84,3 +84,29 @@ def voice_staff_quality_context(selection, *, target_segment, video_brief=None):
     if sample and policy.get('video_selection',{}).get('style'):
         sample['direction']['style']=policy['video_selection']['style']
     return dict(voice_policy=policy, next_sample=sample, external_calls=False, cost_limit=0)
+
+
+def approved_portrait_direction(project, plan, storyboard):
+    """Review-only inputs for a future, separately scoped production-direction request."""
+    from autonomous_gemini35 import MODEL
+    from voice_quality import CANDIDATE, scoped_voice_policy
+    flow = project['representative']
+    audience = plan['script']['target_audience']
+    policy = scoped_voice_policy(flow.get('scoped_experiences', {}), audience)
+    return dict(goal=project['goal'], audience=audience, topic=plan['topic'],
+        language=flow['constraints'].get('language'), duration=plan['script']['target_duration'],
+        storyboard=storyboard['shots'], source_observations=[
+            {k:item[k] for k in ('id','title','duration_seconds','view_count','rights','shorts_classification') if k in item}
+            for item in plan.get('research',{}).get('observations',[])],
+        profile=deepcopy(PROFILE),
+        direction='승인 내레이션·장면 타이밍을 유지하고 대상에 맞는 한국어 전달 방식과 장면 연출을 제안한다. '
+                  '기존 사용권 상태를 보존하고, 확보 전에는 자체 시안만 사용한다. 실제 청취·시청은 별도 확인한다.',
+        listening=dict(historical_candidate=deepcopy(CANDIDATE), historical_score=7,
+                       scope='이전 한국어 안내 영상 표본의 대표 평가', current_quality='unassessed',
+                       matched_experience_count=len(policy['evidence_refs'])),
+        external=[
+            dict(kind='제작 방향 텍스트',model=MODEL,proposed_max_calls=1,
+                 data='목표·대상·승인 장면과 내레이션·출처 관측·경험과 도구 한계',enabled=False),
+            dict(kind='장면 음성',model=CANDIDATE['model'],proposed_max_calls=len(storyboard['shots']),
+                 data='승인된 장면별 내레이션과 검토한 음성 지시',enabled=False)],
+        pricing='현재 계정의 무료 적용·잔량·실제 청구 미확인', authorized_external_calls=0)

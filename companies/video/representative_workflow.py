@@ -7,7 +7,7 @@ from urllib.parse import urlsplit
 
 from autonomous_company import CompanyError, Store, digest, exact, now, parse, require, text
 from local_artifacts import run_command
-from production_video import render, validate
+from production_video import PORTRAIT_TOOL, portrait_font, render, validate, validate_portrait
 from quality_feedback import bind_context, select_experiences
 from script_quality import SCRIPT_CONTRACT, validate_script_editor
 
@@ -461,7 +461,26 @@ class RepresentativeVideoWorkflow:
                 'representative_plan_approval_required')
         return plan
 
-    def produce(self, project_id, *, version, sha256, changes, palette=None, cameras=None):
+    def mission_production_spec(self, flow, version, sha256, audio_mode):
+        plan = self._approved_plan(flow, version, sha256)
+        require(flow.get('mission_one_job') and plan['render_spec'] is None
+                and flow['constraints'].get('aspect','9:16')=='9:16'
+                and digest({k:v for k,v in plan.items() if k!='sha256'})==sha256,
+                'representative_plan_approval_required')
+        writer, editor = (next(t['versions'][-1] for t in plan['task_history'] if t['role']==role)
+                          for role in ('writer','editor'))
+        require(parse(writer['content'])==plan['script'], 'representative_artifact_changed')
+        board = parse(editor['content'])
+        validate_script_editor(board,[writer])
+        spec=dict(tool=PORTRAIT_TOOL,width=720,height=1280,series='승인 대본 기술 시안',audio_mode=audio_mode,
+            palette=dict(background='#101728',surface='#1A2742',accent='#86C8F1',text='#FFFFFF'),
+            scenes=[dict(title=f'장면 {i}',subtitle=s['caption'],narration=s['narration'],seconds=s['end']-s['start'],
+                         graphic=dict(kind='target',labels=[f'장면 {i}']),camera='hold',transition='cut')
+                    for i,s in enumerate(board['shots'],1)])
+        require(validate_portrait(spec)==plan['script']['target_duration'],'representative_render_script_mismatch')
+        return spec
+
+    def produce(self, project_id, *, version, sha256, changes, palette=None, cameras=None, preview_audio=None):
         """Render the approved narration/captions; a video revision may adjust visual styling."""
         text(changes, 2000)
         with self.store.lock(project_id):
@@ -471,8 +490,17 @@ class RepresentativeVideoWorkflow:
             plan = self._approved_plan(flow, version, sha256)
             require(not any(a['status'] == 'reserved' for a in flow['render_attempts']),
                     'representative_render_uncertain')
-            require(plan['render_spec'] is not None, 'representative_render_spec_pending')
-            spec = deepcopy(plan['render_spec'])
+            speech=None
+            if preview_audio is not None:
+                spec=self.mission_production_spec(flow,version,sha256,preview_audio)
+                require(portrait_font() is not None,'portrait_korean_font_missing')
+                if preview_audio=='local_speech':
+                    from local_melo_tts import MeloLocal
+                    speech=MeloLocal()
+                    require(speech.available(),'melo_runtime_missing')
+            else:
+                require(plan['render_spec'] is not None, 'representative_render_spec_pending')
+                spec = deepcopy(plan['render_spec'])
             if palette is not None or cameras is not None:
                 require(flow['stage'] == 'video_revision', 'representative_unapproved_render_change')
             if palette is not None:
@@ -482,7 +510,7 @@ class RepresentativeVideoWorkflow:
                         'representative_camera_count')
                 for scene, camera in zip(spec['scenes'], cameras):
                     scene['camera'] = camera
-            validate(spec)
+            (validate if preview_audio is None else validate_portrait)(spec)
             number = len(flow['render_attempts']) + 1
             relative = Path('artifacts')/project_id/f'render-{number}'
             folder = self.store.root/relative
@@ -494,7 +522,7 @@ class RepresentativeVideoWorkflow:
             self.store.save(p)
             try:
                 folder.mkdir(parents=True, exist_ok=False)
-                receipt = render(spec, folder)
+                receipt = render(spec, folder, speech=speech) if speech is not None else render(spec, folder)
                 require(receipt['input_hash'] == attempt['spec_sha256'], 'representative_render_receipt_mismatch')
                 feedback = flow['decisions'][-1] if flow['stage'] == 'video_revision' else None
                 report = _report(dict(plan_version=version, plan_sha256=sha256, changes=changes,
@@ -528,6 +556,10 @@ class RepresentativeVideoWorkflow:
         for item in receipt['review_material']:
             require(_file_hash(path.parent/item['keyframe']) == item['keyframe_sha256'],
                     'representative_artifact_changed')
+        for item in receipt.get('speech_files', []):
+            voice=path.parent/item['file']
+            require(voice.parent==path.parent/'speech' and not voice.parent.is_symlink()
+                    and _file_hash(voice)==item['sha256'],'representative_artifact_changed')
         probe = json.loads(run_command(['ffprobe', '-v', 'error', '-show_streams', '-show_format', '-of', 'json',
                                         str(path)], stage='ffprobe_final'))
         streams = probe['streams']

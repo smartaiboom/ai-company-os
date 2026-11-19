@@ -1,6 +1,10 @@
 from pathlib import Path
+import json
+from shutil import which
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
+import wave
 
 from autonomous_company import CompanyError, Store, digest
 from cutroom_review import DRAFT_NAME, QUALITY_DRAFT_NAME, matching_plan, plan_markdown, quality_draft
@@ -9,6 +13,57 @@ from studio_server import Studio, byte_range
 
 
 class StudioTests(unittest.TestCase):
+    def test_approved_portrait_production_binds_script_and_local_audio(self):
+        from local_melo_tts import MeloLocal, file_hash
+        from production_video import portrait_font
+        from script_quality import script_editor_handoff
+        if not (which('ffmpeg') and which('ffprobe') and portrait_font()):
+            self.skipTest('requires FFmpeg, ffprobe and a local Korean font')
+
+        def synthesize(_engine, texts, folder):
+            clips=[]
+            for i, text in enumerate(texts):
+                path=folder/f'voice-{i:02}.wav'
+                with wave.open(str(path),'wb') as out:
+                    out.setparams((1,2,44100,0,'NONE',''))
+                    out.writeframes(b'\x40\x01\xc0\xfe'*4410)
+                clips.append(dict(file=path.name,text=text,duration=.2,sha256=file_hash(path)))
+            return dict(engine='synthetic_test_tone_not_tts',utterances=clips)
+
+        with TemporaryDirectory() as root:
+            studio=Studio(root)
+            flow=studio.workflow
+            pid=flow.create('가상 게임 테스트',audience='예시 시청자')
+            project=flow.store.load(pid)
+            beats=[dict(start=i,end=i+1,narration=line,caption=line,screen='자체 카드',
+                        shot_type='card',source_ref='미확보',source_status='pending',fact_status='illustrative')
+                   for i,line in enumerate(('첫 장면입니다.','두 번째 장면입니다.'))]
+            script=dict(target_duration=2,narrative_beats=beats)
+            writer=dict(role='writer',task_id='writer',revision=1,content=json.dumps(script,ensure_ascii=False))
+            editor=dict(role='editor',task_id='editor',revision=1,content=json.dumps(script_editor_handoff(writer),ensure_ascii=False))
+            plan=_report(dict(render_spec=None,script=script,task_history=[
+                dict(role='writer',versions=[writer]),dict(role='editor',versions=[editor])]),[])
+            project['representative'].update(stage='awaiting_plan_approval',plan_versions=[plan],mission_one_job='fixture')
+            flow.store.save(project)
+            with self.assertRaisesRegex(CompanyError,'representative_stage_mismatch'):
+                flow.produce(pid,version=1,sha256=plan['sha256'],changes='미승인',preview_audio='local_speech')
+            flow.decide(pid,'plan',version=1,sha256=plan['sha256'],action='approve')
+            with patch.object(MeloLocal,'available',return_value=False):
+                with self.assertRaisesRegex(CompanyError,'melo_runtime_missing'):
+                    flow.produce(pid,version=1,sha256=plan['sha256'],changes='런타임 없음',preview_audio='local_speech')
+            self.assertFalse(flow.store.load(pid)['representative']['render_attempts'])
+            with patch.object(MeloLocal,'available',return_value=True),patch.object(MeloLocal,'synthesize',autospec=True,side_effect=synthesize):
+                video=flow.produce(pid,version=1,sha256=plan['sha256'],changes='합성 신호 검증',preview_audio='local_speech')
+            saved=flow.store.load(pid)['representative']
+            self.assertEqual(saved['stage'],'awaiting_video_approval')
+            self.assertEqual(saved['plan_versions'],[plan])
+            receipt=video['render_receipt']
+            self.assertEqual((receipt['width'],receipt['height']),(720,1280))
+            self.assertTrue(receipt['audio'] and receipt['decoded'])
+            self.assertEqual(receipt['voice_engine'],'synthetic_test_tone_not_tts')
+            self.assertEqual([item['subtitle_start_seconds'] for item in receipt['review_material']],[0,1])
+            self.assertFalse(video['publish_authorized'])
+
     def test_quality_draft_matches_only_the_undecided_stop_report(self):
         with TemporaryDirectory() as root:
             report = dict(decision='stop', original_action='revise', reason='revision_limit_reached')

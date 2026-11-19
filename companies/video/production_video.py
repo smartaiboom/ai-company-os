@@ -10,6 +10,7 @@ from autonomous_company import require,exact,text,now,digest
 from local_artifacts import run_command,FONT
 
 TOOL='production_video_v2'
+PORTRAIT_TOOL='approved_portrait_preview_v1'
 CATALOG={TOOL:{'network':False,'uploads':False,
     'input':'JSON {tool,width,height,series,palette:{background,surface,accent,text},audio_mode,scenes:[{title,subtitle,narration,seconds,graphic:{kind,labels},camera,transition}]}',
     'visuals':'generated vector illustrations only: conversation,target,workflow,comparison; labels 1..3; no source paths/URLs',
@@ -46,6 +47,26 @@ def validate(spec):
         require(scene['camera'] in ('hold','push_in','pan_right') and scene['transition'] in ('cut','fade'),'invalid_motion')
         total+=scene['seconds']
     require(total<=120,'video_too_long')
+    return total
+
+
+def portrait_font():
+    for path, license_note in (
+        ('/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc','Noto CJK SIL OFL 1.1'),
+        ('/mnt/c/Windows/Fonts/malgun.ttf','Windows Malgun Gothic · local preview only'),
+    ):
+        if Path(path).is_file():
+            return path, license_note
+    return None
+
+
+def validate_portrait(spec):
+    require(spec['tool']==PORTRAIT_TOOL and (spec['width'],spec['height'])==(720,1280)
+            and spec['audio_mode'] in ('none','local_speech'),'invalid_portrait_preview')
+    total=validate({**spec,'tool':TOOL,'width':1280,'height':720,'audio_mode':'none'})
+    for scene in spec['scenes']:
+        caption_lines=scene['subtitle'].splitlines()
+        require(1<=len(caption_lines)<=2 and all(units(line)<=28 for line in caption_lines),'caption_overflow')
     return total
 
 
@@ -118,38 +139,75 @@ def scene_svg(spec,scene,index):
 </svg>'''
 
 
-def render(spec,folder):
-    total=validate(spec);folder=Path(folder)
+def portrait_svg(spec,index):
+    c=spec['palette']
+    offset=(index%4)*38
+    return f'''<svg xmlns="http://www.w3.org/2000/svg" width="720" height="1280">
+<rect width="720" height="1280" fill="{c['background']}"/>
+<rect x="44" y="230" width="632" height="680" rx="36" fill="{c['surface']}"/>
+<circle cx="{300+offset}" cy="555" r="176" fill="none" stroke="{c['accent']}" stroke-width="5"/>
+<circle cx="{300+offset}" cy="555" r="100" fill="{c['accent']}" opacity=".24"/>
+<rect x="60" y="975" width="600" height="160" rx="20" fill="{c['background']}"/>
+</svg>'''
+
+
+def render(spec,folder,*,speech=None):
+    portrait=spec['tool']==PORTRAIT_TOOL
+    total=validate_portrait(spec) if portrait else validate(spec)
+    font=portrait_font() if portrait else None
+    require(not portrait or font is not None,'portrait_korean_font_missing')
+    require((speech is not None)==(spec['audio_mode']=='local_speech'),'portrait_speech_required')
+    folder=Path(folder).absolute()
     require(folder.is_dir() and not folder.is_symlink(),'invalid_tool_directory')
     require(all(not (folder/name).exists() and not (folder/name).is_symlink()
                 for name in ('video.mp4','receipt.json')),'artifact_exists')
     timeline=[];sources=[];offset=0
+    utterances=[]
+    if speech is not None:
+        from editorial_video import verify_speech
+        speech_folder=folder/'speech'
+        speech_folder.mkdir(mode=0o700)
+        voice_receipt=speech.synthesize([s['narration'] for s in spec['scenes']],speech_folder)
+        utterances=verify_speech(spec,voice_receipt,speech_folder)
+        require(all(item['duration']<=scene['seconds'] for item,scene in zip(utterances,spec['scenes'])),
+                'narration_exceeds_scene')
     with tempfile.TemporaryDirectory(dir=folder) as temporary:
         work=Path(temporary);segments=[]
         for i,scene in enumerate(spec['scenes']):
             svg=folder/f'source-{i:02}.svg';png=work/f'graphic-{i:02}.png'
-            require(not svg.exists() and not svg.is_symlink(),'artifact_exists');svg.write_text(scene_svg(spec,scene,i),encoding='utf-8')
+            require(not svg.exists() and not svg.is_symlink(),'artifact_exists')
+            svg.write_text(portrait_svg(spec,i) if portrait else scene_svg(spec,scene,i),encoding='utf-8')
             run_command(['ffmpeg','-nostdin','-v','error','-i',str(svg),'-frames:v','1','-threads','1',str(png)],stage='ffmpeg_segment')
-            audio=['-an'];speech=0
+            audio=['-an'];speech_duration=0
             if spec['audio_mode']=='espeak_reference':
                 script=work/f'speech-{i}.txt';wav=work/f'speech-{i}.wav';script.write_text(scene['narration'],encoding='utf-8')
                 run_command(['espeak-ng','-v','ko','-s','155','-f',script.name,'-w',wav.name],stage='espeak_audio',cwd=work)
                 probe=json.loads(run_command(['ffprobe','-v','error','-show_format','-of','json',str(wav)],stage='ffprobe_audio'))
-                speech=float(probe['format']['duration']);require(speech<=scene['seconds'],'narration_exceeds_scene')
+                speech_duration=float(probe['format']['duration']);require(speech_duration<=scene['seconds'],'narration_exceeds_scene')
                 audio=['-i',str(wav),'-af','apad','-c:a','aac','-ar','44100','-ac','1']
+            elif utterances:
+                item=utterances[i]
+                speech_duration=item['duration']
+                audio=['-i',str(speech_folder/item['file']),'-af','apad','-c:a','aac','-ar','44100','-ac','1']
             motion={'hold':"z=1:x=0:y=0",'push_in':"z='1+0.0002*on':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2'",
                     'pan_right':"z=1.04:x='min(on*0.18,iw-iw/zoom)':y='ih/2-ih/zoom/2'"}[scene['camera']]
             filters=f"zoompan={motion}:d=1:s={spec['width']}x{spec['height']}:fps=24"
+            if portrait:
+                (work/'subtitle.txt').write_text(scene['subtitle'],encoding='utf-8')
+                filters+=(f",drawtext=fontfile={font[0]}:text='LOCAL STORYBOARD / {i+1:02}':"
+                          "fontsize=32:fontcolor=white:x=48:y=72"
+                          f",drawtext=fontfile={font[0]}:textfile=subtitle.txt:expansion=none:"
+                          "fontsize=34:fontcolor=white:x=(w-tw)/2:y=1000:line_spacing=12")
             if scene['transition']=='fade':filters+=f",fade=t=in:d=0.2,fade=t=out:st={scene['seconds']-0.2}:d=0.2"
             segment=work/f'segment-{i}.mp4';segments.append(segment)
             run_command(['ffmpeg','-nostdin','-v','error','-loop','1','-i',str(png),*audio,'-filter_threads','1',
-                         '-vf',filters,'-t',str(scene['seconds']),'-c:v','libx264','-threads','2','-pix_fmt','yuv420p',str(segment)],stage='ffmpeg_segment')
+                         '-vf',filters,'-t',str(scene['seconds']),'-c:v','libx264','-threads','2','-pix_fmt','yuv420p',str(segment)],stage='ffmpeg_segment',cwd=work if portrait else None)
             frame=folder/f'keyframe-{i:02}.png'
             require(not frame.exists() and not frame.is_symlink(),'artifact_exists')
             run_command(['ffmpeg','-nostdin','-v','error','-ss',str(scene['seconds']/2),'-i',str(segment),'-frames:v','1','-threads','1',str(frame)],stage='ffmpeg_decode')
             timeline.append({'scene_index':i,'start_seconds':offset,'end_seconds':offset+scene['seconds'],
                              'subtitle_start_seconds':offset,'subtitle_end_seconds':offset+scene['seconds'],
-                             'narration_duration_seconds':speech,'graphic':scene['graphic']['kind'],
+                             'narration_duration_seconds':speech_duration,'graphic':scene['graphic']['kind'],
                              'keyframe':frame.name,'keyframe_sha256':hashlib.sha256(frame.read_bytes()).hexdigest()})
             sources.append({'file':svg.name,'sha256':hashlib.sha256(svg.read_bytes()).hexdigest(),
                             'kind':'procedural_vector','creator':'AI Company OS renderer','license':'CC0-1.0'})
@@ -162,14 +220,19 @@ def render(spec,folder):
         duration=float(probe['format']['duration'])
         require(len(videos)==1 and videos[0]['codec_name']=='h264' and videos[0]['width']==spec['width']
                 and videos[0]['height']==spec['height'] and abs(duration-total)<.2,'video_probe_failed')
-        require(len(audios)==(1 if spec['audio_mode']=='espeak_reference' else 0),'video_probe_failed')
+        require(len(audios)==int(spec['audio_mode']!='none'),'video_probe_failed')
         if audios:require(audios[0]['codec_name']=='aac' and abs(float(audios[0]['duration'])-total)<.2,'video_probe_failed')
         run_command(['ffmpeg','-nostdin','-v','error','-i',str(staged),'-f','null','-'],stage='ffmpeg_decode')
         staged.rename(folder/'video.mp4')
-    receipt={'tool':TOOL,'at':now(),'input_hash':digest(spec),'sha256':hashlib.sha256((folder/'video.mp4').read_bytes()).hexdigest(),
+    receipt={'tool':spec['tool'],'at':now(),'input_hash':digest(spec),'sha256':hashlib.sha256((folder/'video.mp4').read_bytes()).hexdigest(),
              'duration_seconds':duration,'width':spec['width'],'height':spec['height'],'decoded':True,
              'audio':bool(audios),'audio_mode':spec['audio_mode'],'natural_korean_voice_verified':False,
              'review_material':timeline,'source_licenses':sources,'font_license':'Noto CJK SIL OFL 1.1',
              'model_visual_review_performed':False,'model_audio_review_performed':False,'subtitle_sync':'scene_level_only'}
+    if portrait:
+        receipt.update(font_license=font[1],visual_scope='local_procedural_cards_no_game_footage')
+        if utterances:
+            receipt.update(voice_engine=voice_receipt['engine'],speech_files=[
+                dict(file='speech/'+item['file'],sha256=item['sha256']) for item in utterances])
     (folder/'receipt.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2))
     return receipt

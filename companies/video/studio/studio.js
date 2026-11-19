@@ -168,9 +168,9 @@ function videoPanel(p, video) {
   const r=video.render_receipt;
   return `<section class="panel" id="video-panel"><div class="panel-heading"><h2>${icon('film')} 영상 검토</h2>${versionSelect('video',p.flow.video_versions,video)}</div>
     <video class="player" controls playsinline preload="metadata" poster="${h(video.thumbnail)}" src="${h(video.url)}" aria-label="영상 버전 ${video.version}"></video>
-    <div class="inline">${badge('전체 디코딩 통과','check','green')}${badge('기술 검증용','alert','amber')}</div>
+    <div class="inline">${badge('전체 디코딩 통과','check','green')}${badge('기술 검증용','alert','amber')}${r.visual_scope?badge('자체 카드 · 게임 화면 미확보','film','amber'):''}</div>
     ${facts([['제작 입력',`승인 기획 v${video.plan_version}`],['영상',`${r.width}×${r.height} · ${Number(r.duration_seconds).toFixed(3)}초`],
-    ['음성',r.audio_mode==='espeak_reference'?'eSpeak 로컬 참조 음성':r.audio?'로컬 음성':'없음'],['자막','장면 단위'],
+    ['음성',r.audio_mode==='espeak_reference'?'eSpeak 로컬 참조 음성':r.voice_engine==='synthetic_test_tone_not_tts'?'합성 테스트 신호':r.voice_engine|| (r.audio?'로컬 음성':'없음')],['자막','장면 단위'],
     ['QA','기술 검사 완료 · 시청·청취 품질 미평가'],['비용',`$${video.cost_usd}`]])}
     <details class="subpanel"><summary>변경사항·파일 및 기획 SHA-256</summary><p>${h(video.changes)}</p>
     <p class="muted">영상 파일</p><p class="mono">${h(video.artifact_sha256)}</p>
@@ -244,7 +244,24 @@ function operations(p) {
   if (attempt?.status === 'reserved') return '<p class="warning">로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단</p>';
   if (p.stage==='goal_submitted') return `<button class="button secondary" data-action="mission">${icon('folder')} 미션 01 준비</button><p class="muted">기획 작업만 준비합니다. 외부 전송은 별도 승인 후 실행합니다.</p>`;
   if (p.rework && p.stage==='plan_revision') return reworkPanel(p);
-  if (p.mission && p.stage==='production') return '<p class="warning">기획 승인 기록 완료 · 제작 사양 등록 대기</p>';
+  if (p.production) {
+    const prep=p.production;
+    const direction=prep.direction;
+    if (!direction) return `<p class="warning">승인 제작 입력 검증 실패 · ${h(prep.reason)}</p>`;
+    return `${failed}<section class="subpanel"><h3>세로 9:16 테스트 제작</h3>
+      <p>승인된 장면과 자막을 자체 생성 카드에 표시합니다. 게임 화면은 확보되지 않았으며 자막은 장면 단위로 맞춥니다.</p>
+      ${prep.ready?'<button class="button secondary" data-action="mission-preview">세로 기술 시안 제작</button>':`<p class="warning">제작 준비 확인 필요 · ${h(prep.reason)}</p>`}
+      <details><summary>제작 준비 · 음성 및 외부 전송 범위</summary>
+      <p>${h(direction.direction)}</p><p>이전 Gemini/Puck 청취 표본의 자연스러움은 대표 평가 7/10입니다. 이번 게임 대본의 음성 품질은 미평가입니다.</p>
+      <p>${prep.local_speech?'기존 MeloTTS 로컬 실행 가능 · 청취 미검증':'로컬 음성 런타임 또는 모델 미확보 · 무음 시안 가능'}</p>
+      ${direction.external.map(call=>`<p>${h(call.kind)} · ${h(call.model)} · 후보 상한 ${h(call.proposed_max_calls)}회<br>전송 후보 자료 · ${h(call.data)}</p>`).join('')}
+      <p>${h(direction.pricing)}. 현재 승인된 외부 요청 0회입니다. 지정 표본의 기존 TTS 승인으로는 이 대본을 보낼 수 없습니다.</p>
+      <button type="button" class="button ghost" disabled>새 외부 전송 동의</button>
+      <button type="button" class="button ghost" disabled>외부 AI 제작 실행</button></details></section>`;
+  }
+  if (p.mission && ['production','video_revision'].includes(p.stage) && !p.flow.plan_versions.at(-1)?.render_spec) {
+    return '<p class="warning">기획 승인 기록 완료 · 제작 사양 등록 대기</p>';
+  }
   if (p.mission && p.stage==='research_planning') return '';
   if (p.stage==='plan_revision') return `<button class="button secondary" data-action="planning">${icon('folder')} 기획 작업 열기</button><p class="muted">내부 작업을 열고 보고서 제출을 기다립니다.</p>`;
   if (['production','video_revision'].includes(p.stage)) return `${failed}<button class="button secondary" data-action="produce">${icon('film')} 로컬 기술 시안 제작</button><p class="muted">승인된 대본으로 로컬 렌더러를 실행합니다. 외부 API 비용은 발생하지 않습니다.</p>`;
@@ -503,6 +520,17 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action==='mission-preview') {
+    const project=detail;
+    const plan=project.flow.plan_versions.at(-1);
+    modal('세로 기술 시안 제작','<p>승인 자막과 장면을 자체 생성 카드로 제작합니다. 외부 전송과 비용은 0입니다.</p>'+
+      (project.production.local_speech?'<label class="check"><input name="speech" type="checkbox">로컬 MeloTTS 음성 사용</label>':'<p>이번 시안은 무음입니다.</p>'),
+      '로컬 제작 시작',async data=>{
+        await api(detailApi(project)+'/mission-preview',{version:plan.version,sha256:plan.sha256,
+          audio_mode:data.has('speech')?'local_speech':'none'});
+        return {message:'세로 시안을 영상 검토에 제출했습니다.'};
+      });
+  }
   else if (button.dataset.action==='rework-finalize-recover') {
     const project=detail;
     const recovery=project.rework.final_recovery;

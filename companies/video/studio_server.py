@@ -21,6 +21,9 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 ERRORS = {
+    'portrait_korean_font_missing': '로컬 세로 시안에 사용할 한글 글꼴을 찾을 수 없습니다.',
+    'melo_runtime_missing': '로컬 MeloTTS 실행 환경 또는 모델이 준비되지 않았습니다.',
+    'narration_exceeds_scene': '음성이 승인된 장면 시간을 초과했습니다. 장면을 자동으로 늘리거나 음성을 자르지 않았습니다.',
     'mission_free_account_unverified': '고정 Google 프로젝트의 키 소속, 결제 미연결 및 무료 사용 조건을 확인해 주세요.',
     'mission_key_missing': '서버 환경에 Gemini 및 YouTube 키가 설정되어 있는지 확인해 주세요.',
     'mission_key_binding_mismatch': '현재 서버 키가 검토한 동의 범위에 결합된 키와 다릅니다.',
@@ -169,10 +172,34 @@ class Studio:
                 mission.update(self.mission_controls(p, provider_store, job))
         from cutroom_review import revision_draft
         draft = revision_draft(store.root, p) if key == 'workspace' else None
-        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft,
+        production = self.mission_production(p) if key=='workspace' and mission else None
+        return {**self.card(key, p), 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
                                            for t in j['assignments']]) for j in jobs]}
+
+    def mission_production(self, project):
+        from shutil import which
+        from local_melo_tts import MeloLocal
+        from production_video import portrait_font
+        from video_production_company import approved_portrait_direction
+        flow=project['representative']
+        if flow['stage'] not in ('production','video_revision') or not flow['plan_versions']:
+            return None
+        plan=flow['plan_versions'][-1]
+        if plan['render_spec'] is not None:
+            return None
+        try:
+            self.workflow.mission_production_spec(flow,plan['version'],plan['sha256'],'none')
+        except CompanyError as exc:
+            return dict(ready=False,reason=exc.code)
+        board=next(json.loads(t['versions'][-1]['content']) for t in plan['task_history'] if t['role']=='editor')
+        ready=bool(which('ffmpeg') and which('ffprobe') and portrait_font())
+        uncertain=any(a['status']=='reserved' for a in flow['render_attempts'])
+        return dict(ready=ready and not uncertain,local_speech=ready and MeloLocal().available(),
+                    reason='representative_render_uncertain' if uncertain else
+                    None if ready else 'portrait_preview_tools_missing',
+                    direction=approved_portrait_direction(project,plan,board))
 
     def rework_view(self,key,p):
         if key!='workspace':return None
@@ -712,6 +739,11 @@ class Studio:
         elif name == 'decide':
             exact(body, ('stage', 'version', 'sha256', 'action', 'feedback', 'changes_plan'))
             self.workflow.decide(pid, **body)
+        elif name == 'mission-preview':
+            exact(body, ('version', 'sha256', 'audio_mode'))
+            require(body['audio_mode'] in ('none','local_speech'),'invalid_request')
+            self.workflow.produce(pid,version=body['version'],sha256=body['sha256'],
+                changes='승인된 9:16 대본·자막의 로컬 기술 시안',preview_audio=body['audio_mode'])
         elif name == 'produce':
             exact(body, ('version', 'sha256', 'changes', 'camera'))
             require(body['camera'] in (None, 'hold', 'push_in', 'pan_right'), 'invalid_request')
@@ -831,7 +863,7 @@ def make_server(host, port, studio):
                     project = studio.project('workspace', match[1])
                     plan = matching_plan(project, body['version'], body['sha256'])
                     return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS)}|decide|produce|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
                     return self.send_json(200, studio.action(*match.groups(), body))
             raise FileNotFoundError
 

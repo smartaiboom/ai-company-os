@@ -22,6 +22,11 @@ class MeloLocal:
     def __init__(self, root='data/tts_korean_review'):
         self.root = Path(root).resolve()
 
+    def available(self):
+        return all((self.root/name).is_file() for name in (
+            'runtime-melotts-py310/bin/python', 'models/myshell-ai--MeloTTS-Korean/checkpoint.pth',
+            'model_inventory.json', 'model_download_receipt.json'))
+
     def synthesize(self, texts, folder):
         folder = Path(folder).resolve()
         require(folder.is_dir() and not any(folder.iterdir()), 'tts_output_not_empty')

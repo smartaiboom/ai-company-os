@@ -465,9 +465,10 @@ def production_status(workflow,project):
     result['owner_policy']=policy_status(manager,plan,result)
     from asset_editing import edit_status
     result['asset_execution']=edit_status(manager,plan,workflow.store.root,project['representative']['constraints'],clips,result)
-    from commons_discovery import status as discovery_status
+    from commons_discovery import status as discovery_status, diagnostic_status
     result['media_discovery']=discovery_status(manager,plan,clips,result['manager_enabled'])
     result['adaptive_discovery']=discovery_status(manager,plan,clips,result['manager_enabled'],adaptive=True)
+    result['commons_diagnostic']=diagnostic_status(manager,plan)
     return result
 
 
@@ -490,14 +491,17 @@ def prepare_manager_request(manager,jid,body,*,operating_policy_hash=None):
 
 def production_action(workflow,pid,action,body):
     """Explicit owner operations. The representative project remains bound under its lock."""
-    if action in ('production-policy-revoke','production-assets-revoke','production-discovery-revoke','production-adaptive-revoke'):
-        from commons_discovery import store_for
+    if action in ('production-policy-revoke','production-assets-revoke','production-discovery-revoke',
+                  'production-adaptive-revoke','production-diagnostic-revoke'):
+        from commons_discovery import store_for, diagnostic_store
         from asset_editing import extension_store
         from production_operating import policy_store
         exact(body,())
         manager=production_manager(workflow,workflow.store.load(pid))
         if action=='production-adaptive-revoke':
             return store_for(manager,approved_manager_result(manager),adaptive=True).revoke()
+        if action=='production-diagnostic-revoke':
+            return diagnostic_store(manager,approved_manager_result(manager)).revoke()
         store={'production-assets-revoke':extension_store,'production-policy-revoke':policy_store,
                'production-discovery-revoke':store_for}[action]
         return store(manager,approved_manager_result(manager)).revoke()
@@ -520,6 +524,9 @@ def production_action(workflow,pid,action,body):
             (manager.root/'inbox').mkdir(mode=0o700,exist_ok=True)
             return result
         result=approved_manager_result(manager)
+        if action.startswith('production-diagnostic-'):
+            from commons_discovery import diagnostic_action
+            return diagnostic_action(manager,result,action,body)
         if action.startswith(('production-discovery-','production-adaptive-')):
             from commons_discovery import action as discover
             job,_=clip_job(manager,result)

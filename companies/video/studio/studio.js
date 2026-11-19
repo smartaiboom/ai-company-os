@@ -254,6 +254,36 @@ function visualDiscovery(a) {
     ? a.adaptive_discovery : a.media_discovery;
 }
 
+const commonsReason={
+  page_structure:'페이지 구조 오류',file_namespace:'파일 이름공간 불일치',page_id:'페이지 ID 오류',file_title:'파일 제목 오류',
+  duplicate_page_id:'응답 내 페이지 ID 중복',
+  imageinfo_missing:'원본 메타데이터 누락',imageinfo_shape:'원본 메타데이터 구조 오류',mime:'MIME 불일치·미지원',
+  media_type:'미디어 유형 불일치',original_url_missing:'원본 URL 누락',original_url_invalid:'원본 URL 안전 검증 실패',
+  size_invalid:'파일 크기 값 오류',size_limit:'파일 크기 상한 초과',pages_shape:'응답 페이지 배열 구조 오류',pages_limit:'응답 개수 상한 초과',
+  missing_author_or_source:'저작자·출처 미확인',original_checksum_unverified:'원본 체크섬 미확인',
+  unsupported_or_missing_license:'라이선스 미확인·미지원',attribution_requirement_unverified:'표시 의무 미확인',
+  additional_restrictions:'추가 권리 제한'
+};
+function commonsTrace(label,rows) {
+  if (!rows?.length) return '';
+  const counts=data=>Object.entries(data||{}).map(([code,count])=>`${commonsReason[code]||code} ${count}건`).join(' · ');
+  return `<details class="subpanel"><summary>${h(label)} (${rows.length}회)</summary>${rows.map(row=>{
+    const diag=row.diagnostics;
+    return `<article><p>${h(row.scene_ids.join(', '))} · ${row.media==='image'?'이미지':'영상'} · ${h(row.query)}</p>
+      <p>${h(({completed:'완료',reserved:'결과 미확정',failed_or_uncertain:'실패 또는 결과 미확정'})[row.status]||row.status)} ·
+      후보 ${h(row.candidate_count??'미확인')}건 · 기술 제외 ${h(row.rejected??'미확인')}건</p>
+      ${!diag?'<p>개별 판정과 원본 응답 보존 기록 없음</p>':`
+        ${diag.response_issue?`<p>${h(commonsReason[diag.response_issue])} · 반환 ${h(diag.returned??'미확인')}</p>`:''}
+        <p>기술 사유 집계 · ${h(counts(diag.technical_counts)||'없음')} · 권리 사유 집계 · ${h(counts(diag.rights_counts)||'없음')}</p>
+        ${diag.pages.map(page=>`<p>${h(page.page_id??'ID 미확인')} · ${h(page.title??'제목 비공개 또는 미확인')} ·
+          ${h(page.mime??'MIME 미확인')} · ${h(page.media_type??'유형 미확인')} · ${h(page.size_bytes??'크기 미확인')}바이트 ·
+          ${page.url_allowed?'원본 경로 통과':'원본 경로 미통과'}${page.provenance_removed?' · 출처 추적 값 제거':''} ·
+          ${h(page.technical_reasons.map(code=>commonsReason[code]).join(', ')||'기술 통과')} ·
+          ${h(page.rights_reasons?.map(code=>commonsReason[code]).join(', ')||'')} ${page.scene_suitability?' · 장면 적합성 미평가':''}</p>`).join('')}`}
+      </article>`;
+  }).join('')}</details>`;
+}
+
 function productionPanel(p) {
   const a=p.autonomous_production;
   if (!a) return '';
@@ -288,6 +318,10 @@ function productionPanel(p) {
       ${discovery.result?`<p>후보 ${h(discovery.result.candidates.length)}개 · 안전 또는 형식 검증에서 제외 ${h(discovery.result.rejected_unsafe)}개</p>
         ${discovery.result.candidates.map(c=>`<p>${h(c.scene_ids.join(', '))} · ${h(c.title)} · ${h(c.license_name||'라이선스 미확인')} ·
           ${c.reviewable?'대표 권리 검토 대상':'권리·표시 근거 부족'} · ${sourceLink(c.original_page)}</p>`).join('')}`:''}
+      ${commonsTrace('최초 검색 기록',a.media_discovery?.search_trace)}
+      ${commonsTrace('개선 검색 기록',a.adaptive_discovery?.search_trace)}
+      ${commonsTrace('제외 원인 진단 기록',a.commons_diagnostic?.search_trace)}
+      ${a.commons_diagnostic?.status==='active'?'<button class="button secondary" data-action="production-diagnostic-revoke">진단 승인 철회</button>':''}
       ${alternatives?`<h4>기존 편집 직원의 대안 제안</h4>${alternatives.options.map(item=>
         `<p>${h(item.scene_id)} · ${h(item.suggestion)} · 필요 권리 ${h(item.rights_needed)}
         ${item.route==='authorized_capture'?' · 담당자 권리 확인·캡처 필요':item.route==='verify_generation'?' · 무료·출력 권리 확인된 생성 실행기 미지원':''}</p>`).join('')}`:''}
@@ -562,6 +596,17 @@ function productionNext(a,selected) {
     '장면 적합성, 창작자·출처·편집 허용과 표시 의무를 확인한 후보만 선택하세요.');
   if (discovery?.status==='empty') discoverWork={message:'권리 검토 가능한 영상 후보가 없습니다. 상세의 대안과 추가 권리 조건을 확인하세요.'};
   if (['stopped','expired','revoked'].includes(discovery?.status)) discoverWork={message:'영상 탐색이 중단·만료 또는 철회됐습니다. 자동 재시도하지 않습니다.',buttons:refresh};
+  const diagnostic=a.commons_diagnostic;
+  let diagnosticWork;
+  if (diagnostic?.status==='available') diagnosticWork=choose('production-diagnostic-approve','Commons 제외 원인 진단 검토·승인',
+    '기존 원본 응답이 남아 있지 않습니다. 확인이 필요하면 같은 검색어·유형을 독립 진단 범위로 한 번 조회할 수 있습니다.',key);
+  if (diagnostic?.status==='active') diagnosticWork=choose('production-diagnostic-run','Commons 제외 원인 진단 실행',
+    '동일 API GET 최대 1회 · 다운로드·Gemini 0회',key);
+  if (diagnostic?.status==='review') diagnosticWork=choose('production-diagnostic-rights','진단 후보 권리 검토',
+    '기술 검증을 통과한 후보 중 권리 및 장면 적합성을 확인한 항목을 선택하세요.');
+  if (['empty','reviewed','revoked','stopped','expired'].includes(diagnostic?.status)) diagnosticWork={
+    message:diagnostic.status==='empty'?'진단에서 권리 검토 후보를 확보하지 못했습니다. 관련 상세 보기에서 제외 사유를 확인하세요.':
+      '진단 범위가 종료되었습니다. 기존 검색 기록과 별도의 진단 결과를 관련 상세 보기에서 확인하세요.'};
   let assetWork;
   if (assets?.status==='available') assetWork=choose('production-assets-approve','자산·편집 범위 검토·승인',
     `편집 판단 최대 1회 · 공식 MP4 다운로드 최대 ${assets.proposal.max_downloads}회 · 비용 $0`,key);
@@ -577,6 +622,7 @@ function productionNext(a,selected) {
       '자산 확보 범위가 중단·만료 또는 철회됐습니다. 기존 결과를 보존하고 후속 호출을 차단합니다.',buttons:refresh};
   const legacy=!operating?.expires_at && operating?.status!=='available';
   const options=[
+    ...(diagnosticWork?[{...diagnosticWork,choice:'commons-diagnostic',label:'Commons 제외 원인 진단'}]:[]),
     ...(discoverWork?[{...discoverWork,choice:'discovery',label:'Commons 영상 자동 탐색'}]:[]),
     ...(assetWork?[{...assetWork,choice:'assets',label:'영상 자산 확보·편집'}]:[]),
     ...(operatingWork && !assets?.expires_at?[{...operatingWork,choice:'operating',label:'개인 운영 정책 · 제작 실행'}]:[]),
@@ -592,7 +638,10 @@ function productionNext(a,selected) {
   if (options.length) {
     const assetDefault=assetWork && operating?.used>=operating?.proposal?.units.length;
     const discoveryDefault=discoverWork && (assets?.status==='waiting_rights' || discovery?.status==='review');
-    const defaultWork=(discoveryDefault && options.find(item=>item.choice==='discovery')) ||
+    const diagnosticDefault=diagnosticWork && ['available','active','review','empty','stopped'].includes(diagnostic?.status)
+      && assets?.status==='waiting_rights';
+    const defaultWork=(diagnosticDefault && options.find(item=>item.choice==='commons-diagnostic')) ||
+      (discoveryDefault && options.find(item=>item.choice==='discovery')) ||
       (assetDefault && options.find(item=>item.choice==='assets')) || options.find(item=>item.buttons && !item.reason) || options[0];
     return {...(options.find(item=>item.choice===selected)||defaultWork),options};
   }
@@ -777,10 +826,19 @@ function productionCommand(action,scene) {
     return `<li>${h(item.scene_id)} · ${h(before.original_frames/24)}초 → ${h((item.frames/24).toFixed(3))}초 · 자막 ${h((item.caption_frames/24).toFixed(3))}초</li>`;
   }).join('');
   const total=proposal?.decision.scenes.reduce((sum,item)=>sum+item.frames,0)/24;
-  const operating=a.owner_policy, discovery=visualDiscovery(a);
+  const diagnostic=a.commons_diagnostic;
+  const operating=a.owner_policy, discovery=action==='production-diagnostic-rights'?diagnostic:visualDiscovery(a);
+  const diagnosticQuery=diagnostic?.proposal?.queries[0];
   const commands={
     'production-listen':['청취 의견 저장',`<p>${h(scene)}의 검증된 음성에 연결합니다.</p><label>대표 청취 의견<textarea name="opinion" required maxlength="500"></textarea></label>`,
       data=>({scene,audio_sha256:a.voices[scene].audio_sha256,opinion:data.get('opinion')})],
+    'production-diagnostic-approve':['Commons 제외 원인 진단 검토·승인',
+      `<p>${h(diagnosticQuery?.query)} · ${diagnosticQuery?.media==='image'?'이미지':'영상'} · 기존 기술 제외 ${h(diagnostic?.proposal.previous_rejected)}건</p>
+      <p>동일한 Commons 메타데이터 GET 최대 1회 · 비용 $0 · 다운로드·Gemini 0회 · 자동 재시도 없음</p>`+
+      check('confirmed','이 검색어와 파일 유형의 단일 진단 조회를 승인합니다.'),
+      data=>({review_hash:diagnostic.review_hash,confirmed:data.has('confirmed')})],
+    'production-diagnostic-run':['Commons 제외 원인 진단 실행','<p>승인한 진단 GET을 한 번 실행합니다. 기존 기록은 보존됩니다.</p>',()=>({})],
+    'production-diagnostic-revoke':['진단 승인 철회','<p>이 진단 범위의 외부 조회를 차단합니다.</p>',()=>({})],
     'production-discovery-approve':['영상 자동 탐색 범위 검토·승인',
       `<p>Commons 검색·메타데이터 최대 ${h(discovery?.proposal.max_searches)}회 · 최대 비용 $0 · 파일 다운로드 없음</p>
         <ul>${(discovery?.proposal.queries||[]).map(row=>`<li>${h(row.scene_ids.join(', '))} · ${row.media==='image'?'정지 이미지':'영상'} · ${h(row.query)}</li>`).join('')}</ul>
@@ -860,14 +918,14 @@ function productionCommand(action,scene) {
     'production-render':['로컬 영상 제작','<p>인수한 클립과 검증된 음성으로 로컬 제작을 시작합니다. 외부 요청은 없습니다.</p>',
       ()=>({version:plan.version,sha256:plan.sha256})],
   };
-  const [title,fields,body]=commands[action];
+  const [title,fields,body]=commands[action==='production-diagnostic-rights'?'production-discovery-rights':action];
   modal(title,fields,title,async data=>{
     const endpoint=discovery===a.adaptive_discovery && action.startsWith('production-discovery-')
       ? action.replace('production-discovery-','production-adaptive-') : action;
     try {
       await api(detailApi(project)+'/'+endpoint,body(data));
     } catch (error) {
-      if (['production-policy-run','production-discovery-run'].includes(action)) await route();
+      if (['production-policy-run','production-discovery-run','production-diagnostic-run'].includes(action)) await route();
       throw error;
     }
     return {message:'제작 상태를 갱신했습니다.'};

@@ -73,6 +73,10 @@ const adaptive = ui.productionNext({...assetsBlocked, media_discovery:{status:'e
   adaptive_discovery:{status:'available',proposal:{max_searches:8,fallback_max_calls:0}}});
 hasAction(adaptive,'production-discovery-approve');
 assert.match(adaptive.buttons,/대안 영상·이미지/);
+const diagnosis={...assetsBlocked,adaptive_discovery:{status:'empty'},commons_diagnostic:{status:'available'}};
+hasAction(ui.productionNext(diagnosis),'production-diagnostic-approve');
+hasAction(ui.productionNext({...diagnosis,commons_diagnostic:{status:'active'}}),'production-diagnostic-run');
+hasAction(ui.productionNext({...diagnosis,commons_diagnostic:{status:'review'}}),'production-diagnostic-rights');
 const blockedAssetWork = ui.productionNext(assetsBlocked);
 hasAction(blockedAssetWork,'production-assets-approve',true);
 assert.match(blockedAssetWork.reason,/공식 직접 다운로드/);
@@ -113,7 +117,11 @@ if (process.argv[2]) {
       hasAction(work,'production-voice-prepare');
     }
     if (live.autonomous_production.asset_execution?.status==='waiting_rights') {
-      if ([live.autonomous_production.media_discovery?.status,live.autonomous_production.adaptive_discovery?.status].includes('available')) {
+      if (live.autonomous_production.commons_diagnostic?.status==='available') {
+        hasAction(work,'production-diagnostic-approve');
+        assert.match(page,/개선 검색 기록/);
+        assert.match(page,/개별 판정과 원본 응답 보존 기록 없음/);
+      } else if ([live.autonomous_production.media_discovery?.status,live.autonomous_production.adaptive_discovery?.status].includes('available')) {
         hasAction(work,'production-discovery-approve');
         assert.match(page,/Commons 영상·이미지 탐색/);
       } else {

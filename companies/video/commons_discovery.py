@@ -1,10 +1,11 @@
 """Bounded Wikimedia Commons file discovery and explicit local rights review."""
 from datetime import datetime
+from collections import Counter
 from html.parser import HTMLParser
 import http.client
 import re
 from time import monotonic
-from urllib.parse import quote, unquote, urlencode, urlsplit
+from urllib.parse import parse_qsl, quote, unquote, urlencode, urlsplit
 
 from autonomous_company import CompanyError, digest, exact, now, parse, require
 from autonomous_gemini35 import ENDPOINT, MODEL
@@ -24,6 +25,7 @@ LIMIT=5
 MAX_BYTES=131072
 FORMATS={'.mp4':'video/mp4','.webm':'video/webm','.png':'image/png','.jpg':'image/jpeg','.jpeg':'image/jpeg'}
 MAX_IMAGE_BYTES=8*1024*1024
+PROVENANCE={'utm_source':HOST,'utm_campaign':'imageinfo','utm_content':'original'}
 LICENSE=re.compile(r'https://creativecommons\.org/(licenses/(by|by-sa)/(2\.0|2\.5|3\.0|4\.0)|publicdomain/zero/1\.0)/?')
 FALLBACK_SCHEMA=obj(options=arr(obj(scene_id=S,route=enum('illustrative_footage','licensed_still_motion',
     'authorized_capture','verify_generation','hold'),suggestion=S,rights_needed=S)))
@@ -36,7 +38,8 @@ FALLBACK_SYSTEM=(
 
 
 def original_url(value, mime=None):
-    require(type(value) is str and len(value)<=1500 and value.isascii(),'commons_unsafe_file_url')
+    require(type(value) is str and len(value)<=1500 and value.isascii()
+            and not any(c.isspace() for c in value),'commons_unsafe_file_url')
     try:
         url=urlsplit(value)
     except ValueError:
@@ -44,12 +47,27 @@ def original_url(value, mime=None):
     match=re.fullmatch(r'/wikipedia/commons/[0-9a-f]/[0-9a-f]{2}/([^/]+)',url.path)
     require(url.scheme=='https' and url.netloc=='upload.wikimedia.org' and url.geturl()==value
             and not url.query and not url.fragment and match is not None,'commons_unsafe_file_url')
+    require(re.search(r'%(?![a-fA-F0-9]{2})',match[1]) is None,'commons_unsafe_file_url')
     name=unquote(match[1],errors='strict')
     require(not any(c in name for c in '/\\%?#') and all(ord(c)>=32 and ord(c)!=127 for c in name)
             and not name.startswith('.') and not name.endswith('.'),'commons_unsafe_file_url')
     extension='.'+name.lower().rsplit('.',1)[-1]
     require(extension in FORMATS and (mime is None or FORMATS[extension]==mime),'commons_unsafe_file_url')
     return url
+
+
+def imageinfo_url(value,mime):
+    require(type(value) is str and len(value)<=1500 and value.isascii()
+            and not any(c.isspace() for c in value),'commons_unsafe_file_url')
+    try:
+        url=urlsplit(value)
+        require(url.geturl()==value and not url.fragment,'commons_unsafe_file_url')
+        if url.query:
+            pairs=parse_qsl(url.query,keep_blank_values=True,strict_parsing=True,max_num_fields=3,errors='strict')
+            require(len(pairs)==len(PROVENANCE) and dict(pairs)==PROVENANCE,'commons_unsafe_file_url')
+        return original_url(url._replace(query='').geturl(),mime).geturl()
+    except (ValueError,UnicodeError):
+        raise CompanyError('commons_unsafe_file_url') from None
 
 
 class PlainText(HTMLParser):
@@ -199,30 +217,88 @@ def unmatched_scenes(scenes, compatible):
     return [scene for scene in scenes if not seat(scene,set())]
 
 
-def candidates(data, scene, media='video'):
+def diagnostic_title(value):
+    title=plain(value,140)
+    if re.search(r'@|https?\s*[:_]|(?:\+?\d[ ._()-]*){8,}|(?:TOKEN|PASSWORD|SECRET)[_-]',title,re.I):
+        return None
+    return title or None
+
+
+def technical_snapshot(page,media):
+    info={}
+    fields=[]
+    if not isinstance(page,dict):
+        page={}
+        fields.append('page_structure')
+    else:
+        if type(page.get('ns')) is not int or page['ns']!=6:
+            fields.append('file_namespace')
+        if type(page.get('pageid')) is not int or not 0<page['pageid']<10**12:
+            fields.append('page_id')
+        if not isinstance(page.get('title'),str) or not page['title'].startswith('File:') or len(page['title'])<=5:
+            fields.append('file_title')
+    infos=page.get('imageinfo')
+    url=None
+    if isinstance(infos,list) and len(infos)==1 and isinstance(infos[0],dict):
+        info=infos[0]
+        image=media=='image'
+        mime=info.get('mime')
+        if not isinstance(mime,str) or mime not in FORMATS.values() or not mime.startswith('image/' if image else 'video/'):
+            fields.append('mime')
+        if info.get('mediatype')!=('BITMAP' if image else 'VIDEO'):
+            fields.append('media_type')
+        if 'url' not in info:
+            fields.append('original_url_missing')
+        else:
+            try:
+                url=imageinfo_url(info['url'],mime if isinstance(mime,str) and mime in FORMATS.values() else None)
+            except CompanyError:
+                fields.append('original_url_invalid')
+        if 'size' in info:
+            size=info['size']
+            if type(size) is not int or size<=0:
+                fields.append('size_invalid')
+            elif size>(MAX_IMAGE_BYTES if image else MAX_MEDIA_BYTES):
+                fields.append('size_limit')
+    elif 'page_structure' not in fields:
+        fields.append('imageinfo_missing' if infos is None or infos==[] else 'imageinfo_shape')
+    mime=info.get('mime')
+    media_type=info.get('mediatype')
+    size=info.get('size')
+    snapshot=dict(page_id=page.get('pageid') if type(page.get('pageid')) is int and 0<page['pageid']<10**12 else None,
+        title=diagnostic_title(page.get('title')),
+        mime=mime if isinstance(mime,str) and re.fullmatch('[a-z0-9.+-]{1,32}/[a-z0-9.+-]{1,32}',mime) else None,
+        media_type=media_type if media_type in ('BITMAP','VIDEO','DRAWING','AUDIO','MULTIMEDIA','UNKNOWN',
+                                               'OFFICE','TEXT','EXECUTABLE','ARCHIVE','3D') else None,
+        size_bytes=size if type(size) is int and -(2**63)<=size<2**63 else None,
+        url_allowed=url is not None,provenance_removed=bool(url and info['url']!=url),technical_reasons=fields)
+    return info,url,snapshot
+
+
+def candidates(data, scene, media='video', diagnostics=None):
     query=data.get('query',{})
-    require(isinstance(query,dict),'commons_response_failed')
-    pages=query.get('pages',[])
-    require(isinstance(pages,list) and len(pages)<=LIMIT,'commons_response_limit')
+    pages=query.get('pages',[]) if isinstance(query,dict) else None
+    if diagnostics is not None:
+        diagnostics.update(response_json_sha256=digest(data),pages=[],returned=len(pages) if isinstance(pages,list) else None)
+    if not isinstance(pages,list):
+        if diagnostics is not None:
+            diagnostics['response_issue']='pages_shape'
+        raise CompanyError('commons_response_shape')
+    if len(pages)>LIMIT:
+        if diagnostics is not None:
+            diagnostics['response_issue']='pages_limit'
+        raise CompanyError('commons_response_limit')
     found=[]
     rejected=0
+    page_ids=Counter(page['pageid'] for page in pages if isinstance(page,dict)
+                     and type(page.get('pageid')) is int)
     for page in pages:
-        if not (isinstance(page,dict) and page.get('ns')==6 and type(page.get('pageid')) is int
-                and 0<page['pageid']<10**12 and isinstance(page.get('title'),str)
-                and page['title'].startswith('File:')):
-            rejected+=1
-            continue
-        infos=page.get('imageinfo',[])
-        info=infos[0] if isinstance(infos,list) and len(infos)==1 and isinstance(infos[0],dict) else {}
-        mime=info.get('mime')
-        try:
-            image=media=='image'
-            require(isinstance(mime,str) and mime in FORMATS.values() and mime.startswith('image/' if image else 'video/')
-                    and info.get('mediatype')==('BITMAP' if image else 'VIDEO'),'commons_unsafe_file_url')
-            original_url(info.get('url'),mime)
-            require('size' not in info or type(info['size']) is int and 0<info['size']<=(MAX_IMAGE_BYTES if image else MAX_MEDIA_BYTES),
-                    'commons_unsafe_file_url')
-        except (CompanyError,UnicodeError):
+        info,url,snapshot=technical_snapshot(page,media)
+        if page_ids[snapshot['page_id']]>1:
+            snapshot['technical_reasons'].append('duplicate_page_id')
+        if diagnostics is not None:
+            diagnostics['pages'].append(snapshot)
+        if snapshot['technical_reasons']:
             rejected+=1
             continue
         ext=info.get('extmetadata')
@@ -257,12 +333,16 @@ def candidates(data, scene, media='video'):
             reasons.append('attribution_requirement_unverified')
         if 'Restrictions' in ext and (field('Restrictions') or not isinstance(ext['Restrictions'],dict)):
             reasons.append('additional_restrictions')
+        snapshot.update(rights_reasons=reasons,scene_suitability='unassessed')
         found.append(dict(id='commons-'+str(page['pageid']),title=title,scene_ids=[scene],
-            url=info['url'],mime=mime,sha1=checksum,original_page=f'https://{HOST}/wiki/'+quote(page['title'].replace(' ','_'),safe=':'),
+            url=url,mime=info['mime'],sha1=checksum,original_page=f'https://{HOST}/wiki/'+quote(page['title'].replace(' ','_'),safe=':'),
             creator=author,credit=credit,attribution=field('Attribution') or author,
             license_url=license_url if rights else None,license_name=license_name,
             attribution_required=license_is_by,share_alike=bool(rights and rights[2]=='by-sa'),
             edit_allowed_by_license=bool(rights),reviewable=not reasons,reasons=reasons))
+    if diagnostics is not None:
+        for kind in ('technical','rights'):
+            diagnostics[kind+'_counts']=dict(Counter(code for row in diagnostics['pages'] for code in row.get(kind+'_reasons',[])))
     return found,rejected
 
 
@@ -338,14 +418,15 @@ def status(manager,plan,clips,manager_enabled,adaptive=False):
     elif datetime.fromisoformat(now())>=datetime.fromisoformat(grant['expires_at']):
         state='expired'
     answer=dict(status=state,proposal=grant['proposal'],expires_at=grant['expires_at'],
-                result=result,result_sha256=digest(result) if result else None,rights=review,used=len(attempts))
+                result=result,result_sha256=digest(result) if result else None,rights=review,
+                search_trace=search_trace(store),used=len(attempts))
     if (attempts.get('fallback',{}).get('result') or {}).get('status')=='completed':
         answer['fallback']=approved_manager_result(fallback_worker(manager))
     return answer
 
 
-def accepted_media(manager,plan,adaptive=False):
-    store=store_for(manager,plan,adaptive)
+def accepted_media(manager,plan,adaptive=False,diagnostic=False):
+    store=diagnostic_store(manager,plan) if diagnostic else store_for(manager,plan,adaptive)
     review=store.read('rights.json')
     if not review:
         return {}
@@ -367,20 +448,64 @@ def accepted_media(manager,plan,adaptive=False):
     return items
 
 
+def review_rights(store,body):
+    exact(body,('result_sha256','accepted','confirmed'))
+    result=store.read('candidates.json')
+    completed=store.read('done.json')
+    allowed={c['id'] for c in result['candidates'] if c['reviewable']} if result else set()
+    require(completed and not store.read('revoked.json') and body['confirmed'] is True
+            and all(entry['result'] and entry['result']['status']=='completed' for entry in store.attempts().values())
+            and digest(result)==body['result_sha256']==completed['result_sha256']
+            and isinstance(body['accepted'],list) and all(isinstance(c,str) and c in allowed for c in body['accepted'])
+            and 0<len(set(body['accepted']))==len(body['accepted']),'commons_rights_review_changed')
+    record=dict(accepted=body['accepted'],result_sha256=body['result_sha256'],at=now(),
+        basis='owner_reviewed_subject_third_party_rights_license_attribution_local_edit_only')
+    return store.write('rights.json',record)
+
+
+def row_key(row):
+    return row.get('unit_id',row['scene_id'])
+
+
+def collect_metadata(store,row,path):
+    info={}
+    data=search_commons(path)
+    name='metadata-'+row_key(row)+'.json'
+    try:
+        found,rejected=candidates(data,row['scene_id'],row.get('media','video'),info)
+    except CompanyError:
+        store.write(name,dict(candidates=[],rejected=None,diagnostics=info,at=now()))
+        raise
+    for item in found:
+        item['scene_ids']=row['scene_ids']
+    store.write(name,dict(candidates=found,rejected=rejected,diagnostics=info,at=now()))
+    return found,rejected
+
+
+def search_trace(store):
+    grant=store.read('policy.json')
+    if not grant:
+        return []
+    ledger=store.attempts()
+    rows=[]
+    for row in grant['proposal']['queries']:
+        identifier=row_key(row)
+        entry=ledger.get('search:'+identifier)
+        if not entry:
+            continue
+        saved=store.read('metadata-'+identifier+'.json')
+        rows.append(dict(query=row['query'],media=row.get('media','video'),scene_ids=row['scene_ids'],
+            status=entry['result']['status'] if entry['result'] else 'reserved',
+            candidate_count=len(saved['candidates']) if saved is not None else None,
+            rejected=saved['rejected'] if saved is not None else None,
+            diagnostics=saved.get('diagnostics') if saved is not None else None))
+    return rows
+
+
 def action(manager,plan,clips,manager_enabled,name,body,adaptive=False):
     store=store_for(manager,plan,adaptive)
     if name=='production-discovery-rights':
-        exact(body,('result_sha256','accepted','confirmed'))
-        result=store.read('candidates.json')
-        completed=store.read('done.json')
-        allowed={c['id'] for c in result['candidates'] if c['reviewable']} if result else set()
-        require(completed and not store.read('revoked.json') and body['confirmed'] is True
-                and digest(result)==body['result_sha256']==completed['result_sha256']
-                and isinstance(body['accepted'],list) and all(isinstance(c,str) and c in allowed for c in body['accepted'])
-                and 0<len(set(body['accepted']))==len(body['accepted']),'commons_rights_review_changed')
-        record=dict(accepted=body['accepted'],result_sha256=body['result_sha256'],at=now(),
-            basis='owner_reviewed_subject_third_party_rights_license_attribution_local_edit_only')
-        return store.write('rights.json',record)
+        return review_rights(store,body)
     key,_=production_keys()
     if name=='production-discovery-approve':
         exact(body,('confirmed','review_hash'))
@@ -404,11 +529,8 @@ def action(manager,plan,clips,manager_enabled,name,body,adaptive=False):
         def search(proof,check):
             nonlocal blocked
             check()
-            found,rejected=candidates(search_commons(path),row['scene_id'],media)
-            for item in found:
-                item['scene_ids']=row['scene_ids']
+            found,rejected=collect_metadata(store,row,path)
             blocked+=rejected
-            store.write('metadata-'+row.get('unit_id',row['scene_id'])+'.json',dict(candidates=found,rejected=rejected,at=now()))
             for item in found:
                 old=lookup.get(item['id']) or next((v for v in lookup.values() if v['url']==item['url']),None)
                 if old:
@@ -432,3 +554,85 @@ def action(manager,plan,clips,manager_enabled,name,body,adaptive=False):
         delegated_call(store,key,fallback_unit(),wire,lambda proof,check:run_worker(worker,key,proof,wire,check))
     store.write('done.json',dict(result_sha256=digest(result),at=now()))
     return result
+
+
+def diagnostic_store(manager,plan):
+    binding={**store_for(manager,plan,adaptive=True).binding,
+             'mode':'cutroom_commons_diagnostic_v1','provider':'Wikimedia Commons'}
+    return OwnerOperatingPolicy(manager.root/'commons_diagnostic',binding)
+
+
+def diagnostic_proposal(manager,plan):
+    previous=store_for(manager,plan,adaptive=True)
+    grant=previous.read('policy.json')
+    if not grant or not previous.read('done.json'):
+        return None
+    candidates_for_test=[]
+    for row in grant['proposal']['queries']:
+        record=previous.read('metadata-'+row_key(row)+'.json')
+        if record and record['rejected'] and not record.get('diagnostics'):
+            candidates_for_test.append((row,record['rejected']))
+    if not candidates_for_test:
+        return None
+    row,rejected=max(candidates_for_test,key=lambda item:(item[1],item[0].get('media')=='image'))
+    signed=search_unit(row)
+    old=previous.attempts().get(signed['id'])
+    require(old and old['result'] and old['result']['status']=='completed'
+            and old['reservation']['payload_sha256']==signed['payload_sha256'],'owner_policy_scope_changed')
+    scope=diagnostic_store(manager,plan).proposal([signed])
+    return {**scope,'queries':[row],'max_searches':1,'max_downloads':0,'fallback_max_calls':0,
+            'previous_rejected':rejected,'previous_request_sha256':signed['payload_sha256']}
+
+
+def diagnostic_status(manager,plan):
+    store=diagnostic_store(manager,plan)
+    grant=store.read('policy.json')
+    if not grant:
+        offer=diagnostic_proposal(manager,plan)
+        return dict(status='available',proposal=offer,review_hash=digest(offer)) if offer else None
+    result=store.read('candidates.json')
+    attempts=store.attempts()
+    scope=grant['proposal']
+    if store.read('revoked.json'):
+        state='revoked'
+    elif any(not row['result'] or row['result']['status']!='completed' for row in attempts.values()):
+        state='stopped'
+    elif store.read('done.json'):
+        state=('reviewed' if store.read('rights.json') else 'review'
+               if any(row['reviewable'] for row in result['candidates']) else 'empty')
+    elif attempts:
+        state='stopped'
+    elif datetime.fromisoformat(now())>=datetime.fromisoformat(grant['expires_at']):
+        state='expired'
+    else:
+        state='active'
+    return dict(status=state,proposal=scope,result=result,result_sha256=digest(result) if result else None,
+                search_trace=search_trace(store),used=len(attempts))
+
+
+def diagnostic_action(manager,plan,name,body):
+    store=diagnostic_store(manager,plan)
+    if name=='production-diagnostic-rights':
+        return review_rights(store,body)
+    key,_=production_keys()
+    if name=='production-diagnostic-approve':
+        exact(body,('confirmed','review_hash'))
+        offer=diagnostic_proposal(manager,plan)
+        require(offer and body['confirmed'] is True,'owner_policy_required')
+        return store.approve(offer,body['review_hash'],key)
+    exact(body,())
+    require(name=='production-diagnostic-run','invalid_request')
+    grant=store.active(key)['proposal']
+    require(not store.attempts(),'owner_policy_exhausted')
+    row,=grant['queries']
+    path=request_path(row['query'],row.get('media','video'))
+    operation=search_unit(row)
+
+    def perform(proof,check):
+        check()
+        found,rejected=collect_metadata(store,row,path)
+        result=dict(candidates=found,rejected_unsafe=rejected)
+        store.write('candidates.json',result)
+        store.write('done.json',dict(result_sha256=digest(result),at=now()))
+
+    return delegated_call(store,key,operation,digest(path),perform)

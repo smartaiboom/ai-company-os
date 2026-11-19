@@ -47,7 +47,8 @@ def registries(root,manager,plan):
     from commons_discovery import accepted_media
     library=root/'production_source_library'
     offices=registered_media(root/'production_official_media')
-    commons={**accepted_media(manager,plan),**accepted_media(manager,plan,adaptive=True)}
+    commons={**accepted_media(manager,plan,diagnostic=True),**accepted_media(manager,plan),
+             **accepted_media(manager,plan,adaptive=True)}
     require(not offices.keys() & commons.keys(),'official_registry_invalid')
     return library,library_entries(library),{**offices,**commons}
 

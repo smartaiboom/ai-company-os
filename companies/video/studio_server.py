@@ -21,6 +21,8 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
+                      'production-diagnostic-approve','production-diagnostic-run','production-diagnostic-rights',
+                      'production-diagnostic-revoke',
                       'production-adaptive-approve','production-adaptive-run','production-adaptive-rights',
                       'production-adaptive-revoke',
                       'production-discovery-approve','production-discovery-run','production-discovery-rights',
@@ -38,6 +40,7 @@ ERRORS = {
     'still_image_format_invalid': '지원되는 단일 PNG/JPEG 원본이 아닙니다.',
     'commons_rights_review_changed': '확인한 후보, 검색 결과 해시 또는 권리 검토 범위가 달라졌습니다.',
     'commons_response_failed': 'Commons 검색 응답을 확인하지 못했습니다. 자동 재시도하지 않습니다.',
+    'commons_response_shape': 'Commons 응답의 페이지 배열 구조를 확인할 수 없습니다.',
     'commons_response_limit': 'Commons 응답이 허용된 크기 또는 시간 범위를 초과했습니다.',
     'asset_extension_not_ready': '장면별 길이와 사용권을 확인한 등록 소스 또는 무료 Gemini 설정이 필요합니다.',
     'official_rights_unverified': '공식 출처의 다운로드 허가와 로컬 편집·검토 사용권을 확인하세요.',

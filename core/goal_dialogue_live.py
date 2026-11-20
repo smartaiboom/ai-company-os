@@ -12,6 +12,7 @@ import uuid
 from urllib.request import build_opener, HTTPRedirectHandler
 from urllib.error import HTTPError
 
+from decision_recovery import DecisionViolation, failure_kind
 from autonomous_company import CompanyError, require, exact, digest, now, parse, fcntl
 from autonomous_live import LiveStore
 from autonomous_gemini35 import Gemini35Adapter, MODEL, ENDPOINT
@@ -201,6 +202,7 @@ class LiveDialogueStore(DialogueStore):
                 require(self.load(draft_id)['storage_hash'] == p['storage_hash'], 'state_changed')
                 with send_once(request, timeout=90) as response:
                     raw = response.read(131073)
+                attempt['response_received'] = True
                 require(len(raw) <= 131072, 'response_too_large')
                 envelope = parse(raw.decode('utf-8'))
                 normalized = adapter.normalize(envelope)
@@ -212,14 +214,27 @@ class LiveDialogueStore(DialogueStore):
                 # Keep validation atomic with successful attempt status; do not store raw model replies on failure.
                 candidate = deepcopy(p)
                 candidate['real_ai']['attempts'][-1].update(status='completed', finished_at=now(), response_hash=digest(value))
-                return self._accept_proposal(candidate, value, 'gemini35_live_manager')
+                try:
+                    return self._accept_proposal(candidate, value, 'gemini35_live_manager')
+                except DecisionViolation as exc:
+                    attempt['decision_rejection'] = dict(rule=exc.rule, response_sha256=digest(value))
+                    raise
+                except CompanyError:
+                    raise
+                except Exception as exc:
+                    raise CompanyError('decision_internal_error') from exc
             except Exception as exc:
                 if isinstance(exc, HTTPError) and type(exc.code) is int:
                     attempt['http_status'] = exc.code
                 attempt.update(status='uncertain', finished_at=now(),
                                reason=exc.code if isinstance(exc, CompanyError) else 'transport_or_response_failed')
                 self._event(p, 'gemini_request_unresolved', attempt_id=attempt['id'])
-                raise CompanyError(attempt['reason']) from None
+                error = CompanyError(attempt['reason'])
+                error.failure_category = failure_kind(attempt)
+                if isinstance(exc, DecisionViolation) and attempt.get('decision_rejection'):
+                    error.decision_receipt = dict(attempt_id=attempt['id'],
+                        total_tokens=attempt['usage'].get('total_tokens'), **attempt['decision_rejection'])
+                raise error from None
 
     def consent_status(self, p):
         try:

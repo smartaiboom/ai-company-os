@@ -20,7 +20,8 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
-RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke')
+RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke',
+                    'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke')
 
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
                       'production-publisher-approve','production-publisher-run','production-publisher-rights','production-publisher-revoke',
@@ -40,6 +41,8 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 RESEARCH_ERRORS = {
+    'decision_recovery_blocked': '응답과 승인 범위를 연결할 수 없어 복구가 차단됐습니다. 관리자·대표 검토가 필요합니다.',
+    'decision_internal_error': '판단 검증 코드에서 오류가 발생해 조사를 중단했습니다.',
     'owner_policy_exhausted': '이미 사용한 조사 범위입니다. 기존 기록을 보존하고 복구 범위를 검토하세요.',
     'research_step_invalid': 'Gemini 응답이 허용된 조사 도구 또는 종료 규칙에 맞지 않습니다.',
     'invalid_manager_plan_schema': 'Gemini 응답 형식이 필요한 구조와 일치하지 않습니다.',
@@ -966,8 +969,10 @@ def make_server(host, port, studio):
                             state=research_status(studio.workflow,project)
                         except (CompanyError,OSError,ValueError,KeyError,TypeError):
                             state=None
+                        recovery = (state or {}).get('recovery') if match[3] == 'research-recovery-run' else None
+                        diagnostics = (recovery or {}).get('diagnostics') or (state or {}).get('diagnostics')
                         error['research']=dict(stage=RESEARCH_ERROR_STAGES.get(exc.code,'preflight'),
-                            diagnostics=state.get('diagnostics') if state else None)
+                            diagnostics=diagnostics)
                         return self.send_json(409,error)
                     return self.send_json(200,result)
             raise FileNotFoundError

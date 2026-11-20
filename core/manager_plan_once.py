@@ -128,9 +128,12 @@ class ManagerPlanAcceptanceStore(OneCallAcceptanceStore):
         require(MANAGER_PLAN_EXECUTION_ENABLED is True,'manager_plan_execution_disabled')
         super()._authorize_transport(p,api_key)
 
-    def _accept_proposal(self,p,value,provider_name):
-        require(matches(value,self.contract['schema']),'invalid_manager_plan_schema')
+    def validate_response(self, value):
+        require(matches(value, self.contract['schema']), 'invalid_manager_plan_schema')
         self.validate_plan(value)
+
+    def _accept_proposal(self,p,value,provider_name):
+        self.validate_response(value)
         p['manager_plan']=deepcopy(value)
         p['status']='needs_user_review'
         p['strategy_review']={k:dict(status='unassessed',evaluator='human_pending') for k in (

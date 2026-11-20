@@ -503,14 +503,42 @@ function researchErrorText(code,stage,diagnostics) {
     model_response:'Gemini 호출·응답',search_response:'Tavily 호출·응답',preflight:'승인·실행 조건 확인'};
   const info=diagnostics?.providers;
   const failure=diagnostics?.failure;
-  const parts=[code,labels[stage]].filter(Boolean);
+  const categories={decision_invalid:'판단 규칙 위반',policy_blocked:'정책·권한 차단',internal_error:'검증 코드 오류',
+    provider_failure:'공급자 오류 응답',provider_response_invalid:'공급자 응답 형식 오류',outcome_uncertain:'결과 미확정'};
+  const parts=[code,labels[stage],categories[failure?.category],failure?.rule].filter(Boolean);
   if (info) {
     parts.push(`Gemini 예약 ${info.gemini.reserved}회·완료 ${info.gemini.completed}회, Tavily 예약 ${info.tavily.reserved}회·완료 ${info.tavily.completed}회`);
-    if (failure?.response_received) parts.push(`Gemini 응답 수신 확인 · 기록 ${failure.total_tokens}토큰`);
-    else if (failure) parts.push('실패한 요청의 전송·응답은 기록만으로 확정할 수 없습니다.');
+    if (failure?.response_received) {
+      parts.push('Gemini 응답 수신 확인');
+      if (Number.isInteger(failure.total_tokens)) parts.push(`기록 ${failure.total_tokens}토큰`);
+    }
+    else if (failure?.category==='provider_failure') parts.push('공급자의 실패 응답이 기록됐습니다.');
+    else if (failure?.category==='outcome_uncertain' || (failure && !failure.category))
+      parts.push('실패한 요청의 전송·응답은 기록만으로 확정할 수 없습니다.');
   }
-  parts.push(failure?'기존 기록을 보존하고 복구 범위를 검토하세요.':'현재 조사 상태와 서버 설정을 확인하세요.');
+  parts.push(failure?'현재 조사 상태에서 복구 가능 여부를 확인하세요.':'현재 조사 상태와 서버 설정을 확인하세요.');
   return parts.join(' · ');
+}
+function researchRecoveryPanel(recovery, readonly) {
+  if (!recovery) return '';
+  const labels={available:'복구 범위를 검토할 수 있습니다. 별도 승인 후 시작할 수 있습니다.',
+    active:'복구 범위가 승인됐습니다. 시작을 선택하면 직원의 수정 판단부터 진행합니다.',
+    stopped:'복구를 중단했습니다. 추가 호출은 관리자·대표 검토가 필요합니다.',
+    blocked:'복구가 차단됐습니다. 관리자·대표 검토가 필요합니다.',
+    review:'복구 조사 결과를 관리자가 검토했습니다.',
+    expired:'복구 승인 유효 시간이 지났습니다.',revoked:'복구 실행 권한이 철회됐습니다.'};
+  const reasons={research_search_disabled:'공급자 무료 전용 설정을 확인하세요.',
+    owner_policy_scope_changed:'기존에 승인한 입력 또는 도구 범위가 변경됐습니다.',
+    decision_recovery_blocked:'수정할 수 있는 직원 판단을 기존 응답·예약 기록과 연결하지 못했습니다.'};
+  const failure=recovery.diagnostics?.failure;
+  return `<div class="subpanel"><h3>조사 판단 복구</h3><p>${h(labels[recovery.status])}</p>
+    ${recovery.reason?`<p>${h(reasons[recovery.reason] || recovery.reason)}</p>`:''}
+    ${recovery.status==='blocked' && recovery.proposal?`<p>추가 제안 한도 · Gemini ${h(recovery.proposal.max_model_calls)}회 · Tavily ${h(recovery.proposal.max_search_credits)}회 · 비용 $0</p>`:''}
+    ${recovery.expires_at?`<p>유효 기한 ${h(time(recovery.expires_at))}</p>`:''}
+    ${failure?`<p>${h(researchErrorText(failure.code,failure.stage,recovery.diagnostics))}</p>`:''}
+    ${!readonly && recovery.status==='available'?'<button class="button secondary" data-action="research-recovery-approve">복구 범위 검토·승인</button>':''}
+    ${!readonly && recovery.status==='active'?'<button class="button secondary" data-action="research-recovery-run">승인된 복구 시작</button><button class="button ghost" data-action="research-recovery-revoke">복구 승인 철회</button>':''}
+    </div>`;
 }
 function researchPanel(p) {
   const r=p.research;
@@ -525,6 +553,7 @@ function researchPanel(p) {
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
+    ${researchRecoveryPanel(r.recovery,p.readonly)}
     ${r.review?`<p><strong>관리자 의견</strong> ${h(r.review.decision.note)}</p>`:''}
     ${r.result?`<p><strong>제작 가능성</strong> ${h(r.result.feasibility)}</p>
       ${r.result.claims.map(c=>`<p><strong>${h(({supported:'근거 일치',conflicting:'근거 상충',unverified:'미확인'})[c.assessment])}</strong> ${h(c.statement)}
@@ -536,18 +565,37 @@ function researchPanel(p) {
 }
 function researchCommand(action) {
   const p=detail, r=p.research;
-  const titles={'research-approve':'조사 범위 검토·승인','research-run':'웹·전문 자료 조사 실행','research-revoke':'조사 범위 철회'};
-  const fields=action==='research-approve'?`<p>Tavily 기본 검색 최대 ${h(r.proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(r.proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
-    <ul>${r.proposal.tool_options.map(t=>`<li>${h(t.name)} · ${h(Object.values(t.options).join(' / '))}</li>`).join('')}</ul>
-    <p>Tavily에 선택한 공개 검색어만, Google에 업무 범위·출처 발췌·조사 결과를 보냅니다.</p>
+  const titles={'research-approve':'조사 범위 검토·승인','research-run':'웹·전문 자료 조사 실행','research-revoke':'조사 범위 철회',
+    'research-recovery-approve':'복구 범위 검토·승인','research-recovery-run':'승인된 복구 시작',
+    'research-recovery-revoke':'복구 승인 철회'};
+  const recovery=action.startsWith('research-recovery-');
+  const approve=action.endsWith('-approve');
+  const offer=recovery?r.recovery:r;
+  const proposal=offer.proposal;
+  const feedback=proposal?.feedback;
+  const fields=approve?`<p>Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
+    ${recovery?`<p>기존 Gemini 예약 ${h(proposal.source_usage.gemini.reserved)}회 · Tavily 예약 ${h(proposal.source_usage.tavily.reserved)}회</p>
+      <p>추가 범위 중 수정 판단 최대 ${h(proposal.max_corrections)}회 · 독립 관리자 검토 ${h(proposal.manager_review_calls)}회 · 승인 후 ${h(proposal.valid_hours)}시간 · 현재 공급자 키에 서명 결합</p>
+      <p>단계 ${h(feedback.step)} · 규칙 ${h(feedback.rule)} · 계약 ${h(proposal.decision_contract)}</p>
+      <details><summary>기존 시도와 새 입력의 검토 정보</summary><pre>${h(JSON.stringify({
+        original_attempt:feedback.original_attempt, original_reservation_sha256:feedback.original_reservation_sha256,
+        source_policy_sha256:proposal.binding.source_policy_sha256, correction_payload_sha256:proposal.units[0].payload_sha256,
+        review_hash:offer.review_hash
+      },null,2))}</pre></details>`:''}
+    <ul>${proposal.tool_options.map(t=>`<li>${h(t.name)} · ${h(Object.values(t.options).join(' / '))}</li>`).join('')}</ul>
+    <p>Tavily에 선택한 공개 검색어만, Google에 업무 범위·출처 발췌·조사 결과${recovery?'·규칙 코드와 이전 시도 참조':''}를 보냅니다.</p>
     <label class="check"><input type="checkbox" name="confirmed" required>Tavily Researcher 및 결제·종량제 비활성, Google 무료 프로젝트와 잔여 한도 및 두 제공처의 데이터 처리를 확인했습니다.</label>`:
-    '<p>현재 서명 범위에 적용됩니다.</p>';
+    action==='research-recovery-run'?'<p id="research-recovery-progress" role="status">승인한 범위에서 실행합니다.</p>':
+      '<p>현재 서명 범위에 적용됩니다.</p>';
   modal(titles[action],fields,titles[action],async data=>{
-    const body=action==='research-approve'?{review_hash:r.review_hash,confirmed:data.has('confirmed')}:{};
+    const body=approve?{review_hash:offer.review_hash,confirmed:data.has('confirmed')}:{};
+    const progress=dialog.querySelector('#research-recovery-progress');
+    if (progress) progress.textContent='복구를 시작했습니다. 수정 판단과 후속 조사 상태를 확인 중입니다.';
     try {
       await api(detailApi(p)+'/'+action,body);
     } catch (error) {
-      if (action==='research-run') await route();
+      if (progress) progress.textContent='현재 요청이 중단됐습니다.';
+      if (action.endsWith('-run')) await route();
       if (error.research) error.message+=' '+researchErrorText(error.code,error.research.stage,error.research.diagnostics);
       throw error;
     }

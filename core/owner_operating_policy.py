@@ -58,9 +58,12 @@ class OwnerOperatingPolicy:
         require(record['proposal']['binding']==self.binding
                 and record['proposal']['free_only'] is True and record['proposal']['max_cost_usd']==0,
                 'owner_policy_scope_changed')
+        self.check_credential(record, key)
+        return record
+
+    def check_credential(self, record, key):
         require(hmac.compare_digest(record['credential_binding'],
                     self._sign(dict(binding=self.binding,credential=key))), 'owner_policy_key_changed')
-        return record
 
     def revoke(self):
         with self.control_lock():
@@ -99,6 +102,8 @@ class OwnerOperatingPolicy:
             self.write('reserve-'+digest(unit['id'])+'.json',reservation)
             return reservation
 
-    def finish(self, reservation, status):
-        self.write('result-'+digest(reservation['unit']['id'])+'.json',
-                   dict(reservation_hash=digest(reservation),status=status,at=now()))
+    def finish(self, reservation, status, *, diagnostics=None):
+        result = dict(reservation_hash=digest(reservation), status=status, at=now())
+        if diagnostics:
+            result['diagnostics'] = diagnostics
+        self.write('result-'+digest(reservation['unit']['id'])+'.json', result)

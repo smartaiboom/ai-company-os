@@ -2,6 +2,7 @@
 from datetime import datetime, timedelta
 import re
 
+from decision_recovery import delegated_call
 from autonomous_company import CompanyError, digest, exact, now, require
 from autonomous_gemini35 import ENDPOINT, MODEL
 from measured_timeline import measurements, timeline_worker
@@ -81,17 +82,6 @@ def policy_status(manager,plan,state):
                              and not state['manager_enabled'] else None),
                 attempted={key:item['result']['status'] if item['result'] else 'reserved'
                            for key,item in attempts.items()})
-
-
-def delegated_call(store,key,operation,payload_hash,execute):
-    reservation=store.reserve(key,operation,payload_hash)
-    try:
-        store.active(key)
-        execute(reservation['policy_hash'], lambda:store.active(key))
-    except Exception:
-        store.finish(reservation,'failed_or_uncertain')
-        raise
-    store.finish(reservation,'completed')
 
 
 def run_voice(voice,key,comparison,policy_hash,before_send):

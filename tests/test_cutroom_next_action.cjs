@@ -7,7 +7,7 @@ const node = {addEventListener() {}};
 const document = {querySelectorAll: () => [], querySelector: () => node};
 const source = fs.readFileSync(path.join(__dirname,'../companies/video/studio/studio.js'),'utf8');
 const ui = vm.runInNewContext(source.replace(/\nroute\(\);\s*$/, '') +
-  '\n({nextWork, productionNext, projectPage, researchErrorText})', {document, window: node});
+  '\n({nextWork, productionNext, projectPage, researchErrorText, researchRecoveryPanel})', {document, window: node});
 const clip = {scene_id:'scene-1',source:'operator_clip',request:'test'};
 const initial = {status:'unprepared',key_ready:false,clips:[],voices:{}};
 const available = {...initial,key_ready:true};
@@ -164,4 +164,14 @@ const researchFailure={providers:{gemini:{reserved:1,completed:0},tavily:{reserv
   failure:{response_received:true,total_tokens:739}};
 const message=ui.researchErrorText('research_step_invalid','step_validation',researchFailure);
 assert.match(message,/research_step_invalid.*조사 도구 선택 검증.*Gemini 예약 1회.*Tavily 예약 0회.*739토큰/);
-assert.match(message,/복구 범위를 검토/);
+assert.match(message,/복구 가능 여부/);
+assert.match(ui.researchRecoveryPanel({status:'available'},false),/research-recovery-approve/);
+assert.doesNotMatch(ui.researchRecoveryPanel({status:'available'},true),/research-recovery-approve/);
+assert.match(ui.researchRecoveryPanel({status:'active'},false),/research-recovery-run/);
+const stopped=ui.researchRecoveryPanel({status:'stopped',diagnostics:{...researchFailure,
+  failure:{...researchFailure.failure,category:'decision_invalid',rule:'option_not_allowed'}}},false);
+assert.match(stopped,/관리자·대표 검토.*판단 규칙 위반.*option_not_allowed/s);
+assert.doesNotMatch(stopped,/data-action=/);
+const blocked=ui.researchRecoveryPanel({status:'blocked',reason:'decision_recovery_blocked'},false);
+assert.match(blocked,/복구가 차단.*응답·예약 기록/s);
+assert.doesNotMatch(blocked,/data-action=/);

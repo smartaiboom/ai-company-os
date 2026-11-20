@@ -7,7 +7,9 @@ from time import monotonic
 from urllib.parse import urlsplit
 
 from autonomous_company import CompanyError, digest, exact, now, parse, require
+from decision_recovery import DecisionViolation, ProviderFailure
 from goal_dialogue import safe_text
+from role_json_schema import S, arr, enum, obj
 from research_https import _PinnedHTTPS, _global_addresses
 
 TAVILY='https://api.tavily.com/search'
@@ -52,7 +54,9 @@ def tavily_search(query,key):
         conn.request('POST','/search',body=raw,headers={'Authorization':'Bearer '+key,
             'Content-Type':'application/json','Accept':'application/json','Accept-Encoding':'identity'})
         with conn.getresponse() as response:
-            require(response.status==200 and response.headers.get_content_type()=='application/json'
+            if response.status != 200:
+                raise ProviderFailure('research_search_failed')
+            require(response.headers.get_content_type()=='application/json'
                     and response.getheader('Content-Encoding','identity')=='identity','research_search_failed')
             body=response.read(128*1024+1)
         require(len(body)<=128*1024 and key.encode() not in body and monotonic()<=deadline,'research_search_failed')
@@ -89,58 +93,111 @@ class Tool:
                     options={key:value for key,value in self.options.items() if (self.name,key) not in used})
 
 
-def validate_step(step,tools,used,observations,final=False):
-    exact(step,('tool','option','claims','feasibility'))
-    name,option=step['tool'],step['option']
-    require(isinstance(name,str) and isinstance(option,str) and isinstance(step['claims'],list)
-            and len(step['claims'])<=5,'research_step_invalid')
-    if name=='finish':
-        require(option=='' and step['claims'],'research_step_invalid')
-        safe_text(step['feasibility'],460)
-        known={row['id']:row for group in observations for row in group['sources']}
-        for claim in step['claims']:
-            exact(claim,('statement','assessment','citations'))
-            safe_text(claim['statement'],400)
-            require(claim['assessment'] in ('supported','conflicting','unverified')
-                    and isinstance(claim['citations'],list) and len(claim['citations'])<=4,'research_step_invalid')
-            seen=set()
-            for ref in claim['citations']:
-                exact(ref,('source','quote'))
-                safe_text(ref['quote'],200)
-                require(isinstance(ref['source'],str) and ref['source'] in known and ref['source'] not in seen
-                        and ref['quote'] in known[ref['source']]['excerpt'],'research_evidence_invalid')
-                seen.add(ref['source'])
-            if claim['assessment']!='unverified':
-                sources=[known[row['source']] for row in claim['citations']]
-                origins={row['origin'] for row in sources if row['origin']}
-                require(len(origins)>=2 and len({row['host'] for row in sources if row['origin']})>=2
-                        and all(row['scope'] in ('public_page','api_metric') for row in sources),
-                        'research_evidence_invalid')
+STEP_RULES = {
+    'legacy_step_invalid': 'Use one allowed tool/option or return a complete finish report.',
+    'invalid_step_fields': 'Return exactly tool, option, claims and feasibility with their specified types.',
+    'finish_required': 'Return finish because no tool selection remains at this step.',
+    'tool_not_allowed': 'Choose a tool from the current list or finish.',
+    'option_not_allowed': 'Use an unused exact option listed for the chosen tool.',
+    'mixed_tool_and_report': 'For a tool choice return empty claims and empty feasibility.',
+    'invalid_finish': 'For finish return an empty option, one to five claims and a feasibility statement.',
+    'invalid_claim': 'Use an allowed assessment and up to four citations with the required fields.',
+    'invalid_report_text': 'Supply nonblank report text within the documented lengths.',
+    'invalid_citation': 'Cite a known observation once per claim and quote its excerpt exactly.',
+    'insufficient_independent_evidence': 'Use two independent eligible origins or mark the claim unverified.',
+}
+
+
+def step_schema(context):
+    claims = arr(obj(statement=S, assessment=enum('supported', 'conflicting', 'unverified'),
+                     citations={**arr(obj(source=S, quote=S)), 'maxItems': 4}))
+    finish = obj(tool=enum('finish'), option=enum(''), claims={**claims, 'minItems': 1, 'maxItems': 5},
+                 feasibility=S)
+    selections = [
+        obj(tool=enum(tool['name']), option=enum(*tool['options']),
+            claims={**claims, 'maxItems': 0}, feasibility=enum(''))
+        for tool in context['tools']
+    ]
+    return {'anyOf': [*selections, finish]} if selections else finish
+
+
+def check_step(condition, rule, code='research_step_invalid'):
+    if not condition:
+        raise DecisionViolation(code, rule)
+
+
+def report_text(value, limit):
+    # Credential-like text stays a security rejection and is never eligible for correction.
+    check_step(isinstance(value, str) and bool(value.strip()) and len(value) <= limit, 'invalid_report_text')
+    safe_text(value, limit)
+
+
+def validate_step(step, tools, used, observations, final=False):
+    check_step(isinstance(step, dict) and set(step) == {'tool', 'option', 'claims', 'feasibility'},
+               'invalid_step_fields')
+    name, option = step['tool'], step['option']
+    check_step(isinstance(name, str) and isinstance(option, str) and isinstance(step['claims'], list),
+               'invalid_step_fields')
+    if name != 'finish':
+        check_step(not final, 'finish_required')
+        check_step(name in tools, 'tool_not_allowed')
+        check_step(option in tools[name].options and (name, option) not in used, 'option_not_allowed')
+        check_step(not step['claims'] and step['feasibility'] == '', 'mixed_tool_and_report')
         return
-    require(not final and name in tools and option in tools[name].options and (name,option) not in used
-            and not step['claims'] and step['feasibility']=='','research_step_invalid')
+
+    check_step(option == '' and 1 <= len(step['claims']) <= 5, 'invalid_finish')
+    report_text(step['feasibility'], 460)
+    known = {row['id']: row for group in observations for row in group['sources']}
+    for claim in step['claims']:
+        check_step(isinstance(claim, dict) and set(claim) == {'statement', 'assessment', 'citations'},
+                   'invalid_claim')
+        report_text(claim['statement'], 400)
+        check_step(claim['assessment'] in ('supported', 'conflicting', 'unverified')
+                   and isinstance(claim['citations'], list) and len(claim['citations']) <= 4, 'invalid_claim')
+        seen = set()
+        for ref in claim['citations']:
+            check_step(isinstance(ref, dict) and set(ref) == {'source', 'quote'}, 'invalid_claim')
+            report_text(ref['quote'], 200)
+            check_step(isinstance(ref['source'], str) and ref['source'] in known and ref['source'] not in seen
+                       and ref['quote'] in known[ref['source']]['excerpt'], 'invalid_citation', 'research_evidence_invalid')
+            seen.add(ref['source'])
+        if claim['assessment'] != 'unverified':
+            sources = [known[row['source']] for row in claim['citations']]
+            origins = {row['origin'] for row in sources if row['origin']}
+            check_step(len(origins) >= 2 and len({row['host'] for row in sources if row['origin']}) >= 2
+                       and all(row['scope'] in ('public_page', 'api_metric') for row in sources),
+                       'insufficient_independent_evidence', 'research_evidence_invalid')
 
 
-def run(store, tools, decide, invoke, rounds):
-    """Use one consumed operation per new observation. The caller supplies the signed executor."""
-    observations=[]
-    used=set()
-    for index in range(rounds):
-        final=index==rounds-1
-        remaining={tool.name:tool for tool in tools.values()
-                   if not final and (not tool.operation or not any(name==tool.name for name,_ in used))}
-        context=dict(tools=[tool.describe(used) for tool in remaining.values()],observations=observations,
-                     finish_required=final)
-        step=decide(index,context)
-        validate_step(step,remaining,used,observations,final)
+def step_context(tools, observations, final):
+    used = {(row['tool'], row['option']) for row in observations}
+    remaining = {}
+    choices = []
+    for tool in tools.values():
+        if final or (tool.operation and any(name == tool.name for name, _ in used)):
+            continue
+        choice = tool.describe(used)
+        if choice['options']:
+            choices.append(choice)
+            remaining[tool.name] = tool
+    return (dict(tools=choices, observations=observations, finish_required=not choices),
+            (remaining, used, observations, not choices))
+
+
+def run(store, tools, decide, invoke, rounds, *, history=()):
+    """Continue from verified observations supplied by the domain adapter."""
+    observations = list(history)
+    for index in range(len(observations), rounds):
+        context, runtime = step_context(tools, observations, index == rounds - 1)
+        step = decide(index, context)
+        validate_step(step, *runtime)
         if step['tool']=='finish':
             result=dict(at=now(),claims=step['claims'],feasibility=step['feasibility'],observations=observations,
                         status='manager_review',publish_allowed=False)
             store.write('research-result.json',result)
             return result
-        tool=remaining[step['tool']]
+        tool=tools[step['tool']]
         option=step['option']
-        used.add((tool.name,option))
         output=[]
         def collect(check):
             check()

@@ -77,7 +77,7 @@ def fetch_public_text(parsed,kind,*,agent,connect,resolve,page_limit):
         connection.request('GET',parsed.path,headers={'User-Agent':agent,
             'Accept':'text/plain' if kind=='robots' else 'text/html','Accept-Encoding':'identity'})
         with connection.getresponse() as response:
-            if response.status in (401,403,404) or 300<=response.status<400:
+            if response.status in (401,403,404,410) or 300<=response.status<400:
                 return dict(status=response.status,text=None)
             if response.status != 200:
                 raise ProviderFailure('publisher_http_failure')
@@ -126,7 +126,20 @@ def robots_allows(text,path):
     return applicable
 
 
-def observe_approved_page(page, robots, invoke, fetch, extract, cache):
+def robots_access(response, path, *, absence_policy_confirmed=False):
+    """Classify the protocol result separately from the caller's exact-path policy."""
+    status = response.get('status')
+    if status in (404, 410):
+        return ('robots_absent_policy_confirmed' if absence_policy_confirmed
+                else 'robots_absent_policy_unconfirmed')
+    if status in (401, 403):
+        return 'robots_auth_denied'
+    if status == 200 and response.get('text'):
+        return 'robots_allowed' if robots_allows(response['text'], path) else 'robots_rule_blocked'
+    return 'robots_permission_unconfirmed'
+
+
+def observe_approved_page(page, robots, invoke, fetch, extract, cache, *, absence_policy_confirmed=False):
     """Observe one exact approved page, charging separate robots and page requests."""
     host = page['host']
     requests = []
@@ -144,15 +157,23 @@ def observe_approved_page(page, robots, invoke, fetch, extract, cache):
         return response
 
     if host not in cache:
-        cache[host] = get(robots)['text']
-    if not robots_allows(cache[host], page['path']):
-        return dict(status='policy_blocked', reason='robots_permission_unconfirmed', sources=[], requests=requests)
+        cache[host] = get(robots)
+    access = robots_access(cache[host], page['path'], absence_policy_confirmed=absence_policy_confirmed)
+    if access not in ('robots_allowed','robots_absent_policy_confirmed'):
+        result = dict(status='policy_blocked', reason=access, sources=[], requests=requests)
+        if access != 'robots_rule_blocked':
+            result['blocked_host'] = host
+        return result
     response = get(page)
     if response['text'] is None:
         if response['status'] in (401, 403):
-            cache[host] = None
-        return dict(status='unavailable', reason='restricted_or_unavailable', sources=[], requests=requests)
+            cache[host] = {'status':response['status']}
+        result = dict(status='unavailable', reason='restricted_or_unavailable', sources=[], requests=requests)
+        if response['status'] in (401, 403):
+            result['blocked_host'] = host
+        return result
     observed = extract(page['url'], response['text'])
     if observed['status'] == 'policy_blocked':
-        cache[host] = None
-    return {**observed, 'requests':requests}
+        cache[host] = {'status':403}
+        observed['blocked_host'] = host
+    return {**observed, 'requests':requests, 'access_basis':access}

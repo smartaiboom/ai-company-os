@@ -284,10 +284,13 @@ def validate_supervised_step(step, tools, used, observations, final):
 
 def step_context(tools, observations, final):
     used = {(row['tool'], row['option']) for row in observations}
+    blocked_hosts = {row['blocked_host'] for row in observations if row.get('blocked_host')}
     remaining = {}
     choices = []
     for tool in tools.values():
-        if final or (tool.operation and any(name == tool.name for name, _ in used)):
+        if (final or (tool.operation and any(name == tool.name for name, _ in used))
+                or any(urlsplit(request['endpoint']).hostname in blocked_hosts for request in tool.requests
+                       if 'endpoint' in request)):
             continue
         choice = tool.describe(used)
         if choice['options']:
@@ -296,6 +299,25 @@ def step_context(tools, observations, final):
     return (dict(tools=choices, observations=observations, evidence_catalog=evidence_catalog(observations),
                  finish_required=not choices),
             (remaining, used, observations, not choices))
+
+
+def compact_observations(observations):
+    return [{key:item[key] for key in ('tool','option','status','reason') if key in item}
+            | {'source_count':len(item['sources']),
+               'http_statuses':[row['http_status'] for row in item.get('requests', [])]}
+            for item in observations]
+
+
+def review_evidence(report, observations):
+    """Give the reviewer exact cited excerpts once, plus omitted candidate metadata."""
+    catalog = evidence_catalog(observations)
+    cited = {ref['source'] for claim in report['claims'] for ref in claim['citations']}
+    claims = [{**claim, 'citations':[ref['source'] for ref in claim['citations']]} for claim in report['claims']]
+    retained = cited | {ref for ref,row in catalog.items() if row['scope']=='public_page'}
+    uncited = [{key:row[key] for key in ('id','origin','scope')} for ref,row in catalog.items() if ref not in retained]
+    return dict(staff_report=dict(claims=claims, feasibility=report['feasibility']),
+                evidence_catalog={ref:row for ref,row in catalog.items() if ref in retained},
+                uncited_candidates=uncited, observations=compact_observations(observations))
 
 
 def research_report(step, observations):
@@ -392,4 +414,9 @@ def decision_shape(value, *, phase, tools, evidence_count):
                                       'display_value' if option in selected.options.values() else 'other_string')
         else:
             result['option_shape'] = 'unrecognized_structure'
+    if phase == 'report' and isinstance(decision, dict) and isinstance(decision.get('claims'), list):
+        claims = decision['claims']
+        result['claim_count'] = len(claims)
+        result['max_citations'] = max((len(claim['citations']) for claim in claims if isinstance(claim, dict)
+                                       and isinstance(claim.get('citations'), list)),default=0)
     return result

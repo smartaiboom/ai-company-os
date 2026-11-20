@@ -268,8 +268,9 @@ class ReplanningTests(TestCase):
                         sources = (next(row for row in prompt['evidence_catalog'].values()
                                         if row['origin']=='Klei Entertainment'),metric)
                         self.assertIn('Released for editorial use.',sources[0]['excerpt'])
-                    self.assertEqual(prompt['staff_report']['claims'][0]['citations'],[
-                        dict(source=row['id'], quote=row['excerpt']) for row in sources])
+                    self.assertEqual(prompt['staff_report']['claims'][0]['citations'],[row['id'] for row in sources])
+                    self.assertEqual([prompt['evidence_catalog'][row['id']]['excerpt'] for row in sources],
+                                     [row['excerpt'] for row in sources])
                 return Reply(dict(decision=dict(action=action,rationale='Checked observation scope.',
                     feedback='Compare both sources directly.',confirmation='Check the dates.',
                     checks=[dict(criterion_id='objective',status='met' if accepted else 'unmet',
@@ -454,3 +455,18 @@ class ReplanningTests(TestCase):
         with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
             final.validate_response(dict(decision={**report['decision'],'claims':[
                 dict(statement='Fake citation',assessment='unverified',citations=['invented'])]}))
+
+    def test_supervised_report_wire_bounds_and_safe_claim_counts(self):
+        from research_supervision import worker_for
+        worker = worker_for(SimpleNamespace(root=Path('/tmp/report-shape-fixture')),{},
+                            {},[],2,None,{},reporting=True)
+        claims = worker._payload(None)['generationConfig']['responseJsonSchema']['properties']['decision']['properties']['claims']
+        self.assertEqual((claims['minItems'],claims['maxItems']),(1,5))
+        self.assertEqual(claims['items']['properties']['citations']['maxItems'],4)
+        value = dict(decision=dict(tool='finish',option='',feasibility='Check original evidence.',
+            claims=[dict(statement='Raw fixture text',assessment='unverified',citations=['fixture']*5)]))
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid') as failure:
+            worker.validate_response(value)
+        self.assertEqual(failure.exception.rule,'invalid_claim')
+        self.assertEqual(failure.exception.safe_shape['max_citations'],5)
+        self.assertNotIn('Raw fixture text',json.dumps(failure.exception.safe_shape))

@@ -643,6 +643,7 @@ function researchSupervisionPanel(state, readonly) {
     ${proposal?`<p>이전 누적 · Gemini 예약 ${h(proposal.historical_usage.gemini)}회 · Tavily 예약 ${h(proposal.historical_usage.tavily)}회</p>
       <p>추가 · 직원 ${h(limits.staff)}회 · 관리자 ${h(limits.manager)}회(최종 독립 검토 1회 포함) · Gemini 합계 ${h(limits.gemini)}회 · Tavily ${h(limits.tavily)}회 · 공식 HTML·robots GET ${h(limits.official_gets || 0)}회 · 보완 최대 ${h(limits.revisions)}회 · 다운로드 0회 · 비용 $0</p>
       ${limits.final_staff_report_reserved?`<p>최종 직원 보고 1회와 독립 검토 1회 확보 · 도구 선택은 판단당 최대 ${h(proposal.max_batch_tools)}개</p>`:''}
+      ${proposal.reused_search_leads?`<p>재사용 검색 단서 ${h(proposal.reused_search_leads)}건 · 공식 원문과 구분</p>`:''}
       ${(proposal.preserved_sources || []).map(source=>`<p>보존 자료 · ${h(source.tool)} · 사용 가능 ${h(source.preserved)}건 · 기간 경과 ${h(source.stale)}건 · 제외 ${h(source.excluded)}건</p>`).join('')}
       ${!proposal.direct_page_available?`<p>직접 확인한 공식 페이지 도구가 현재 목록에 없습니다. 공개 검색은 단서를 수집할 수 있습니다.</p>`:''}`:''}
     ${state.assignment?`<p>관리자 수행 목표 · ${h(state.assignment.manager_direction)}</p><p>성공 기준 · ${h(state.assignment.manager_success_criteria)}</p>`:''}

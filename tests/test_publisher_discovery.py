@@ -181,3 +181,37 @@ class PublisherDiscoveryTests(TestCase):
             invoke,fetch,lambda url, text:dict(status='observed',sources=[text]),{})
         self.assertEqual(result['sources'],['Public inventory'])
         self.assertEqual(charged,['robots','page'])
+
+    def test_robots_absence_requires_separate_path_policy_and_known_host_block_removes_choice(self):
+        from research_https import robots_access, observe_approved_page
+        from web_research import Tool, step_context
+
+        host = 'archive.example'
+        page = dict(kind='page',path='/public',host=host,url=f'https://{host}/public',
+                    operation=dict(id='page',payload_sha256='page-fixture'))
+        robots = dict(kind='robots',url=f'https://{host}/robots.txt',
+                      operation=dict(id='robots',payload_sha256='robots-fixture'))
+        for code in (404,410):
+            missing = dict(status=code,text=None)
+            self.assertEqual(robots_access(missing,'/public'),'robots_absent_policy_unconfirmed')
+            self.assertEqual(robots_access(missing,'/public',absence_policy_confirmed=True),
+                             'robots_absent_policy_confirmed')
+        for code in (401,403,429,500,503,302):
+            self.assertNotIn(robots_access(dict(status=code),'/public',absence_policy_confirmed=True),
+                             ('robots_allowed','robots_absent_policy_confirmed'))
+        self.assertEqual(robots_access(dict(status=200,text='User-agent: *\nDisallow: /public'),'/public',
+                                      absence_policy_confirmed=True),'robots_rule_blocked')
+        for authorized in (False, True):
+            with self.subTest(authorized=authorized):
+                get = Mock(side_effect=[dict(status=404,text=None),dict(status=200,text='Public source')])
+                result = observe_approved_page(page,robots,lambda _op,_hash,execute:execute(lambda:None),get,
+                    lambda url,body:dict(status='observed',sources=[]),{},absence_policy_confirmed=authorized)
+                self.assertEqual(get.call_count,2 if authorized else 1)
+                self.assertEqual(result['status'],'observed' if authorized else 'policy_blocked')
+                if not authorized:
+                    other = Tool('new_page','Same publisher',{'id':'exact'},None,
+                                 requests=(dict(endpoint=f'https://{host}/other'),))
+                    alternate = Tool('cached','Alternate',{'saved':'records'},None)
+                    context, _ = step_context({tool.name:tool for tool in (other,alternate)},
+                        [{**result,'tool':'initial','option':'id'}],False)
+                    self.assertEqual([item['name'] for item in context['tools']],['cached'])

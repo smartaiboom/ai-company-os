@@ -11,7 +11,7 @@ from commons_discovery import USER_AGENT, adaptive_queries, plain, status as dis
 from commons_recovery import status as relevance_status, terms
 from goal_dialogue import safe_text
 from mission_production import ProductionManager, approved_manager_result, canonical_bytes, production_keys
-from research_https import _PinnedHTTPS, _global_addresses, fetch_public_text, robots_allows
+from research_https import _PinnedHTTPS, _global_addresses, fetch_public_text, observe_approved_page, robots_allows
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import delegated_call, run_worker, unit
 from role_json_schema import S, arr, enum, obj
@@ -293,10 +293,7 @@ def acquire(manager,plan,clips,store,key,scope):
             if entry['id']=='rights':
                 if parsed_page['text']:
                     policies.append(dict(url=url,text=parsed_page['text']))
-                    access_prohibited=bool(re.search(
-                        r"(?:no|prohibit\w*|may not|must not|do not).{0,50}(?:automated access|scraping|crawling)"
-                        r"|(?:automated access|scraping|crawling).{0,40}(?:not permitted|prohibited|forbidden)",
-                        parsed_page['text'],re.I))
+                    access_prohibited=prohibits_automation(parsed_page['text'])
                 return
             for item in parsed_page['assets']:
                 item['asset_access']=robots_allows(robots.get(profile['asset_host']),urlsplit(item['url']).path)
@@ -328,6 +325,67 @@ def acquire(manager,plan,clips,store,key,scope):
     require(len(canonical_bytes(result))<=110000,'publisher_response_limit')
     store.write('discovery.json',result)
     store.write('done.json',dict(result_sha256=digest(result),at=now()))
+
+
+def prohibits_automation(text):
+    return bool(re.search(
+        r"(?:no|prohibit\w*|may not|must not|do not).{0,50}(?:automated access|scraping|crawling)"
+        r"|(?:automated access|scraping|crawling).{0,40}(?:not permitted|prohibited|forbidden)", text, re.I))
+
+
+def official_research_tools(manager, plan):
+    from web_research import Tool, evidence
+
+    if manager is None:
+        return {}, None
+    store = store_for(manager, plan)
+    grant = store.read('policy.json')
+    if not grant or store.read('revoked.json'):
+        return {}, None
+    scope = grant['proposal']
+    profile = PROFILES.get(scope.get('profile'))
+    require(scope['binding'] == store.binding and profile and scope['profile_rules'] == profile,
+            'owner_policy_scope_changed')
+    entries = [entry for entry in scope['entries'] if entry['kind'] == 'page'
+               or entry['id'] == 'robots-pages']
+    require(2 <= len(entries) <= 4, 'publisher_url_blocked')
+    allowed = {}
+    for entry in entries:
+        parsed = profile_url(profile, entry['url'], entry['kind'])
+        require(parsed.netloc == profile['page_host'] and get_unit(entry) in scope['units'],
+                'owner_policy_scope_changed')
+        allowed[entry['id']] = {**entry, 'host':parsed.hostname, 'path':parsed.path,
+            'operation':{**get_unit(entry), 'id':'official-'+get_unit(entry)['id']}}
+    robots = allowed.pop('robots-pages', None)
+    require(robots and robots['kind'] == 'robots', 'publisher_url_blocked')
+    cache = {}
+
+    def fetch(url, kind):
+        return fetch_public(profile, url, kind)
+
+    def extract(url, text):
+        page = extract_page(profile, url, text)
+        if page['restricted'] or prohibits_automation(page['text']):
+            return dict(status='policy_blocked', reason='publisher_access_restricted', sources=[])
+        original = page['text']
+        if not original:
+            return dict(status='empty', sources=[])
+        excerpts = [original[index:index+600].strip() for index in range(0, len(original), 600)]
+        sources = [evidence(url, page['title'][:200] or profile['issuer'], excerpt, 'public_page', profile['issuer'])
+                   for excerpt in excerpts if excerpt]
+        return dict(status='observed', sources=sources)
+
+    tools = {}
+    for identifier, entry in allowed.items():
+        require(entry['kind'] == 'page', 'publisher_url_blocked')
+        name = 'official-page-'+identifier
+        def observe(option, invoke, entry=entry):
+            require(option == 'approved', 'publisher_url_blocked')
+            return observe_approved_page(entry, robots, invoke, fetch, extract, cache)
+        tools[name] = Tool(name, 'Read this exact approved official HTML URL. Rights require independent review.',
+                          {'approved':entry['url']}, None, requests=(robots['operation'], entry['operation']),
+                          observe=observe)
+    return tools, digest(grant)
 
 
 def rights_review(store,body):

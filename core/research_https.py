@@ -9,6 +9,7 @@ from threading import Thread, Timer
 from time import monotonic
 
 from autonomous_company import CompanyError, require
+from decision_recovery import ProviderFailure
 
 
 def _global_addresses(host, deadline):
@@ -78,7 +79,8 @@ def fetch_public_text(parsed,kind,*,agent,connect,resolve,page_limit):
         with connection.getresponse() as response:
             if response.status in (401,403,404) or 300<=response.status<400:
                 return dict(status=response.status,text=None)
-            require(response.status==200,'publisher_http_failure')
+            if response.status != 200:
+                raise ProviderFailure('publisher_http_failure')
             mime='text/plain' if kind=='robots' else 'text/html'
             if (response.headers.get_content_type()!=mime or
                     response.getheader('Content-Encoding','identity').lower()!='identity'):
@@ -122,3 +124,35 @@ def robots_allows(text,path):
                     return False
         previous=key
     return applicable
+
+
+def observe_approved_page(page, robots, invoke, fetch, extract, cache):
+    """Observe one exact approved page, charging separate robots and page requests."""
+    host = page['host']
+    requests = []
+
+    def get(entry):
+        response = {}
+
+        def read(check):
+            check()
+            response.update(fetch(entry['url'], entry['kind']))
+
+        operation = entry['operation']
+        invoke(operation, operation['payload_sha256'], read)
+        requests.append(dict(url=entry['url'], kind=entry['kind'], http_status=response['status']))
+        return response
+
+    if host not in cache:
+        cache[host] = get(robots)['text']
+    if not robots_allows(cache[host], page['path']):
+        return dict(status='policy_blocked', reason='robots_permission_unconfirmed', sources=[], requests=requests)
+    response = get(page)
+    if response['text'] is None:
+        if response['status'] in (401, 403):
+            cache[host] = None
+        return dict(status='unavailable', reason='restricted_or_unavailable', sources=[], requests=requests)
+    observed = extract(page['url'], response['text'])
+    if observed['status'] == 'policy_blocked':
+        cache[host] = None
+    return {**observed, 'requests':requests}

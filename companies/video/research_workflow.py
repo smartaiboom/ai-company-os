@@ -193,6 +193,13 @@ def available(workflow,project,inputs,search_key=None):
     return store,tools,model,scope
 
 
+def official_supervision_scope(inputs, tools, scope):
+    from publisher_discovery import official_research_tools
+    official, provenance = official_research_tools(inputs[2], inputs[3])
+    return {**tools, **official}, {**scope, 'publisher_policy_provenance':provenance,
+        'tool_options':[*scope['tool_options'], *(tool.describe(set()) for tool in official.values())]}
+
+
 RESEARCH_ERROR_STAGES={
     'research_step_invalid':'step_validation',
     'invalid_manager_plan_schema':'step_validation',
@@ -403,7 +410,11 @@ def status(workflow,project):
             replan = state(store, base, tools, model, scope)
             if (replan.get('review') or {}).get('decision', {}).get('action') == 'hold':
                 from research_supervision import state as supervision_state
-                supervision = supervision_state(store, base, tools, scope)
+                try:
+                    new_tools, new_scope = official_supervision_scope(inputs, tools, scope)
+                    supervision = supervision_state(store, base, new_tools, new_scope)
+                except CompanyError as exc:
+                    supervision = dict(status='blocked', reason=exc.code)
     new_result = (supervision or {}).get('result') or (replan or {}).get('result')
     return dict(status='revoked' if store.read('revoked.json') else 'review' if result and review else
                 'stopped' if ledger else
@@ -480,7 +491,8 @@ def action(workflow,pid,name,body):
         credential=digest([gemini,search])
         store,tools,model,scope=available(workflow,project,inputs,search)
         if name in SUPERVISION[:2]:
-            return supervise(store, base, tools, scope, name, body, credential, gemini)
+            new_tools, new_scope = official_supervision_scope(inputs, tools, scope)
+            return supervise(store, base, new_tools, new_scope, name, body, credential, gemini)
         if name in ACTIONS:
             return replan_action(store, base, tools, model, scope, name, body, credential, gemini)
         if name=='research-approve':

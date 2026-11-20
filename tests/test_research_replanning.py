@@ -26,7 +26,8 @@ class ReplanningTests(TestCase):
         for scenario in ('reinvestigate', 'alternative', 'hold', 'ask_owner', 'insufficient', 'key_changed',
                          'scope_changed', 'expired', 'revoked', 'provider_error', 'timeout', 'research_timeout',
                          'supervise', 'supervise_early', 'supervise_empty', 'supervise_stall', 'supervise_timeout',
-                         'supervise_signature', 'supervise_key', 'supervise_expired', 'supervise_revoked'):
+                         'supervise_signature', 'supervise_key', 'supervise_expired', 'supervise_revoked',
+                         'supervise_official', 'supervise_search_official'):
             with self.subTest(scenario=scenario), TemporaryDirectory() as tmp, ExitStack() as stack:
                 store = Store(Path(tmp))
                 project = store.create('Research target', opt_in=True)
@@ -40,7 +41,7 @@ class ReplanningTests(TestCase):
                 metric = evidence('https://other.example/media','API measurement','Published Tuesday.',
                                   'api_metric','platform')
                 stack.enter_context(patch.dict('os.environ', ENV, clear=False))
-                stack.enter_context(patch('research_workflow.context', return_value=(base,queries,None,None)))
+                inputs = stack.enter_context(patch('research_workflow.context', return_value=(base,queries,None,None)))
                 stack.enter_context(patch('research_workflow.cached_publishers', return_value=([page],[])))
                 stack.enter_context(patch('research_workflow.cached_youtube', return_value=[metric]))
                 stack.enter_context(patch('socket.socket.connect', side_effect=AssertionError('network disabled')))
@@ -167,11 +168,28 @@ class ReplanningTests(TestCase):
                             deny('research-reinvestigate-run','owner_policy_exhausted')
                             self.assertEqual(send.call_count,5 if insufficient else 7)
                             if scenario.startswith('supervise'):
-                                self.exercise_supervision(scenario, source, current, perform, deny, send, search, page, metric)
+                                fetch = None
+                                if scenario.endswith('official'):
+                                    import publisher_discovery as publisher
+                                    from owner_operating_policy import OwnerOperatingPolicy
+                                    saved = OwnerOperatingPolicy(store.root/'approved-publisher', {'scope':'fixture'})
+                                    entries = [dict(id='robots-pages',kind='robots',url='https://www.klei.com/robots.txt'),
+                                               dict(id='rights',kind='page',url='https://www.klei.com/creation-guidelines')]
+                                    scope = {**saved.proposal([publisher.get_unit(entry) for entry in entries]),
+                                             'profile':'klei','profile_rules':publisher.PROFILES['klei'],'entries':entries}
+                                    saved.approve(scope,digest(scope),'fixture')
+                                    inputs.return_value = (base,queries,object(),{})
+                                    stack.enter_context(patch('research_workflow.cached_commons', return_value=[]))
+                                    stack.enter_context(patch('publisher_discovery.store_for',return_value=saved))
+                                    fetch = stack.enter_context(patch('publisher_discovery.fetch_public',side_effect=[
+                                        dict(status=200,text='User-agent: *\nDisallow: /private/'),
+                                        dict(status=200,text='<title>Rights policy</title><p>Released for editorial use.</p>')]))
+                                self.exercise_supervision(scenario, source, current, perform, deny, send, search,
+                                                          page, metric, fetch)
                 self.assertEqual((source.attempts(), recovery.attempts()), previous)
-                self.assertEqual(search.call_count, int(scenario == 'supervise_empty'))
+                self.assertEqual(search.call_count, int(scenario in ('supervise_empty','supervise_search_official')))
 
-    def exercise_supervision(self, scenario, source, current, perform, deny, send, search, page, metric):
+    def exercise_supervision(self, scenario, source, current, perform, deny, send, search, page, metric, fetch=None):
         from research_supervision import supervision_store
 
         held = stores(source)[1]
@@ -179,6 +197,9 @@ class ReplanningTests(TestCase):
         offer = current()['supervision']
         self.assertEqual(offer['proposal']['historical_usage']['gemini'],5)
         self.assertEqual(offer['proposal']['limits']['gemini'],5)
+        self.assertEqual(offer['proposal']['limits']['official_gets'],2 if fetch else 0)
+        if fetch:
+            fetch.assert_not_called()
         deny('research-supervision-run','owner_policy_required')
         perform('research-supervision-approve',confirmed=True,review_hash=offer['review_hash'])
         self.assertEqual(send.call_count,5)
@@ -207,7 +228,8 @@ class ReplanningTests(TestCase):
             return
         staff = []
         reviews = []
-        search.return_value = []
+        search.return_value = [evidence('https://www.klei.com/creation-guidelines','Policy','A search lead.',
+                                       'search_lead')] if scenario == 'supervise_search_official' else []
         report = dict(tool='finish', option='', claims=[dict(statement='Dates remain uncertain',
                       assessment='unverified', citations=[])], feasibility='Check further dates.')
 
@@ -218,15 +240,19 @@ class ReplanningTests(TestCase):
             deny('research-supervision-run','project_busy')
             if prompt['goal']=='Review achievement of the assigned goal':
                 reviews.append(prompt)
-                accepted = scenario == 'supervise' and len(reviews) == 2
+                accepted = scenario in ('supervise','supervise_official') and len(reviews) == 2
                 action = 'accept' if accepted else 'hold' if scenario == 'supervise_empty' or len(reviews)==2 else 'revise'
                 permitted = wire['generationConfig']['responseJsonSchema']['properties']['decision']['properties']['action']['enum']
                 self.assertEqual('accept' in permitted,accepted)
                 if len(reviews) == 2:
                     self.assertNotIn('revise',permitted)
                 if accepted:
+                    sources = (page,metric)
+                    if fetch:
+                        sources = (next(row for row in prompt['evidence_catalog'].values() if row['scope']=='public_page'),metric)
+                        self.assertIn('Released for editorial use.',sources[0]['excerpt'])
                     self.assertEqual(prompt['staff_report']['claims'][0]['citations'],[
-                        dict(source=row['id'], quote=row['excerpt']) for row in (page,metric)])
+                        dict(source=row['id'], quote=row['excerpt']) for row in sources])
                 return Reply(dict(decision=dict(action=action,rationale='Checked observation scope.',
                     feedback='Compare both sources directly.',confirmation='Check the dates.',
                     checks=[dict(criterion_id='objective',status='met' if accepted else 'unmet',
@@ -240,8 +266,10 @@ class ReplanningTests(TestCase):
                     raise TimeoutError()
                 if scenario == 'supervise_early':
                     return Reply(report)
-                if scenario == 'supervise_empty':
+                if scenario in ('supervise_empty','supervise_search_official'):
                     return Reply(dict(tool='web_search',option='game',claims=[],feasibility=''))
+                if fetch:
+                    return Reply(dict(tool='official-page-rights',option='approved',claims=[],feasibility=''))
                 return Reply(dict(tool='publisher_page',option='saved',claims=[],feasibility=''))
             if scenario == 'supervise_empty':
                 return Reply({**report,'tool':'hold','unavailable':[
@@ -250,10 +278,20 @@ class ReplanningTests(TestCase):
             if scenario == 'supervise_stall':
                 return Reply(report)
             if len(staff) == 2:
+                if scenario == 'supervise_search_official':
+                    self.assertTrue(any(row['scope']=='search_lead' for row in prompt['evidence_catalog'].values()))
+                    return Reply(dict(tool='official-page-rights',option='approved',claims=[],feasibility=''))
                 return Reply(dict(tool='youtube_metrics',option='saved',claims=[],feasibility=''))
             self.assertEqual(prompt['manager_revision']['action'],'revise')
+            if fetch:
+                official = next(row['id'] for row in prompt['evidence_catalog'].values() if row['scope']=='public_page')
+                if scenario == 'supervise_search_official':
+                    return Reply({**report,'claims':[dict(statement='An independent source remains missing.',
+                                 assessment='unverified',citations=[official])]})
+            else:
+                official = page['id']
             return Reply({**report,'claims':[dict(statement='A release and listing date are separately documented.',
-                         assessment='supported', citations=[page['id'],metric['id']])]})
+                         assessment='supported', citations=[official,metric['id']])]})
 
         send.side_effect = respond
         if scenario in ('supervise_early','supervise_timeout'):
@@ -264,7 +302,11 @@ class ReplanningTests(TestCase):
         else:
             perform('research-supervision-run')
             current_state = current()['supervision']
-            achieved = scenario == 'supervise'
+            achieved = scenario in ('supervise','supervise_official')
+            if fetch:
+                self.assertEqual(fetch.call_count,2)
+                self.assertEqual(current_state['remaining']['official_gets'],0)
+                self.assertTrue(any(item['requests'] for item in current_state['choices']))
             self.assertEqual(current_state['status'],'achieved' if achieved else 'incomplete')
             self.assertEqual(bool(reviewed_handoff(source)),achieved)
             if scenario == 'supervise_empty':

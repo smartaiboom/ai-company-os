@@ -627,7 +627,7 @@ function researchSupervisionPanel(state, readonly) {
     active:'새 승인 완료 · 실행 대기',achieved:'관리자가 목표 달성을 확인했습니다. 조사 참고 범위에 적용됩니다.',
     incomplete:'응답 검증 완료 · 실제 업무 목표 미달성',stopped:'보완 업무 중단 · 관리자·대표 검토 필요',
     expired:'보완 승인 만료',revoked:'보완 승인 철회',blocked:'기존 서명, 보류 또는 현재 범위를 확인할 수 없어 차단됐습니다.'};
-  const tools={observed:'관측 확보',empty:'호출 결과 0건',failed:'호출 중단',unconfirmed:'수행 결과 미확정'};
+  const tools={observed:'관측 확보',empty:'호출 결과 0건',failed:'호출 중단',unconfirmed:'수행 결과 미확정',policy_blocked:'접근 정책으로 차단',unavailable:'공식 페이지 접근 불가'};
   const decisions={revise:'보완 지시',hold:'보류',alternative:'대안 제안',ask_owner:'대표 질문',accept:'목표 달성 확인'};
   const checks={met:'충족',unmet:'미충족',unknown:'미확인'};
   const failures={provider_failure:'공급자 실패 응답',outcome_uncertain:'전송·결과 미확정',
@@ -636,14 +636,15 @@ function researchSupervisionPanel(state, readonly) {
     active:['research-supervision-run','research-supervision-revoke']};
   return `<div class="subpanel"><h3>목표 기반 보완 업무</h3><p>${h(labels[state.status])}</p>
     ${proposal?`<p>이전 누적 · Gemini 예약 ${h(proposal.historical_usage.gemini)}회 · Tavily 예약 ${h(proposal.historical_usage.tavily)}회</p>
-      <p>추가 · 직원 ${h(limits.staff)}회 · 관리자 ${h(limits.manager)}회(최종 독립 검토 1회 포함) · Gemini 합계 ${h(limits.gemini)}회 · Tavily ${h(limits.tavily)}회 · 보완 최대 ${h(limits.revisions)}회 · 다운로드 0회 · 비용 $0</p>
+      <p>추가 · 직원 ${h(limits.staff)}회 · 관리자 ${h(limits.manager)}회(최종 독립 검토 1회 포함) · Gemini 합계 ${h(limits.gemini)}회 · Tavily ${h(limits.tavily)}회 · 공식 HTML·robots GET ${h(limits.official_gets || 0)}회 · 보완 최대 ${h(limits.revisions)}회 · 다운로드 0회 · 비용 $0</p>
       ${!proposal.direct_page_available?`<p>직접 확인한 공식 페이지 도구가 현재 목록에 없습니다. 공개 검색은 단서를 수집할 수 있습니다.</p>`:''}`:''}
     ${state.assignment?`<p>관리자 수행 목표 · ${h(state.assignment.manager_direction)}</p><p>성공 기준 · ${h(state.assignment.manager_success_criteria)}</p>`:''}
-    ${state.remaining?`<p>잔여 승인 횟수 · 직원 ${h(state.remaining.staff)}회 · 관리자 ${h(state.remaining.manager)}회 · Tavily ${h(state.remaining.tavily)}회</p>`:''}
+    ${state.remaining?`<p>잔여 승인 횟수 · 직원 ${h(state.remaining.staff)}회 · 관리자 ${h(state.remaining.manager)}회 · Tavily ${h(state.remaining.tavily)}회 · 공식 GET ${h(state.remaining.official_gets || 0)}회</p>`:''}
     ${state.expires_at?`<p>유효 기한 ${h(time(state.expires_at))}</p>`:''}
     ${state.failure?`<p>${h(failures[state.failure] || state.failure)}${state.failure_rule?' · '+h(state.failure_rule):''}</p>`:''}
     <p>도구 수행 · 근거 ${h(state.evidence_count || 0)}건</p>
-    ${(state.choices || []).map(item=>`<p>${h(item.tool)} · ${h(item.option)} · ${h(tools[item.state])}</p>`).join('')}
+    ${(state.choices || []).map(item=>`<p>${h(item.tool)} · ${h(item.option)} · ${h(tools[item.state])}</p>
+      ${(item.requests || []).map(request=>`<p>${h(request.kind==='robots'?'robots 확인':'공식 페이지 조회')} · HTTP ${h(request.http_status)} · ${sourceLink(request.url)}</p>`).join('')}`).join('')}
     ${(proposal?.tool_options || []).filter(tool=>!(state.choices || []).some(item=>item.tool===tool.name))
          .map(tool=>`<p>${h(tool.name)} · ${state.status==='active'?'대기':'미사용'}</p>`).join('')}
     ${(state.reports || []).map(item=>`<p>직원 보고 검증 완료 · ${h(item.report.feasibility)}</p>
@@ -660,10 +661,11 @@ function researchSupervisionCommand(action, project) {
   const state=project.research.supervision;
   const approve=action.endsWith('-approve');
   const proposal=state.proposal;
-  const fields=approve?`<p>무료 Gemini 최대 ${h(proposal.limits.gemini)}회 · Tavily 기본 검색 최대 ${h(proposal.limits.tavily)}회 · 비용 $0</p>
+  const fields=approve?`<p>무료 Gemini 최대 ${h(proposal.limits.gemini)}회 · Tavily 기본 검색 최대 ${h(proposal.limits.tavily)}회 · 공식 HTML·robots GET 최대 ${h(proposal.limits.official_gets)}회 · 비용 $0</p>
+    <p>Gemini 프로젝트 ${h(proposal.gemini_project)} · 모델 ${h(proposal.gemini_model)} · Tavily ${h(proposal.tavily_account)}</p>
     <p>이전 보류, 업무 목표, 확인 기준, 보존 관측, 실행 기록 및 보완 지시를 Gemini에 보냅니다. Tavily에는 승인된 공개 검색어만 보냅니다.</p>
     <p>승인 후 ${h(proposal.valid_hours)}시간 · 현재 공급자 키에 서명 결합 · 실제 잔량과 청구는 별도 확인</p>
-    <p>기존 보류 이후 직접 확인 가능한 공식 페이지 도구 ${proposal.direct_page_available?'있음':'없음'}</p>
+    <p>승인 대상 공식 경로</p><ul>${proposal.official_get_urls.map(url=>`<li>${h(url)}</li>`).join('')}</ul>
     <ul>${proposal.tool_options.map(tool=>`<li>${h(tool.name)} · ${h(Object.values(tool.options).join(' / '))}</li>`).join('')}</ul>
     <details><summary>계약·이력 및 첫 요청 해시</summary><pre>${h(JSON.stringify({binding:proposal.binding,
       contract:proposal.contract, research_contract:proposal.research_contract, first:proposal.units[0].payload_sha256},null,2))}</pre></details>

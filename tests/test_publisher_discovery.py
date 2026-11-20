@@ -88,3 +88,96 @@ class PublisherDiscoveryTests(TestCase):
             self.assertEqual([row['status'] for row in result['pages']],
                              ['robots_unavailable','publisher_access_unconfirmed','robots_permission_unconfirmed'])
             self.assertEqual(len(store.attempts()), 1)
+
+    def test_official_observation_shared_robots_and_signed_http_budget(self):
+        from autonomous_company import digest
+        from decision_recovery import delegated_call, ProviderFailure
+        from owner_operating_policy import OwnerOperatingPolicy
+        from web_research import collect_observation
+
+        for scenario in ('success','denied','redirect','empty','503'):
+            with self.subTest(scenario=scenario), TemporaryDirectory() as temp:
+                original = OwnerOperatingPolicy(Path(temp)/'original', {'task':'fixture'})
+                new = OwnerOperatingPolicy(Path(temp)/'new', {'task':'official'})
+                robots = 'https://www.klei.com/robots.txt'
+                rights = 'https://www.klei.com/creation-guidelines'
+                entries = [dict(id='robots-pages',kind='robots',url=robots),
+                           dict(id='scene-1',kind='page',url=PAGE),
+                           dict(id='rights',kind='page',url=rights)]
+                approved = {**original.proposal([publisher.get_unit(row) for row in entries]),
+                            'profile':'klei','profile_rules':PROFILE,'entries':entries}
+                original.approve(approved,digest(approved),'historical-key')
+                with patch('publisher_discovery.store_for',return_value=original):
+                    tools, provenance = publisher.official_research_tools(object(), {})
+                self.assertEqual(provenance,digest(original.read('policy.json')))
+                units = {row['id']:row for tool in tools.values() for row in tool.requests}
+                proposal = new.proposal(list(units.values()))
+                self.assertEqual(len(proposal['units']),3)
+                new.approve(proposal,digest(proposal),'separate-key')
+
+                def invoke(unit, wire, work):
+                    delegated_call(new,'separate-key',unit,wire,lambda proof,check: work(check))
+
+                robots_text = 'User-agent: *\nDisallow: /' if scenario=='denied' else 'User-agent: *\nDisallow: /private/'
+                first = dict(status=200,text='<title>Official</title><p>Policy text.</p>')
+                if scenario == 'redirect':
+                    first = dict(status=302,text=None)
+                elif scenario == 'empty':
+                    first = dict(status=200,text='<script>hidden only</script>')
+                elif scenario == '503':
+                    first = ProviderFailure('publisher_http_failure')
+                with patch('publisher_discovery.fetch_public', side_effect=[
+                    dict(status=200,text=robots_text), first, dict(status=200,text='<p>Rights detail.</p>')]) as get:
+                    tool = tools['official-page-scene-1']
+                    with self.assertRaisesRegex(CompanyError,'publisher_url_blocked'):
+                        collect_observation(tool,'https://127.0.0.1/private',invoke)
+                    get.assert_not_called()
+                    if scenario=='503':
+                        with self.assertRaisesRegex(CompanyError,'publisher_http_failure'):
+                            collect_observation(tool,'approved',invoke)
+                        with self.assertRaisesRegex(CompanyError,'owner_policy_unresolved_attempt'):
+                            collect_observation(tools['official-page-rights'],'approved',invoke)
+                    else:
+                        result = collect_observation(tool,'approved',invoke)
+                        self.assertEqual(result['status'],{'success':'observed','denied':'policy_blocked',
+                                                          'redirect':'unavailable','empty':'empty'}[scenario])
+                        if scenario=='success':
+                            self.assertEqual(result['sources'][0]['scope'],'public_page')
+                            self.assertEqual(result['sources'][0]['origin'],'Klei Entertainment')
+                            collect_observation(tools['official-page-rights'],'approved',invoke)
+                            with self.assertRaisesRegex(CompanyError,'owner_policy_exhausted'):
+                                collect_observation(tool,'approved',invoke)
+                    self.assertEqual(get.call_count,{'success':3,'denied':1,'redirect':2,'empty':2,'503':2}[scenario])
+                self.assertEqual(original.attempts(),{})
+
+    def test_common_page_observer_and_private_dns_rejection(self):
+        from autonomous_company import digest
+        from research_https import _global_addresses, observe_approved_page
+        from time import monotonic
+        import socket
+
+        host = 'archive.example'
+        with patch('socket.getaddrinfo',return_value=[
+            (socket.AF_INET,socket.SOCK_STREAM,6,'',('127.0.0.1',443))]):
+            with self.assertRaisesRegex(CompanyError,'official_destination_blocked'):
+                _global_addresses(host,monotonic()+5)
+
+        def entry(kind, path):
+            url = f'https://{host}{path}'
+            return dict(kind=kind,path=path,host=host,url=url,
+                        operation=dict(id=kind,payload_sha256=digest(dict(method='GET',url=url))))
+
+        charged = []
+        def invoke(operation, wire, work):
+            self.assertEqual(wire,operation['payload_sha256'])
+            charged.append(operation['id'])
+            work(lambda:None)
+
+        def fetch(url, kind):
+            self.assertIn(url,(f'https://{host}/robots.txt',f'https://{host}/reports/inventory'))
+            return dict(status=200,text='User-agent: *\nDisallow: /internal/' if kind=='robots' else 'Public inventory')
+
+        result = observe_approved_page(entry('page','/reports/inventory'),entry('robots','/robots.txt'),
+            invoke,fetch,lambda url, text:dict(status='observed',sources=[text]),{})
+        self.assertEqual(result['sources'],['Public inventory'])
+        self.assertEqual(charged,['robots','page'])

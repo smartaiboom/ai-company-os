@@ -114,6 +114,8 @@ class Tool:
     options: dict
     read: object
     operation: dict | None = None
+    requests: tuple = ()
+    observe: object = None
 
     def describe(self,used):
         return dict(name=self.name,description=self.description,
@@ -252,6 +254,13 @@ def research_report(step, observations):
 
 
 def collect_observation(tool, option, invoke):
+    if tool.observe:
+        result = tool.observe(option, invoke)
+        require(isinstance(result['sources'], list) and len(result['sources']) <= 8
+                and result['status'] in ('observed','empty','unavailable','policy_blocked'),
+                'research_source_invalid')
+        evidence_catalog([result])
+        return {**result, 'tool':tool.name, 'option':option, 'at':now()}
     output = []
 
     def collect(check):

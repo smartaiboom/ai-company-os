@@ -44,6 +44,7 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 RESEARCH_ERRORS = {
+    'supervision_previous_scope': '이전 감독 승인 또는 예약이 남아 있어 새 계약으로 실행할 수 없습니다.',
     'supervision_blocked': '기존 보류와 서명된 검토 기록을 확인할 수 없어 새 보완 업무가 차단됐습니다.',
     'replan_blocked': '중단 기록이나 승인 조건을 확인할 수 없어 새 업무를 시작할 수 없습니다.',
     'replan_invalid': '관리자 재계획이 허용 행동 또는 입력 계약과 일치하지 않습니다.',

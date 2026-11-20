@@ -151,7 +151,11 @@ def offer(source, base, tools, scope):
                 'tool_options':[tool.describe(set()) for tool in tools.values()], 'historical_usage':cumulative,
                 'preserved_sources':notes, 'max_batch_tools':2,
                 'gemini_model':MODEL, 'gemini_project':MISSION_ACCOUNT,
-                'tavily_account':'Researcher free only', 'official_get_urls':[row['endpoint'] for row in requests.values()],
+                'tavily_account':'Researcher free only',
+                'account_evidence':dict(source='owner_confirmed_provider_screens_and_local_settings',
+                    gemini='free_tier', tavily='researcher_payg_off', paid_fallback=False,
+                    independent_realtime_quota='unknown', independent_billing='unknown'),
+                'official_get_urls':[row['endpoint'] for row in requests.values()],
                 'publisher_policy_provenance':scope.get('publisher_policy_provenance'),
                 'direct_page_available':bool(requests) or 'publisher_page' in tools}
     return store, proposal, work, preserved, tools

@@ -676,7 +676,7 @@ function researchSupervisionCommand(action, project) {
     <ul>${proposal.tool_options.map(tool=>`<li>${h(tool.name)} · ${h(Object.values(tool.options).join(' / '))}</li>`).join('')}</ul>
     <details><summary>계약·이력 및 첫 요청 해시</summary><pre>${h(JSON.stringify({binding:proposal.binding,
       contract:proposal.contract, research_contract:proposal.research_contract, first:proposal.units[0].payload_sha256},null,2))}</pre></details>
-    <label class="check"><input type="checkbox" name="confirmed" required>무료 계정, 결제 비활성, 잔여 한도와 전송 범위를 확인했습니다.</label>`:
+    <label class="check"><input type="checkbox" name="confirmed" required>무료 계정과 결제·종량제 비활성 설정 및 전송 범위를 확인했습니다. 실시간 잔량과 실제 청구는 미확인입니다.</label>`:
     '<p id="supervision-progress" role="status">현재 서명 범위에 적용됩니다.</p>';
   modal(supervisionTitles[action],fields,supervisionTitles[action],async data=>{
     const progress=dialog.querySelector('#supervision-progress');

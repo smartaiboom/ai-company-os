@@ -47,7 +47,9 @@ class OwnerOperatingPolicy:
         self.root.mkdir(mode=0o700)
         self.write('policy.json',dict(proposal=proposal,issued_at=issued,
             expires_at=(datetime.fromisoformat(issued)+timedelta(hours=proposal['valid_hours'])).isoformat(),
-            account_confirmation='owner_attested_free_billing_disabled_and_budget_available',
+            account_confirmation=('owner_attested_free_only_provider_status_unverified'
+                                  if proposal.get('account_evidence') else
+                                  'owner_attested_free_billing_disabled_and_budget_available'),
             credential_binding=self._sign(dict(binding=self.binding,credential=key),create=True)))
 
     def active(self, key):

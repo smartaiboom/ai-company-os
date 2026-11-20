@@ -58,11 +58,11 @@ class Supervisor(ProductionManager):
 
 
 def supervision_store(source, binding=None):
-    return OwnerOperatingPolicy(source.root/'goal-supervision-v5', binding or {})
+    return OwnerOperatingPolicy(source.root/'goal-supervision-v6', binding or {})
 
 
 def legacy_stores(source):
-    return [OwnerOperatingPolicy(source.root/f'goal-supervision-v{version}', {}) for version in (1, 2, 3, 4)]
+    return [OwnerOperatingPolicy(source.root/f'goal-supervision-v{version}', {}) for version in (1, 2, 3, 4, 5)]
 
 
 def legacy_history(source):
@@ -71,6 +71,36 @@ def legacy_history(source):
         previous = old.read('policy.json')
         revoked = old.read('revoked.json')
         attempts = old.attempts()
+        if attempts and old.root.name.endswith('-v5'):
+            require(previous and not revoked and set(attempts)=={'staff-0','general-web','staff-1'}
+                    and not old.read('supervision-outcome.json')
+                    and all(item['reservation']['policy_hash']==digest(previous) for item in attempts.values()),
+                    'supervision_previous_scope')
+            require(all((attempts[name]['result'] or {}).get('status')=='completed'
+                        for name in ('staff-0','general-web'))
+                    and (attempts['staff-1']['result'] or {}).get('status')=='failed_or_uncertain',
+                    'supervision_previous_scope')
+            calls = []
+            for index in (0, 1):
+                worker = SupervisedStaff(old.root/f'step-{index}', {})
+                jid = draft_id(worker)
+                require(jid, 'supervision_previous_scope')
+                received = worker.load(jid)['real_ai']['attempts']
+                require(len(received)==1 and received[0].get('response_received') is True
+                        and received[0]['payload_hash']==attempts[f'staff-{index}']['reservation']['payload_sha256'],
+                        'supervision_previous_scope')
+                calls.append(received[0])
+            rejection = calls[1].get('decision_rejection') or {}
+            receipt = (attempts['staff-1']['result'].get('diagnostics') or {}).get('decision_receipt') or {}
+            observed = old.read('observation-0-0.json')
+            require(calls[0]['status']=='completed' and rejection.get('rule')=='option_not_allowed'
+                    and receipt==dict(attempt_id=calls[1]['id'],total_tokens=calls[1]['usage']['total_tokens'],**rejection)
+                    and observed and observed['tool']=='web_search' and observed['status']=='observed',
+                    'supervision_previous_scope')
+            history.append(dict(previous_supervision_sha256=digest(previous), failed_ledger_sha256=digest(attempts),
+                                observation_sha256=digest(observed), gemini_reserved=len(calls), tavily_reserved=1,
+                                recorded_tokens=sum(call['usage']['total_tokens'] for call in calls)))
+            continue
         if attempts and old.root.name.endswith(('-v3','-v4')):
             v3 = old.root.name.endswith('-v3')
             row = attempts.get('staff-0')
@@ -201,7 +231,8 @@ def offer(source, base, tools, scope):
     previous = legacy_history(source)
     history, cumulative, held = held_context(source)
     history.extend(previous)
-    cumulative['gemini'] += sum('failed_ledger_sha256' in record for record in previous)
+    cumulative['gemini'] += sum(record.get('gemini_reserved', int('failed_ledger_sha256' in record)) for record in previous)
+    cumulative['tavily'] += sum(record.get('tavily_reserved',0) for record in previous)
     cumulative['tokens'] += sum(record.get('recorded_tokens',0) for record in previous)
     preserved, notes = preserved_observations(tools)
     tools = {name:tool for name,tool in tools.items() if not tool.preserved}
@@ -222,7 +253,7 @@ def offer(source, base, tools, scope):
                        {name:limits[name] for name in ('staff','manager','tavily','official_gets')})
     model[0]['payload_sha256'] = digest(first._payload(None))
     proposal = {**store.proposal([*model, *(tool.operation for tool in tools.values() if tool.operation), *requests.values()]),
-                'contract':CONTRACT+'_action_first_v5', 'research_contract':CONTRACT_VERSION, 'limits':limits,
+                'contract':CONTRACT+'_action_first_option_ids_v6', 'research_contract':CONTRACT_VERSION, 'limits':limits,
                 'tool_options':[tool.describe(set()) for tool in tools.values()], 'historical_usage':cumulative,
                 'preserved_sources':notes, 'max_batch_tools':2,
                 'gemini_model':MODEL, 'gemini_project':MISSION_ACCOUNT,

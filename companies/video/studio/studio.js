@@ -540,6 +540,80 @@ function researchRecoveryPanel(recovery, readonly) {
     ${!readonly && recovery.status==='active'?'<button class="button secondary" data-action="research-recovery-run">승인된 복구 시작</button><button class="button ghost" data-action="research-recovery-revoke">복구 승인 철회</button>':''}
     </div>`;
 }
+const replanTitles={
+  'research-replan-approve':'관리자 재계획 범위 검토·승인', 'research-replan-run':'승인된 관리자 판단 요청',
+  'research-replan-revoke':'관리자 재계획 승인 철회', 'research-reinvestigate-approve':'신규 조사 범위 검토·승인',
+  'research-reinvestigate-run':'승인된 신규 조사 시작', 'research-reinvestigate-revoke':'신규 조사 승인 철회'
+};
+function replanBudget(limits) {
+  return `관리자 재계획 Gemini 최대 ${h(limits.manager_replan)}회 · 신규 조사 직원 최대 ${h(limits.staff)}회 · 독립 관리자 검토 ${h(limits.independent_review)}회 · 추가 합계 최대 ${h(limits.combined_gemini)}회 · Tavily 기본 검색 최대 ${h(limits.tavily_credits)}회 · 다운로드 0회 · 비용 $0`;
+}
+function researchReplanPanel(replan, readonly) {
+  if (!replan) return '';
+  const labels={setup_required:'무료 전용 공급자 설정 확인이 필요합니다.',
+    manager_available:'관리자 재계획 승인이 필요합니다. 실제 관리자 판단을 기다리고 있습니다.',
+    manager_active:'관리자 재계획 승인 완료 · 판단 요청 대기', manager_expired:'관리자 재계획 승인 만료',
+    manager_stopped:'관리자 재계획 중단 · 관리자·대표 검토 필요', manager_decided:'관리자 판단 수신',
+    research_available:'관리자가 재조사를 제안했습니다. 신규 조사 승인 대기',
+    research_active:'신규 조사 승인 완료 · 실행 대기', research_expired:'신규 조사 승인 만료',
+    research_stopped:'신규 조사 중단 · 관리자·대표 검토 필요', review:'신규 조사 독립 관리자 검토 완료',
+    blocked:'재계획 차단 · 승인, 원장 연결 또는 현재 범위를 확인하세요.', revoked:'재계획 또는 신규 조사 승인 철회'};
+  const actions={manager_available:['research-replan-approve'],
+    manager_active:['research-replan-run','research-replan-revoke'],
+    research_available:['research-reinvestigate-approve'],
+    research_active:['research-reinvestigate-run','research-reinvestigate-revoke']};
+  const choices={reinvestigate:'재조사 제안',alternative:'다른 방법 제안',hold:'보류',ask_owner:'대표 질문'};
+  const history=replan.failures || [];
+  const gemini=history.reduce((n,f)=>n+f.usage.gemini.reserved,0);
+  const tavily=history.reduce((n,f)=>n+f.usage.tavily.reserved,0);
+  const tokens=history.reduce((n,f)=>n+f.total_tokens,0);
+  const failure=replan.diagnostics?.failure;
+  return `<div class="subpanel"><h3>실패 업무 재계획</h3><p>${h(labels[replan.status])}</p>
+    ${replan.task_id?`<p>새 업무 ${h(replan.task_id)}</p>`:''}
+    ${history.length?`<p>기존 누적 예약 · Gemini ${gemini}회 · Tavily ${tavily}회 · 응답 기록 ${tokens.toLocaleString('ko-KR')}토큰</p>
+      ${history.map((f,i)=>`<p>${i===0?'첫 조사':'이전 복구'} · ${h(f.code)} · ${h(f.rule || '세부 규칙 미확인')} · ${h(f.total_tokens)}토큰</p>`).join('')}`:''}
+    <p>${replanBudget(replan.limits)}</p>
+    ${replan.expires_at?`<p>유효 기한 ${h(time(replan.expires_at))}</p>`:''}
+    ${replan.decision?`<p><strong>실제 관리자 판단 · ${h(choices[replan.decision.action])}</strong> ${h(replan.decision.reason)}</p>
+      <p>다음 행동 · ${h(replan.decision.next_step)}</p><p>성공 기준 · ${h(replan.decision.success_criteria)}</p>`:''}
+    ${failure?`<p>${h(researchErrorText(failure.code,failure.stage,replan.diagnostics))}</p>`:''}
+    ${readonly?'':(actions[replan.status] || []).map(action=>`<button class="button secondary" data-action="${action}">${replanTitles[action]}</button>`).join('')}
+    </div>`;
+}
+
+function researchReplanCommand(action, project) {
+  const replan=project.research.replan;
+  const authorize=action.endsWith('-approve');
+  const manager=action==='research-replan-approve';
+  const proposal=replan.proposal;
+  const fields=authorize?`<p>${replanBudget(replan.limits)}</p>
+    <p>${manager?'이 동의는 Gemini 관리자 판단 1회에 적용됩니다. 목표·실패 진단·보존된 관측·도구와 대표 의사를 전송합니다.':
+      '이 동의는 새 조사와 독립 관리자 검토에 적용됩니다. 승인된 검색어, 조사 입력과 관측 자료가 범위에 포함됩니다.'}</p>
+    <p>승인 후 ${h(proposal.valid_hours)}시간 · 현재 키에 서명 결합 · 공급자 잔량과 청구는 별도 확인</p>
+    <details><summary>업무·계약·이력 연결 정보</summary><p>${h(replan.task_id)}</p>
+      <pre>${h(JSON.stringify(proposal.binding,null,2))}</pre>
+      <p>조사 계약 ${h(proposal.decision_contract)}</p>
+      ${manager?'':`<p>첫 요청 해시 ${h(proposal.units[0].payload_sha256)}</p>`}</details>
+    <ul>${proposal.tool_options.map(tool=>`<li>${h(tool.name)} · ${h(Object.values(tool.options).join(' / '))}</li>`).join('')}</ul>
+    ${manager?`<label>대표 의사 <select name="owner_intent"><option value="review_options">관리자에게 방법 검토 요청</option>
+      <option value="prefer_reinvestigation">재조사를 우선 검토해 달라고 요청</option></select></label>`:''}
+    <label class="check"><input type="checkbox" name="confirmed" required>전송 범위와 무료 계정, 결제 비활성 및 잔여 한도를 확인했습니다.</label>`:
+    '<p>현재 업무의 서명 범위에 적용됩니다.</p>';
+  modal(replanTitles[action],fields,replanTitles[action],async data=>{
+    const intent=data.get('owner_intent');
+    const body=authorize?{confirmed:data.has('confirmed'),review_hash:manager?replan.review_hashes[intent]:replan.review_hash}:{};
+    if (manager) body.owner_intent=intent;
+    try {
+      await api(detailApi(project)+'/'+action,body);
+    } catch (error) {
+      if (action.endsWith('-run')) await route();
+      if (error.research) error.message+=' '+researchErrorText(error.code,error.research.stage,error.research.diagnostics);
+      throw error;
+    }
+    return {message:'재계획 상태를 갱신했습니다.'};
+  });
+}
+
 function researchPanel(p) {
   const r=p.research;
   if (!r) return '';
@@ -554,6 +628,7 @@ function researchPanel(p) {
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
     ${researchRecoveryPanel(r.recovery,p.readonly)}
+    ${researchReplanPanel(r.replan,p.readonly)}
     ${r.review?`<p><strong>관리자 ${r.review.decision.action==='hold'?'보류':'제한적 활용 의견'}</strong> ${h(r.review.decision.note)}</p>`:''}
     ${r.result?`<p><strong>제작 가능성</strong> ${h(r.result.feasibility)}</p>
       ${r.result.claims.map(c=>`<p><strong>직원 해석 · ${h(({supported:'근거 일치',conflicting:'근거 상충',unverified:'미확인'})[c.assessment])}</strong> ${h(c.statement)}</p>
@@ -566,6 +641,7 @@ function researchPanel(p) {
 }
 function researchCommand(action) {
   const p=detail, r=p.research;
+  if (Object.hasOwn(replanTitles,action)) return researchReplanCommand(action,p);
   const titles={'research-approve':'조사 범위 검토·승인','research-run':'웹·전문 자료 조사 실행','research-revoke':'조사 범위 철회',
     'research-recovery-approve':'복구 범위 검토·승인','research-recovery-run':'승인된 복구 시작',
     'research-recovery-revoke':'복구 승인 철회'};

@@ -7,7 +7,7 @@ const node = {addEventListener() {}};
 const document = {querySelectorAll: () => [], querySelector: () => node};
 const source = fs.readFileSync(path.join(__dirname,'../companies/video/studio/studio.js'),'utf8');
 const ui = vm.runInNewContext(source.replace(/\nroute\(\);\s*$/, '') +
-  '\n({nextWork, productionNext, projectPage, researchErrorText, researchRecoveryPanel, researchPanel})', {document, window: node});
+  '\n({nextWork, productionNext, projectPage, researchErrorText, researchRecoveryPanel, researchPanel, researchReplanPanel})', {document, window: node});
 const clip = {scene_id:'scene-1',source:'operator_clip',request:'test'};
 const initial = {status:'unprepared',key_ready:false,clips:[],voices:{}};
 const available = {...initial,key_ready:true};
@@ -184,3 +184,15 @@ const catalogPanel=ui.researchPanel({research:{status:'review',
     title:'검색 결과',excerpt:'<observed excerpt>',url:'https://example.org/source'}]}]}});
 assert.match(catalogPanel,/관리자 보류.*직원 해석.*관측 발췌.*&lt;observed excerpt&gt;.*검색 단서/s);
 assert.doesNotMatch(catalogPanel,/<observed excerpt>/);
+
+const replanLimits={manager_replan:1,staff:4,independent_review:1,combined_gemini:6,tavily_credits:1};
+const failed=[739,1038].map(total_tokens=>({total_tokens,code:'research_step_invalid',
+  usage:{gemini:{reserved:1},tavily:{reserved:0}}}));
+const replanPanel=ui.researchReplanPanel({status:'manager_available',limits:replanLimits,failures:failed},false);
+assert.match(replanPanel,/Gemini 2회.*Tavily 0회.*1,777토큰/);
+assert.match(replanPanel,/독립 관리자 검토 1회.*추가 합계 최대 6회/);
+assert.match(replanPanel,/research-replan-approve/);
+assert.doesNotMatch(replanPanel,/research-reinvestigate-run/);
+const decision={action:'ask_owner',reason:'확인 필요',next_step:'자료를 제공할까요?',success_criteria:'원문 확보'};
+assert.match(ui.researchReplanPanel({status:'manager_decided',limits:replanLimits,decision},false),/실제 관리자 판단 · 대표 질문/);
+assert.doesNotMatch(ui.researchReplanPanel({status:'research_stopped',limits:replanLimits},false),/data-action=/);

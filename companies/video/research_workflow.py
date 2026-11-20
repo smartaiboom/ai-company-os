@@ -391,18 +391,23 @@ def status(workflow,project):
     review=store.read('manager-review.json')
     ledger=store.attempts()
     observations=[store.read(path.name) for path in sorted(store.root.glob('observation-*.json'))]
-    recovery = None
+    recovery = replan = None
     if ledger and not review:
         _, tools, model, scope = available(workflow, project, inputs)
         recovery = recovery_status(store, grant, ledger, (base, tools, model, scope))
+        if recovery_store(store).attempts() and not recovery.get('review'):
+            from research_replanning import state
+            replan = state(store, base, tools, model, scope)
+    new_result = (replan or {}).get('result')
     return dict(status='revoked' if store.read('revoked.json') else 'review' if result and review else
                 'stopped' if ledger else
                 'contract_changed' if grant['proposal'].get('decision_contract') != CONTRACT_VERSION else
                 'expired' if datetime.fromisoformat(now())>=datetime.fromisoformat(grant['expires_at']) else 'active',
-                result=(recovery or {}).get('result') or result, review=(recovery or {}).get('review') or review,
-                observations=((recovery or {}).get('result') or {}).get('observations', observations),
+                result=new_result or (recovery or {}).get('result') or result,
+                review=(replan or {}).get('review') or (recovery or {}).get('review') or review,
+                observations=(new_result or (recovery or {}).get('result') or {}).get('observations', observations),
                 proposal=grant['proposal'],used=len(ledger),
-                diagnostics=research_diagnostics(store,ledger) if ledger else None, recovery=recovery)
+                diagnostics=research_diagnostics(store,ledger) if ledger else None, recovery=recovery, replan=replan)
 
 
 def execute_research(store, credential, gemini, base, tools, model, *, history=(), proposal=None, preflight=None):
@@ -451,6 +456,9 @@ def action(workflow,pid,name,body):
         inputs=context(workflow,project)
         require(inputs is not None,'research_scope_invalid')
         base=inputs[0]
+        from research_replanning import ACTIONS, REVOKE_ACTION, action as replan_action, revoke as replan_revoke
+        if name in REVOKE_ACTION:
+            return replan_revoke(research_store(workflow.store.root, project, base), name, body)
         if name in ('research-revoke', 'research-recovery-revoke'):
             exact(body, ())
             source = research_store(workflow.store.root, project, base)
@@ -461,6 +469,8 @@ def action(workflow,pid,name,body):
         require(re.fullmatch(r'[A-Za-z0-9_-]{16,200}',search) is not None,'research_search_disabled')
         credential=digest([gemini,search])
         store,tools,model,scope=available(workflow,project,inputs,search)
+        if name in ACTIONS:
+            return replan_action(store, base, tools, model, scope, name, body, credential, gemini)
         if name=='research-approve':
             exact(body,('confirmed','review_hash'))
             require(body['confirmed'] is True,'owner_policy_required')
@@ -500,7 +510,11 @@ def action(workflow,pid,name,body):
 def reviewed_handoff(store,*,fresh=True):
     if store.read('revoked.json'):
         return None
-    if not store.read('manager-review.json'):
+    from research_replanning import reviewed_store
+    replanned = reviewed_store(store)
+    if replanned:
+        store = replanned
+    elif not store.read('manager-review.json'):
         recovered = recovery_store(store)
         grant = recovered.read('policy.json')
         original = store.read('policy.json') if grant else None

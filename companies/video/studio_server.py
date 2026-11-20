@@ -21,7 +21,9 @@ STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
 RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke',
-                    'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke')
+                    'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke',
+                    'research-replan-approve', 'research-replan-run', 'research-replan-revoke',
+                    'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke')
 
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
                       'production-publisher-approve','production-publisher-run','production-publisher-rights','production-publisher-revoke',
@@ -41,6 +43,8 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 RESEARCH_ERRORS = {
+    'replan_blocked': '중단 기록이나 승인 조건을 확인할 수 없어 새 업무를 시작할 수 없습니다.',
+    'replan_invalid': '관리자 재계획이 허용 행동 또는 입력 계약과 일치하지 않습니다.',
     'decision_recovery_blocked': '응답과 승인 범위를 연결할 수 없어 복구가 차단됐습니다. 관리자·대표 검토가 필요합니다.',
     'decision_internal_error': '판단 검증 코드에서 오류가 발생해 조사를 중단했습니다.',
     'owner_policy_exhausted': '이미 사용한 조사 범위입니다. 기존 기록을 보존하고 복구 범위를 검토하세요.',
@@ -970,7 +974,9 @@ def make_server(host, port, studio):
                         except (CompanyError,OSError,ValueError,KeyError,TypeError):
                             state=None
                         recovery = (state or {}).get('recovery') if match[3] == 'research-recovery-run' else None
-                        diagnostics = (recovery or {}).get('diagnostics') or (state or {}).get('diagnostics')
+                        replan = (state or {}).get('replan') if match[3] in (
+                            'research-replan-run','research-reinvestigate-run') else None
+                        diagnostics = (replan or recovery or {}).get('diagnostics') or (state or {}).get('diagnostics')
                         error['research']=dict(stage=RESEARCH_ERROR_STAGES.get(exc.code,'preflight'),
                             diagnostics=diagnostics)
                         return self.send_json(409,error)

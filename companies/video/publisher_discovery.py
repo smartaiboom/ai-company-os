@@ -452,3 +452,67 @@ def action(manager,plan,clips,manager_enabled,name,body):
     require(manager_enabled,'production_manager_execution_disabled')
     require(not store.attempts() and not store.read('done.json'),'owner_policy_exhausted')
     return acquire(manager,plan,clips,store,key,scope)
+
+
+# The task's exact approved public pages. Authority and rights depend on the observed document.
+BLIZZARD_HTML = {
+    'https://news.blizzard.com/en-us/article/24302093/carve-a-new-path-with-world-of-warcraft-forever':
+        dict(channel='publisher_site', issuer_candidate='Blizzard Entertainment', scene_ids=['scene-3'],
+             subject='World of Warcraft', authority_basis='news.blizzard.com publisher domain'),
+    'https://blizzard.gamespress.com/en':
+        dict(channel='delegated_press_candidate', issuer_candidate='Blizzard Entertainment', scene_ids=['scene-3'],
+             subject='World of Warcraft', authority_basis='Blizzard-branded Games Press host'),
+    'https://blizzard.gamespress.com/Kit/Details/wowforeverreveal':
+        dict(channel='delegated_press_candidate', issuer_candidate='Blizzard Entertainment', scene_ids=['scene-3'],
+             subject='World of Warcraft', authority_basis='Blizzard-branded Games Press host and exact kit path'),
+}
+
+
+def discovery_research_tools(observations):
+    from hashlib import sha256
+    from official_sources import candidate_plans, exact_page
+    from web_research import Tool, evidence
+
+    candidates = candidate_plans(observations, BLIZZARD_HTML)
+    cache = {}
+
+    def fetch(url, kind):
+        return fetch_public_text(exact_page(url), kind, agent=USER_AGENT,
+            connect=_PinnedHTTPS, resolve=_global_addresses, page_limit=MAX_PAGE)
+
+    def extract(url, body):
+        page = extract_page(dict(asset_host='', page_host=''), url, body)
+        text = page['text']
+        if page['restricted'] or prohibits_automation(text):
+            return dict(status='policy_blocked', reason='publisher_access_restricted', sources=[])
+        if not text:
+            return dict(status='empty', sources=[])
+        candidate = BLIZZARD_HTML[url]
+        issuer = candidate['issuer_candidate']
+        branded = 'blizzard entertainment' in (page['title']+' '+text).lower()
+        origin = issuer if candidate['channel']=='publisher_site' or branded else None
+        observed_at = now()
+        sources = [evidence(url, page['title'][:200] or url[:200], excerpt, 'public_page', origin, observed_at)
+                   for index in range(0, len(text), 600) if (excerpt := text[index:index+600].strip())]
+        return dict(status='observed', sources=sources, document=dict(
+            title=page['title'], publisher=origin, channel=candidate['channel'],
+            sha256=sha256(body.encode('utf-8')).hexdigest(), observed_at=observed_at,
+            media_type='text/html', rights='unconfirmed',
+            scene_ids=candidate['scene_ids'] if candidate['subject'].lower() in text.lower() else []))
+
+    tools = {}
+    for candidate in candidates:
+        if candidate['access'] != 'robots_pending':
+            continue
+        page, robots = candidate['page'], candidate['robots']
+        name = 'official-page-'+digest(page['url'])[:12]
+
+        def observe(option, invoke, page=page, robots=robots):
+            require(option=='approved', 'publisher_url_blocked')
+            return observe_approved_page(page, robots, invoke, fetch, extract, cache)
+
+        tools[name] = Tool(name, 'Check '+candidate['channel']+' candidate for '+candidate['subject']
+                           +' using exact public HTML. Record access and cite any explicit terms.',
+                           {'approved':page['url']}, None, requests=(robots['operation'], page['operation']),
+                           observe=observe)
+    return tools, candidates

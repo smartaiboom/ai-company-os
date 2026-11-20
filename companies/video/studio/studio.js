@@ -645,6 +645,7 @@ function researchSupervisionPanel(state, readonly) {
       ${limits.final_staff_report_reserved?`<p>최종 직원 보고 1회와 독립 검토 1회 확보 · 도구 선택은 판단당 최대 ${h(proposal.max_batch_tools)}개</p>`:''}
       ${proposal.resume_checkpoint?`<p>수집 체크포인트 인수 · 검증된 자료 ${h(proposal.resume_checkpoint.sources)}건 ·
         이전 오류 ${h(proposal.resume_checkpoint.prior_error)} 이후 직원 보고부터 재개 · 새 수집 호출 없음</p>`:''}
+      ${proposal.discovery_checkpoint?`<p>이전 수집 자료 ${h(proposal.discovery_checkpoint.sources)}건 인수 · 신규 공식 원문 조사</p>`:''}
       ${proposal.reused_search_leads?`<p>재사용 검색 단서 ${h(proposal.reused_search_leads)}건 · 공식 원문과 구분</p>`:''}
       ${(proposal.preserved_sources || []).map(source=>`<p>보존 자료 · ${h(source.tool)} · 사용 가능 ${h(source.preserved)}건 · 기간 경과 ${h(source.stale)}건 · 제외 ${h(source.excluded)}건</p>`).join('')}
       ${!proposal.direct_page_available?`<p>직접 확인한 공식 페이지 도구가 현재 목록에 없습니다. 공개 검색은 단서를 수집할 수 있습니다.</p>`:''}`:''}
@@ -655,7 +656,16 @@ function researchSupervisionPanel(state, readonly) {
       ${state.provider_response?` · HTTP ${h(state.provider_response.http_status)} ${h(state.provider_response.status || '')}
          ${state.provider_response.response_schema_rejected?' · 응답 스키마 거절':''}`:''}</p>`:''}
     <p>도구 수행 · 근거 ${h(state.evidence_count || 0)}건</p>
-    ${(state.choices || []).map(item=>`<p>${h(item.tool)} · ${h(item.option)} · ${h(tools[item.state])}</p>
+    ${(state.official_candidates?.length ? state.official_candidates : proposal?.official_candidates || []).map(item=>`<p>
+      ${sourceLink(item.url)} · ${h(item.authority_basis || '발행 주체 미확인')} ·
+      ${h(({robots_pending:'승인 범위 내 robots 확인 대기', previously_attempted:'이전 접근 기록 있음',
+        not_approved:'검색 단서 · 조회 승인 범위 밖', policy_blocked:'접근 정책 차단',
+        unavailable:'원문 응답 사용 불가', observed:'원문 관측 완료', empty:'발췌 없음'})[item.access])}
+      ${h(item.access_basis || '')}
+      ${item.document?` · ${h(item.document.title)} · ${h(item.document.publisher || '발행 주체 미확인')} · 권리 미확인`:''}</p>
+      ${(item.requests || []).map(request=>`<p>HTTP ${h(request.http_status)} · ${sourceLink(request.url)}</p>`).join('')}`).join('')}
+    ${(state.choices || []).map(item=>`<p>${h(item.tool)} · ${h(item.option)} · ${h(tools[item.state])} ${h(item.access_basis || '')}</p>
+      ${item.document?`<p>${h(item.document.title)} · ${h(item.document.publisher || '발행 주체 미확인')} · 권리 미확인</p>`:''}
       ${(item.requests || []).map(request=>`<p>${h(request.kind==='robots'?'robots 확인':'공식 페이지 조회')} · HTTP ${h(request.http_status)} · ${sourceLink(request.url)}</p>`).join('')}`).join('')}
     ${(proposal?.tool_options || []).filter(tool=>!(state.choices || []).some(item=>item.tool===tool.name))
          .map(tool=>`<p>${h(tool.name)} · ${state.status==='active'?'대기':'미사용'}</p>`).join('')}

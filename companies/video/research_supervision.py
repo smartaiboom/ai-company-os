@@ -72,7 +72,96 @@ class Supervisor(ProductionManager):
 
 
 def supervision_store(source, binding=None):
-    return OwnerOperatingPolicy(source.root/'goal-supervision-v8', binding or {})
+    version = 8
+    prior = checkpoint_store(source).read('supervision-outcome.json')
+    if prior and prior['decision']['action']=='hold':
+        version = 9
+        previous = discovery_store(source)
+        outcome = previous.read('supervision-outcome.json')
+        if outcome and outcome['decision']['action']=='hold':
+            version = 10
+            failed = (followup_store(source).attempts().get('staff-1') or {}).get('result') or {}
+            receipt = (failed.get('diagnostics') or {}).get('decision_receipt') or {}
+            if receipt.get('rule')=='finish_required':
+                version = 11
+    return OwnerOperatingPolicy(source.root/f'goal-supervision-v{version}', binding or {})
+
+
+def discovery_store(source):
+    return OwnerOperatingPolicy(source.root/'goal-supervision-v9', {})
+
+
+def followup_store(source):
+    return OwnerOperatingPolicy(source.root/'goal-supervision-v10', {})
+
+
+def followup_report_checkpoint(source, preserved, parent):
+    previous = followup_store(source)
+    ledger = previous.attempts()
+    failed = (ledger.get('staff-1') or {}).get('result') or {}
+    receipt = (failed.get('diagnostics') or {}).get('decision_receipt') or {}
+    if receipt.get('rule') != 'finish_required':
+        return preserved, None
+    grant = previous.read('policy.json')
+    require(grant and not previous.read('revoked.json')
+            and grant['proposal']['discovery_checkpoint']==parent
+            and previous.read('preserved-observations.json')==dict(observations=preserved)
+            and not previous.read('staff-report-1.json') and not previous.read('supervision-outcome.json')
+            and all(item['reservation']['policy_hash']==digest(grant) for item in ledger.values()),
+            'supervision_previous_scope')
+    rows = [previous.read(path.name) for path in sorted(previous.root.glob('observation-*.json'))]
+    operations = {operation['endpoint']:name for name, item in ledger.items()
+                  if name.startswith('official-get:') and (operation := item['reservation']['unit'])}
+    urls = {request['url'] for row in rows for request in row['requests']}
+    require(urls and urls==set(operations)
+            and set(ledger)=={'staff-0','staff-1',*operations.values()}
+            and all(ledger[name]['result']['status']=='completed' for name in set(ledger)-{'staff-1'}),
+            'supervision_previous_scope')
+    counts = []
+    for index in (0, 1):
+        worker = SupervisedStaff(previous.root/f'step-{index}', {})
+        jid = draft_id(worker)
+        require(jid, 'supervision_previous_scope')
+        calls = worker.load(jid)['real_ai']['attempts']
+        require(len(calls)==1 and calls[0]['payload_hash']==ledger[f'staff-{index}']['reservation']['payload_sha256'],
+                'supervision_previous_scope')
+        attempt = calls[0]
+        if index==0:
+            require(attempt['status']=='completed', 'supervision_previous_scope')
+        else:
+            require(attempt.get('response_received') is True and failed['status']=='failed_or_uncertain'
+                    and receipt==dict(attempt_id=attempt['id'],total_tokens=attempt['usage']['total_tokens'],
+                                      **attempt['decision_rejection']), 'supervision_previous_scope')
+        counts.append(attempt['usage']['total_tokens'])
+    observations = [*preserved, *rows]
+    checkpoint = observation_checkpoint(observations, now())
+    snapshots = sorted(previous.root.glob('collection-checkpoint-*.json'))
+    require(snapshots and previous.read(snapshots[-1].name)==checkpoint, 'research_checkpoint_invalid')
+    return observations, dict(**checkpoint, previous_supervision_sha256=digest(grant),
+        failed_ledger_sha256=digest(ledger), gemini_reserved=2, recorded_tokens=sum(counts), tavily_reserved=0,
+        official_reserved=len(urls), stage='staff_report', prior_error='finish_required')
+
+
+def checkpoint_store(source):
+    return OwnerOperatingPolicy(source.root/'goal-supervision-v8', {})
+
+
+def discovery_checkpoint(source, observations, checkpoint):
+    previous = checkpoint_store(source)
+    if not previous.read('supervision-outcome.json'):
+        return None
+    grant = previous.read('policy.json')
+    require(grant and not previous.read('revoked.json')
+            and grant['proposal']['resume_checkpoint']==checkpoint
+            and previous.read('preserved-observations.json')==dict(observations=observations),
+            'supervision_previous_scope')
+    outcome, extra, link = completed_hold(previous, grant, previous.attempts())
+    review = previous.read('supervision-review-1.json')
+    report = previous.read('staff-report-2.json')
+    require(not extra and review and review['decision']==outcome['decision']
+            and report and report['report']['observations']==observations,
+            'supervision_previous_scope')
+    return {**link, **observation_checkpoint(observations, now()), 'stage':'official_discovery'}
 
 
 def legacy_stores(source):
@@ -342,6 +431,8 @@ def worker_for(store, work, tools, observations, index, revision, remaining, *, 
         task = work.get('assignment', {})
         compact = {key:task[key] for key in ('goal','manager_direction','manager_success_criteria','project')
                    if key in task}
+        if work.get('official_discovery'):
+            compact['previous_manager_feedback'] = work['latest_supervisor_context']['review']['feedback']
         choices = [dict(name=tool['name'], description=tool['description'],
                         options=[dict(id=identifier, display=description)
                                  for identifier, description in tool['options'].items()])
@@ -370,7 +461,8 @@ def worker_for(store, work, tools, observations, index, revision, remaining, *, 
         catalog = contract['input']['evidence_catalog']
         contract['input']['evidence_catalog'] = {ref:{key:value for key,value in row.items()
             if key not in ('id','sha256','host')} for ref,row in catalog.items()}
-        contract['input']['resume_guidance'] = ('Collection is complete. Earlier report failed claim validation. '
+        contract['input']['resume_guidance'] = (('Collection is complete. Earlier report failed output validation. '
+            if work.get('official_discovery') else 'Collection is complete. Earlier report failed claim validation. ') +
             'Keep one to five claims with at most four exact citation IDs per claim. Prefer direct evidence '
             'and use unverified for missing proof. Search leads do not establish rights.')
         contract['system'] = ('Return JSON decision with only claims and feasibility. Each claim has statement, '
@@ -391,6 +483,7 @@ def budget(store, limits):
 
 
 def offer(source, base, tools, scope):
+    search = tools.get('web_search')
     previous = legacy_history(source)
     history, cumulative, held = held_context(source)
     history.extend(previous)
@@ -410,11 +503,58 @@ def offer(source, base, tools, scope):
         preserved = checkpoint_rows
         tools = {}
         binding['checkpoint_sha256'] = digest(checkpoint)
+    discovery = discovery_checkpoint(source, preserved, checkpoint) if checkpoint else None
+    followup = False
+    report_recovery = None
+    if discovery:
+        from publisher_discovery import discovery_research_tools
+        history.append(discovery)
+        previous = discovery_store(source)
+        outcome = previous.read('supervision-outcome.json')
+        if outcome and outcome['decision']['action']=='hold':
+            grant = previous.read('policy.json')
+            require(not previous.read('revoked.json') and grant['proposal']['discovery_checkpoint']==discovery
+                    and previous.read('preserved-observations.json')==dict(observations=preserved),
+                    'supervision_previous_scope')
+            _, collected, discovery = completed_hold(previous, grant, previous.attempts())
+            preserved = [*preserved, *collected]
+            fingerprint = observation_checkpoint(preserved, now())
+            snapshots = sorted(previous.root.glob('collection-checkpoint-*.json'))
+            require(snapshots and previous.read(snapshots[-1].name)==fingerprint,
+                    'research_checkpoint_invalid')
+            discovery.update(fingerprint, stage='official_followup')
+            history.append(discovery)
+            followup = True
+        tools, candidates = discovery_research_tools(preserved)
+        searched = {row['option'] for row in preserved
+                    if row['tool'] in ('web_search', 'archived_web_search', 'official_search')}
+        queries = {key:value for key, value in search.options.items() if key not in searched} if search else {}
+        if queries:
+            if followup:
+                tools['official_search_followup'] = replace(search, name='official_search_followup', options=queries,
+                    operation={**search.operation, 'approved_queries':queries})
+            else:
+                tools['official_search'] = replace(search, name='official_search', options=queries,
+                    operation={**search.operation, 'approved_queries':queries})
+        if followup:
+            preserved, report_recovery = followup_report_checkpoint(source, preserved, discovery)
+            if report_recovery:
+                history.append(report_recovery)
+                tools = {}
+                _, candidates = discovery_research_tools(preserved)
+        binding['checkpoint_sha256'] = digest(report_recovery or discovery)
+        for link in history[-(3 if report_recovery else 2 if followup else 1):]:
+            for target, field in (('gemini','gemini_reserved'), ('tokens','recorded_tokens'),
+                                  ('tavily','tavily_reserved'), ('official_gets','official_reserved')):
+                cumulative[target] += link[field]
     store = supervision_store(source, binding)
     requests = {operation['id']:operation for tool in tools.values() for operation in tool.requests}
-    require(len(requests) <= 3, 'publisher_url_blocked')
+    require(len(requests) <= (5 if discovery else 3), 'publisher_url_blocked')
     limits = {**BUDGET, 'official_gets':len(requests)}
-    if checkpoint:
+    if followup:
+        limits.update(staff=2, manager=1, gemini=3, tavily=int('official_search_followup' in tools),
+                      revisions=0, initial_staff=1)
+    if (checkpoint and not discovery) or report_recovery:
         limits.update(staff=1, manager=1, gemini=2, tavily=0, revisions=0, initial_staff=0)
     work = dict(assignment={**assignment(base, held), 'limits':limits},
                 prior_observation_count=len(held['previous_report']['observations']), preserved_source_notes=notes,
@@ -423,18 +563,26 @@ def offer(source, base, tools, scope):
                   ['task_goal','manager_criteria','public_observations','execution_status','manager_feedback'],
                   max_output_tokens=4096)
              for role, count in (('staff', limits['staff']), ('review', limits['manager'])) for index in range(count)]
-    if checkpoint:
+    if discovery:
+        work['official_discovery'] = True
+        work['latest_supervisor_context'] = dict(
+            review=(discovery_store(source) if followup else checkpoint_store(source)).read('supervision-outcome.json')['decision'],
+            observations=compact_observations(preserved))
+    resume_report = bool((checkpoint and not discovery) or report_recovery)
+    if resume_report:
         work['resume_stage'] = 'staff_report'
         model = [{**template, 'id':f'{role}-{index}'} for template, role, index in
                  ((model[0],'staff',2),(model[-1],'review',1))]
-    first = worker_for(store, work, tools, preserved, 2 if checkpoint else 0, None,
+    first = worker_for(store, work, tools, preserved, 2 if resume_report else 0, None,
                        {name:limits[name] for name in ('staff','manager','tavily','official_gets')},
-                       reporting=bool(checkpoint))
+                       reporting=resume_report)
     model[0]['payload_sha256'] = digest(first._payload(None))
     proposal = {**store.proposal([*model, *(tool.operation for tool in tools.values() if tool.operation), *requests.values()]),
-                'contract':CONTRACT+'_feature_checkpoint_v8', 'research_contract':CONTRACT_VERSION, 'limits':limits,
+                'contract':CONTRACT+('_official_report_v11' if report_recovery else
+                                     '_official_followup_v10' if followup else
+                                     '_official_discovery_v9' if discovery else '_feature_checkpoint_v8'), 'research_contract':CONTRACT_VERSION, 'limits':limits,
                 'tool_options':[tool.describe(set()) for tool in tools.values()], 'historical_usage':cumulative,
-                'resume_checkpoint':checkpoint,
+                'resume_checkpoint':(report_recovery or checkpoint) if resume_report else None,
                 'preserved_sources':notes, 'reused_search_leads':sum(len(item['sources']) for item in reused),
                 'max_batch_tools':2,
                 'gemini_model':MODEL, 'gemini_project':MISSION_ACCOUNT,
@@ -445,6 +593,8 @@ def offer(source, base, tools, scope):
                 'official_get_urls':[row['endpoint'] for row in requests.values()],
                 'publisher_policy_provenance':scope.get('publisher_policy_provenance'),
                 'direct_page_available':bool(requests) or 'publisher_page' in tools}
+    if discovery:
+        proposal.update(discovery_checkpoint=discovery, official_candidates=candidates)
     return store, proposal, work, preserved, tools
 
 
@@ -453,6 +603,9 @@ def can_complete(report, catalog, work):
         return False
     supported = [claim for claim in report['claims'] if claim['assessment'] == 'supported']
     if not supported:
+        return False
+    if work.get('official_discovery') and work['assignment']['project'].get('scenes'):
+        # The HTML observation contract cannot certify permission to use an asset.
         return False
     if work['assignment']['project'].get('scenes'):
         return any(catalog[ref['source']]['scope'] == 'public_page'
@@ -498,6 +651,8 @@ def execute(store, key, gemini, proposal, work, tools, preserved, check_history)
             observation = collect_observation(tool, selected['option'], invoke)
             store.write(f'observation-{index}-{slot}.json', observation)
             observations.append(observation)
+            if work.get('official_discovery'):
+                store.write(f'collection-checkpoint-{index}-{slot}.json', observation_checkpoint(observations, now()))
         return decision
 
     def analyze(index, direction, revision):
@@ -551,6 +706,10 @@ def execute(store, key, gemini, proposal, work, tools, preserved, check_history)
     if proposal.get('resume_checkpoint'):
         analyze(2, None, None)
         decision = review(1, None)
+    elif proposal['contract'].endswith('_official_followup_v10'):
+        direction = act(0)
+        analyze(1, direction if direction['action'] in ('hold','report') else None, None)
+        decision = review(0, None)
     else:
         decision = run_action_first(act, analyze, review)
     achieved = decision['action'] == 'accept'
@@ -596,7 +755,9 @@ def state(source, base, tools, scope):
         from local_research_config import readiness
         local = readiness()
         return dict(status='available' if ready() and local['configuration']=='configured' else 'setup_required',
-                    proposal=proposal, review_hash=digest(proposal), assignment=work['assignment'], readiness=local)
+                    proposal=proposal, review_hash=digest(proposal), assignment=work['assignment'], readiness=local,
+                    reviews=[discovery_store(source).read('supervision-outcome.json')['decision']]
+                    if proposal['contract'].endswith('_official_followup_v10') else [])
     ledger = store.attempts()
     outcome = store.read('supervision-outcome.json')
     preserved = (store.read('preserved-observations.json') or {}).get('observations', [])
@@ -606,11 +767,13 @@ def state(source, base, tools, scope):
         item = store.read(path.name)
         observation = store.read(path.name.replace('choice-', 'observation-'))
         operation = ('official-get:'+item['tool'].removeprefix('official-page-')
-                     if item['tool'].startswith('official-page-') else 'general-web' if item['tool'] == 'web_search' else None)
+                     if item['tool'].startswith('official-page-') else 'general-web' if item['tool'] in ('web_search','official_search','official_search_followup') else None)
         provider = (ledger.get(operation) or {}).get('result')
         failed = provider and provider['status'] != 'completed'
         choices.append({**item, 'state':observation['status'] if observation else 'failed' if failed else 'unconfirmed',
-                        'requests':observation.get('requests', []) if observation else []})
+                        'requests':observation.get('requests', []) if observation else [],
+                        'access_basis':observation.get('access_basis', observation.get('reason')) if observation else None,
+                        'document':observation.get('document') if observation else None})
     reviews = [store.read(file.name)['decision'] for file in sorted(store.root.glob('supervision-review-*.json'))]
     reports = [store.read(file.name) for file in sorted(store.root.glob('staff-report-*.json'))]
     step = 'active'
@@ -630,7 +793,18 @@ def state(source, base, tools, scope):
             step = 'blocked'
     diagnostics = next((entry['result']['diagnostics'] for entry in ledger.values()
                         if entry['result'] and entry['result'].get('diagnostics')), {})
-    return dict(status=step, proposal=grant['proposal'], expires_at=grant['expires_at'], remaining=budget(store, grant['proposal']['limits']),
+    candidates = []
+    if grant['proposal'].get('discovery_checkpoint'):
+        from official_sources import candidate_plans
+        from publisher_discovery import BLIZZARD_HTML
+        candidates = candidate_plans(observations, BLIZZARD_HTML)
+        for candidate in candidates:
+            name = 'official-page-'+digest(candidate['url'])[:12]
+            observed = next((row for row in observations if row['tool']==name), None)
+            if observed:
+                candidate.update(access=observed['status'], access_basis=observed.get('access_basis', observed.get('reason')),
+                                 requests=observed.get('requests', []), document=observed.get('document'))
+    return dict(status=step, official_candidates=candidates, proposal=grant['proposal'], expires_at=grant['expires_at'], remaining=budget(store, grant['proposal']['limits']),
                 failure=diagnostics.get('category'), failure_rule=(diagnostics.get('decision_receipt') or {}).get('rule'),
                 decision_shape=(diagnostics.get('decision_receipt') or {}).get('shape'),
                 provider_response=diagnostics.get('provider_response'),

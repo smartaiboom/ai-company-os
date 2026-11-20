@@ -422,3 +422,36 @@ class ReplanningTests(TestCase):
         self.assertEqual(error.exception.rule,'batch_dependency')
         with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
             validate_supervised_step({**batch,'selections':batch['selections']+[batch['selections'][0]]},*runtime)
+
+    def test_supervised_gemini_wire_schema_is_simple_but_local_rules_stay_strict(self):
+        from research_supervision import worker_for
+        from web_research import Tool
+
+        store = SimpleNamespace(root=Path('/tmp/research-shape-fixture'))
+        tool = Tool('catalog','Read facts',{'approved':'public record'},lambda _: [])
+        worker = worker_for(store, {}, {tool.name:tool}, [], 0, None, {})
+        wire = worker._payload(None)['generationConfig']
+        encoded = json.dumps(wire['responseJsonSchema'])
+        self.assertEqual(wire['responseMimeType'],'application/json')
+        self.assertNotIn('anyOf',encoded)
+        self.assertNotIn('enum',encoded)
+        valid = dict(decision=dict(tool='catalog',option='approved',claims=[],feasibility=''))
+        forged = dict(decision={**valid['decision'],'option':'unapproved'})
+        provider_decision = wire['responseJsonSchema']['properties']['decision']
+        self.assertEqual(provider_decision['properties']['option'], {'type':'string'})
+        self.assertNotIn('selections',provider_decision['required'])
+        worker.validate_response(valid)
+        self.assertEqual(worker.contract['input']['hold_unavailable_tools'], ['catalog'])
+        hold = dict(decision=dict(tool='hold',option='',feasibility='Count needs confirmation.',
+                    claims=[dict(statement='Inventory unconfirmed.',assessment='unverified',citations=[])],
+                    unavailable=[dict(tool='catalog',reason='Catalog omits this item.')]))
+        worker.validate_response(hold)
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid') as rejected:
+            worker.validate_response(dict(decision={**hold['decision'],'unavailable':[]}))
+        self.assertEqual(rejected.exception.rule,'missing_hold_reason')
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
+            worker.validate_response(forged)
+
+        final = worker_for(store, {}, {tool.name:tool}, [], 2, None, {})
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
+            final.validate_response(valid)

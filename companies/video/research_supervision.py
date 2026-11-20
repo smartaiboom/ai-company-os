@@ -3,12 +3,12 @@ from datetime import datetime
 
 from autonomous_company import CompanyError, digest, exact, now, require
 from autonomous_gemini35 import ENDPOINT, MODEL
-from mission_production import MISSION_ACCOUNT, ProductionManager, approved_manager_result
+from mission_production import MISSION_ACCOUNT, ProductionManager, approved_manager_result, draft_id
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import delegated_call, run_worker, unit
 from research_replanning import completed_reservation, failed_history, reviewed_store, stores
 from research_workflow import CONTRACT_VERSION, ResearchStep, linked_attempt, ready, step_worker
-from role_json_schema import obj
+from role_json_schema import S, arr, obj
 from staff_supervision import CONTRACT, LIMITS, review_schema, run, validate_review
 from web_research import (collect_observation, evidence_catalog, preserved_observations, research_report, step_context,
                           step_schema, validate_supervised_step)
@@ -17,9 +17,26 @@ ACTIONS = ('research-supervision-approve', 'research-supervision-run', 'research
 BUDGET = {**LIMITS, 'gemini':LIMITS['staff'] + LIMITS['manager'], 'tavily':1, 'downloads':0}
 
 
+# This provider shape avoids multiplying grammar branches by tool, option and citation.
+# The separate runtime schema still validates the decision before any tool executes.
+STAFF_PROVIDER_SCHEMA = obj(decision={
+    'type':'object',
+    'properties':dict(tool=S, option=S, feasibility=S,
+        claims=arr(obj(statement=S, assessment=S, citations=arr(S))),
+        selections=arr(obj(tool=S, option=S, reason=S)),
+        unavailable=arr(obj(tool=S, reason=S))),
+    'required':['tool','option','claims','feasibility'],
+})
+
+
 class SupervisedStaff(ResearchStep):
     marker_name = '.cutroom-supervised-staff-v1'
     acceptance_scope = 'cutroom_supervised_staff_v1'
+
+    def _payload(self, project):
+        payload = super()._payload(project)
+        payload['generationConfig']['responseJsonSchema'] = STAFF_PROVIDER_SCHEMA
+        return payload
 
     def validate_plan(self, value):
         decision = value.get('decision') if isinstance(value, dict) and set(value) == {'decision'} else None
@@ -35,11 +52,11 @@ class Supervisor(ProductionManager):
 
 
 def supervision_store(source, binding=None):
-    return OwnerOperatingPolicy(source.root/'goal-supervision-v3', binding or {})
+    return OwnerOperatingPolicy(source.root/'goal-supervision-v4', binding or {})
 
 
 def legacy_stores(source):
-    return [OwnerOperatingPolicy(source.root/f'goal-supervision-v{version}', {}) for version in (1, 2)]
+    return [OwnerOperatingPolicy(source.root/f'goal-supervision-v{version}', {}) for version in (1, 2, 3)]
 
 
 def legacy_history(source):
@@ -47,7 +64,26 @@ def legacy_history(source):
     for old in legacy_stores(source):
         previous = old.read('policy.json')
         revoked = old.read('revoked.json')
-        require(not old.attempts() and (not previous or revoked), 'supervision_previous_scope')
+        attempts = old.attempts()
+        if attempts and old.root.name.endswith('-v3'):
+            row = attempts.get('staff-0')
+            require(previous and not revoked and len(attempts)==1 and row
+                    and (row['result'] or {}).get('status')=='failed_or_uncertain'
+                    and (row['result'].get('diagnostics') or {}).get('category')=='provider_failure'
+                    and row['reservation']['policy_hash']==digest(previous)
+                    and not old.read('supervision-outcome.json'), 'supervision_previous_scope')
+            worker = SupervisedStaff(old.root/'step-0', {})
+            jid = draft_id(worker)
+            require(jid, 'supervision_previous_scope')
+            draft = worker.load(jid)
+            calls = draft['real_ai']['attempts']
+            require(len(calls)==1 and calls[0].get('http_status')==400
+                    and calls[0]['payload_hash']==row['reservation']['payload_sha256'],
+                    'supervision_previous_scope')
+            history.append(dict(previous_supervision_sha256=digest(previous),
+                                failed_ledger_sha256=digest(attempts), http_status=400))
+            continue
+        require(not attempts and (not previous or revoked), 'supervision_previous_scope')
         if previous:
             history.append(dict(previous_supervision_sha256=digest(previous), revoked_sha256=digest(revoked)))
     return history
@@ -101,7 +137,9 @@ def worker_for(store, work, tools, observations, index, revision, remaining):
     allowed = {} if report_only else tools
     prepared = step_worker(store, base, allowed, index, observations)
     context, runtime = step_context(allowed, observations, report_only)
-    contract = {**prepared.contract, 'input':{**prepared.contract['input'], 'report_only':report_only}, 'schema':obj(decision=step_schema(context, supervised=True)),
+    contract = {**prepared.contract, 'input':{**prepared.contract['input'], 'report_only':report_only,
+        'hold_unavailable_tools':[tool['name'] for tool in context['tools']]},
+        'schema':obj(decision=step_schema(context, supervised=True)),
         'system':prepared.contract['system'] + ' The assignment goal and manager criteria drive work. '
          'With no evidence, collect evidence using an approved tool when useful. For hold, explain the missing '
          'evidence in feasibility and provide one specific reason in unavailable for each remaining tool. '
@@ -110,7 +148,16 @@ def worker_for(store, work, tools, observations, index, revision, remaining):
          'Use a listed official page directly when relevant; a search result cannot authorize any new URL. '
          'Preserved observations were authorized and collected earlier, not executed in this task. '
          'Request a batch only for two justified independent choices; if one needs the other result, choose one now. '
-         'When report_only is true, use current observations to submit a final report or hold without tools.'}
+         'When report_only is true, use current observations to submit a final report or hold without tools. '
+         'Always include tool, option, claims, and feasibility in decision. For a single tool use its exact name '
+         'and option, empty claims and empty feasibility. For batch use empty option, claims and feasibility, plus '
+         'exactly two selections with tool, option and reason. For finish or hold use an empty option and one to five '
+         'claims with statement, assessment (supported, conflicting or unverified), and up to four exact citation IDs '
+         'from evidence_catalog. Hold requires all claims unverified and the unavailable array. '
+         'Include one entry for each exact name in hold_unavailable_tools, once per tool, '
+         'with keys tool and reason and a specific reason for not using that tool. '
+         'Use unavailable: [] only when hold_unavailable_tools is empty. '
+         'Omit selections except for batch and unavailable except for hold.'}
     worker = SupervisedStaff(store.root/f'step-{index}', contract)
     worker.runtime = runtime
     return worker
@@ -128,6 +175,7 @@ def offer(source, base, tools, scope):
     previous = legacy_history(source)
     history, cumulative, held = held_context(source)
     history.extend(previous)
+    cumulative['gemini'] += sum('failed_ledger_sha256' in record for record in previous)
     preserved, notes = preserved_observations(tools)
     tools = {name:tool for name,tool in tools.items() if not tool.preserved}
     binding = dict(task_id='supervision-'+digest(history)[:20], history=history,
@@ -147,7 +195,7 @@ def offer(source, base, tools, scope):
                        {name:limits[name] for name in ('staff','manager','tavily','official_gets')})
     model[0]['payload_sha256'] = digest(first._payload(None))
     proposal = {**store.proposal([*model, *(tool.operation for tool in tools.values() if tool.operation), *requests.values()]),
-                'contract':CONTRACT+'_efficient_v3', 'research_contract':CONTRACT_VERSION, 'limits':limits,
+                'contract':CONTRACT+'_efficient_v3_wire_v4', 'research_contract':CONTRACT_VERSION, 'limits':limits,
                 'tool_options':[tool.describe(set()) for tool in tools.values()], 'historical_usage':cumulative,
                 'preserved_sources':notes, 'max_batch_tools':2,
                 'gemini_model':MODEL, 'gemini_project':MISSION_ACCOUNT,
@@ -353,12 +401,14 @@ def reviewed_supervision(source):
             history, _, _ = held_context(source)
             if candidate.root == store.root:
                 history.extend(legacy_history(source))
-            elif candidate.root.name.endswith('-v2'):
-                old = legacy_stores(source)[0]
-                previous = old.read('policy.json')
-                if previous:
-                    history.append(dict(previous_supervision_sha256=digest(previous),
-                                        revoked_sha256=digest(old.read('revoked.json'))))
+            else:
+                for old in legacy_stores(source):
+                    if old.root == candidate.root:
+                        break
+                    previous = old.read('policy.json')
+                    if previous:
+                        history.append(dict(previous_supervision_sha256=digest(previous),
+                                            revoked_sha256=digest(old.read('revoked.json'))))
         except CompanyError:
             return None
         outcome = candidate.read('supervision-outcome.json')

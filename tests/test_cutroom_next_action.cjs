@@ -7,7 +7,7 @@ const node = {addEventListener() {}};
 const document = {querySelectorAll: () => [], querySelector: () => node};
 const source = fs.readFileSync(path.join(__dirname,'../companies/video/studio/studio.js'),'utf8');
 const ui = vm.runInNewContext(source.replace(/\nroute\(\);\s*$/, '') +
-  '\n({nextWork, productionNext, projectPage, researchErrorText, researchRecoveryPanel, researchPanel, researchReplanPanel})', {document, window: node});
+  '\n({nextWork, productionNext, projectPage, researchErrorText, researchRecoveryPanel, researchPanel, researchReplanPanel, researchSupervisionPanel})', {document, window: node});
 const clip = {scene_id:'scene-1',source:'operator_clip',request:'test'};
 const initial = {status:'unprepared',key_ready:false,clips:[],voices:{}};
 const available = {...initial,key_ready:true};
@@ -196,3 +196,12 @@ assert.doesNotMatch(replanPanel,/research-reinvestigate-run/);
 const decision={action:'ask_owner',reason:'확인 필요',next_step:'자료를 제공할까요?',success_criteria:'원문 확보'};
 assert.match(ui.researchReplanPanel({status:'manager_decided',limits:replanLimits,decision},false),/실제 관리자 판단 · 대표 질문/);
 assert.doesNotMatch(ui.researchReplanPanel({status:'research_stopped',limits:replanLimits},false),/data-action=/);
+
+const supervised=ui.researchSupervisionPanel({status:'incomplete',evidence_count:0,
+  choices:[{tool:'web_search',option:'fixture',state:'empty'}],
+  remaining:{staff:1,manager:1,tavily:0},
+  reviews:[{action:'revise',rationale:'추가 확인',feedback:'다른 자료 검토',confirmation:'문서 확인',
+    checks:[{criterion_id:'fixture',status:'unmet',evidence:'자료 없음'}]}],
+  outcome:{next_proposal:{feedback:'검토 요청'}}}, false);
+assert.match(supervised,/실제 업무 목표 미달성.*잔여 승인 횟수.*호출 결과 0건.*관리자 보완 지시.*미충족.*대표 승인 필요/s);
+assert.doesNotMatch(supervised,/data-action=/);

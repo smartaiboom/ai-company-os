@@ -614,6 +614,74 @@ function researchReplanCommand(action, project) {
   });
 }
 
+const supervisionTitles={
+  'research-supervision-approve':'새 보완 업무 범위 검토·승인',
+  'research-supervision-run':'승인된 보완 업무 시작',
+  'research-supervision-revoke':'보완 업무 승인 철회'
+};
+function researchSupervisionPanel(state, readonly) {
+  if (!state) return '';
+  const proposal=state.proposal;
+  const limits=proposal?.limits;
+  const labels={available:'기존 보류 유지 · 새 보완 업무 승인 대기',setup_required:'무료 공급자 설정 확인 대기',
+    active:'새 승인 완료 · 실행 대기',achieved:'관리자가 목표 달성을 확인했습니다. 조사 참고 범위에 적용됩니다.',
+    incomplete:'응답 검증 완료 · 실제 업무 목표 미달성',stopped:'보완 업무 중단 · 관리자·대표 검토 필요',
+    expired:'보완 승인 만료',revoked:'보완 승인 철회',blocked:'기존 서명, 보류 또는 현재 범위를 확인할 수 없어 차단됐습니다.'};
+  const tools={observed:'관측 확보',empty:'호출 결과 0건',failed:'호출 중단',unconfirmed:'수행 결과 미확정'};
+  const decisions={revise:'보완 지시',hold:'보류',alternative:'대안 제안',ask_owner:'대표 질문',accept:'목표 달성 확인'};
+  const checks={met:'충족',unmet:'미충족',unknown:'미확인'};
+  const failures={provider_failure:'공급자 실패 응답',outcome_uncertain:'전송·결과 미확정',
+    decision_invalid:'판단 규칙 위반',provider_response_invalid:'응답 계약 오류'};
+  const actions={available:['research-supervision-approve'],
+    active:['research-supervision-run','research-supervision-revoke']};
+  return `<div class="subpanel"><h3>목표 기반 보완 업무</h3><p>${h(labels[state.status])}</p>
+    ${proposal?`<p>이전 누적 · Gemini 예약 ${h(proposal.historical_usage.gemini)}회 · Tavily 예약 ${h(proposal.historical_usage.tavily)}회</p>
+      <p>추가 · 직원 ${h(limits.staff)}회 · 관리자 ${h(limits.manager)}회(최종 독립 검토 1회 포함) · Gemini 합계 ${h(limits.gemini)}회 · Tavily ${h(limits.tavily)}회 · 보완 최대 ${h(limits.revisions)}회 · 다운로드 0회 · 비용 $0</p>
+      ${!proposal.direct_page_available?`<p>직접 확인한 공식 페이지 도구가 현재 목록에 없습니다. 공개 검색은 단서를 수집할 수 있습니다.</p>`:''}`:''}
+    ${state.assignment?`<p>관리자 수행 목표 · ${h(state.assignment.manager_direction)}</p><p>성공 기준 · ${h(state.assignment.manager_success_criteria)}</p>`:''}
+    ${state.remaining?`<p>잔여 승인 횟수 · 직원 ${h(state.remaining.staff)}회 · 관리자 ${h(state.remaining.manager)}회 · Tavily ${h(state.remaining.tavily)}회</p>`:''}
+    ${state.expires_at?`<p>유효 기한 ${h(time(state.expires_at))}</p>`:''}
+    ${state.failure?`<p>${h(failures[state.failure] || state.failure)}${state.failure_rule?' · '+h(state.failure_rule):''}</p>`:''}
+    <p>도구 수행 · 근거 ${h(state.evidence_count || 0)}건</p>
+    ${(state.choices || []).map(item=>`<p>${h(item.tool)} · ${h(item.option)} · ${h(tools[item.state])}</p>`).join('')}
+    ${(proposal?.tool_options || []).filter(tool=>!(state.choices || []).some(item=>item.tool===tool.name))
+         .map(tool=>`<p>${h(tool.name)} · ${state.status==='active'?'대기':'미사용'}</p>`).join('')}
+    ${(state.reports || []).map(item=>`<p>직원 보고 검증 완료 · ${h(item.report.feasibility)}</p>
+      ${item.unavailable.map(reason=>`<p>${h(reason.tool)} · ${h(reason.reason)}</p>`).join('')}`).join('')}
+    ${(state.reviews || []).map(review=>`<p>관리자 ${h(decisions[review.action])} · ${h(review.rationale)}</p>
+      <p>${h(review.feedback)} · 확인 기준 ${h(review.confirmation)}</p>
+      ${review.checks.map(check=>`<p>${h(check.criterion_id)} · ${h(checks[check.status])} · ${h(check.evidence)}</p>`).join('')}`).join('')}
+    ${state.outcome?.next_proposal?`<p>추가 작업은 대표 승인 필요 · ${h(state.outcome.next_proposal.feedback)}</p>`:''}
+    ${readonly?'':(actions[state.status] || []).map(name=>`<button class="button secondary" data-action="${name}">${supervisionTitles[name]}</button>`).join('')}
+  </div>`;
+}
+
+function researchSupervisionCommand(action, project) {
+  const state=project.research.supervision;
+  const approve=action.endsWith('-approve');
+  const proposal=state.proposal;
+  const fields=approve?`<p>무료 Gemini 최대 ${h(proposal.limits.gemini)}회 · Tavily 기본 검색 최대 ${h(proposal.limits.tavily)}회 · 비용 $0</p>
+    <p>이전 보류, 업무 목표, 확인 기준, 보존 관측, 실행 기록 및 보완 지시를 Gemini에 보냅니다. Tavily에는 승인된 공개 검색어만 보냅니다.</p>
+    <p>승인 후 ${h(proposal.valid_hours)}시간 · 현재 공급자 키에 서명 결합 · 실제 잔량과 청구는 별도 확인</p>
+    <p>기존 보류 이후 직접 확인 가능한 공식 페이지 도구 ${proposal.direct_page_available?'있음':'없음'}</p>
+    <ul>${proposal.tool_options.map(tool=>`<li>${h(tool.name)} · ${h(Object.values(tool.options).join(' / '))}</li>`).join('')}</ul>
+    <details><summary>계약·이력 및 첫 요청 해시</summary><pre>${h(JSON.stringify({binding:proposal.binding,
+      contract:proposal.contract, research_contract:proposal.research_contract, first:proposal.units[0].payload_sha256},null,2))}</pre></details>
+    <label class="check"><input type="checkbox" name="confirmed" required>무료 계정, 결제 비활성, 잔여 한도와 전송 범위를 확인했습니다.</label>`:
+    '<p id="supervision-progress" role="status">현재 서명 범위에 적용됩니다.</p>';
+  modal(supervisionTitles[action],fields,supervisionTitles[action],async data=>{
+    const progress=dialog.querySelector('#supervision-progress');
+    if (progress && action.endsWith('-run')) progress.textContent='직원 업무 및 독립 관리자 검토 실행 중';
+    try {
+      await api(detailApi(project)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:state.review_hash}:{});
+    } catch (error) {
+      if (action.endsWith('-run')) await route();
+      throw error;
+    }
+    return {message:'보완 업무 상태를 갱신했습니다.'};
+  });
+}
+
 function researchPanel(p) {
   const r=p.research;
   if (!r) return '';
@@ -629,6 +697,7 @@ function researchPanel(p) {
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
     ${researchRecoveryPanel(r.recovery,p.readonly)}
     ${researchReplanPanel(r.replan,p.readonly)}
+    ${researchSupervisionPanel(r.supervision,p.readonly)}
     ${r.review?`<p><strong>관리자 ${r.review.decision.action==='hold'?'보류':'제한적 활용 의견'}</strong> ${h(r.review.decision.note)}</p>`:''}
     ${r.result?`<p><strong>제작 가능성</strong> ${h(r.result.feasibility)}</p>
       ${r.result.claims.map(c=>`<p><strong>직원 해석 · ${h(({supported:'근거 일치',conflicting:'근거 상충',unverified:'미확인'})[c.assessment])}</strong> ${h(c.statement)}</p>
@@ -641,6 +710,7 @@ function researchPanel(p) {
 }
 function researchCommand(action) {
   const p=detail, r=p.research;
+  if (Object.hasOwn(supervisionTitles,action)) return researchSupervisionCommand(action,p);
   if (Object.hasOwn(replanTitles,action)) return researchReplanCommand(action,p);
   const titles={'research-approve':'조사 범위 검토·승인','research-run':'웹·전문 자료 조사 실행','research-revoke':'조사 범위 철회',
     'research-recovery-approve':'복구 범위 검토·승인','research-recovery-run':'승인된 복구 시작',

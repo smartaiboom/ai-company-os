@@ -204,7 +204,10 @@ RESEARCH_ERROR_STAGES={
 
 
 def linked_attempt(store, name, row):
-    if name == f'research-{ROUNDS}':
+    if name == 'manager-replan':
+        from research_replanning import ReplanManager
+        worker = ReplanManager(store.root/'manager', {})
+    elif name == f'research-{ROUNDS}':
         worker = ResearchReview(store.root/'manager-review', {})
     else:
         match = re.fullmatch(r'(?:correct-)?research-([0-3])', name)
@@ -391,23 +394,26 @@ def status(workflow,project):
     review=store.read('manager-review.json')
     ledger=store.attempts()
     observations=[store.read(path.name) for path in sorted(store.root.glob('observation-*.json'))]
-    recovery = replan = None
+    recovery = replan = supervision = None
     if ledger and not review:
         _, tools, model, scope = available(workflow, project, inputs)
         recovery = recovery_status(store, grant, ledger, (base, tools, model, scope))
         if recovery_store(store).attempts() and not recovery.get('review'):
             from research_replanning import state
             replan = state(store, base, tools, model, scope)
-    new_result = (replan or {}).get('result')
+            if (replan.get('review') or {}).get('decision', {}).get('action') == 'hold':
+                from research_supervision import state as supervision_state
+                supervision = supervision_state(store, base, tools, scope)
+    new_result = (supervision or {}).get('result') or (replan or {}).get('result')
     return dict(status='revoked' if store.read('revoked.json') else 'review' if result and review else
                 'stopped' if ledger else
                 'contract_changed' if grant['proposal'].get('decision_contract') != CONTRACT_VERSION else
                 'expired' if datetime.fromisoformat(now())>=datetime.fromisoformat(grant['expires_at']) else 'active',
                 result=new_result or (recovery or {}).get('result') or result,
-                review=(replan or {}).get('review') or (recovery or {}).get('review') or review,
+                review=(supervision or {}).get('review') or (replan or {}).get('review') or (recovery or {}).get('review') or review,
                 observations=(new_result or (recovery or {}).get('result') or {}).get('observations', observations),
                 proposal=grant['proposal'],used=len(ledger),
-                diagnostics=research_diagnostics(store,ledger) if ledger else None, recovery=recovery, replan=replan)
+                diagnostics=research_diagnostics(store,ledger) if ledger else None, recovery=recovery, replan=replan, supervision=supervision)
 
 
 def execute_research(store, credential, gemini, base, tools, model, *, history=(), proposal=None, preflight=None):
@@ -457,6 +463,10 @@ def action(workflow,pid,name,body):
         require(inputs is not None,'research_scope_invalid')
         base=inputs[0]
         from research_replanning import ACTIONS, REVOKE_ACTION, action as replan_action, revoke as replan_revoke
+        from research_supervision import ACTIONS as SUPERVISION, action as supervise, supervision_store
+        if name == SUPERVISION[2]:
+            exact(body, ())
+            return supervision_store(research_store(workflow.store.root, project, base)).revoke()
         if name in REVOKE_ACTION:
             return replan_revoke(research_store(workflow.store.root, project, base), name, body)
         if name in ('research-revoke', 'research-recovery-revoke'):
@@ -469,6 +479,8 @@ def action(workflow,pid,name,body):
         require(re.fullmatch(r'[A-Za-z0-9_-]{16,200}',search) is not None,'research_search_disabled')
         credential=digest([gemini,search])
         store,tools,model,scope=available(workflow,project,inputs,search)
+        if name in SUPERVISION[:2]:
+            return supervise(store, base, tools, scope, name, body, credential, gemini)
         if name in ACTIONS:
             return replan_action(store, base, tools, model, scope, name, body, credential, gemini)
         if name=='research-approve':
@@ -511,7 +523,8 @@ def reviewed_handoff(store,*,fresh=True):
     if store.read('revoked.json'):
         return None
     from research_replanning import reviewed_store
-    replanned = reviewed_store(store)
+    from research_supervision import reviewed_supervision
+    replanned = reviewed_supervision(store) or reviewed_store(store)
     if replanned:
         store = replanned
     elif not store.read('manager-review.json'):

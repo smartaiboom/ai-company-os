@@ -135,7 +135,7 @@ STEP_RULES = {
 }
 
 
-def step_schema(context):
+def step_schema(context, *, supervised=False):
     catalog = context['evidence_catalog']
     assessments = ('supported', 'conflicting', 'unverified') if independent_sources(list(catalog.values())) else ('unverified',)
     references = {**arr(enum(*catalog) if catalog else S), 'maxItems': min(4, len(catalog))}
@@ -147,6 +147,15 @@ def step_schema(context):
             claims={**claims, 'maxItems': 0}, feasibility=enum(''))
         for tool in context['tools']
     ]
+    if supervised:
+        hold = obj(tool=enum('hold'), option=enum(''), claims={**arr(obj(
+            statement=S, assessment=enum('unverified'), citations=references)), 'minItems':1, 'maxItems':5},
+            feasibility=S, unavailable={**arr(obj(tool=enum(*(tool['name'] for tool in context['tools']))
+                if selections else S, reason=S)), 'minItems':len(selections), 'maxItems':len(selections)})
+        choices = [*selections, hold]
+        if catalog or not selections:
+            choices.append(finish)
+        return {'anyOf': choices}
     return {'anyOf': [*selections, finish]} if selections else finish
 
 
@@ -193,6 +202,29 @@ def validate_step(step, tools, used, observations, final=False):
                        'insufficient_independent_evidence', 'research_evidence_invalid')
 
 
+def validate_supervised_step(step, tools, used, observations, final):
+    if isinstance(step, dict) and step.get('tool') == 'hold':
+        check_step('unavailable' in step, 'missing_hold_reason')
+        reasons = step['unavailable']
+        available = [tool.describe(used) for tool in tools.values()]
+        names = {tool['name'] for tool in available}
+        check_step(isinstance(reasons, list) and len(reasons) == len(names), 'missing_hold_reason')
+        remaining = names.copy()
+        for reason in reasons:
+            check_step(isinstance(reason, dict) and set(reason) == {'tool', 'reason'}
+                       and isinstance(reason['tool'], str) and reason['tool'] in remaining, 'missing_hold_reason')
+            report_text(reason['reason'], 300)
+            remaining.remove(reason['tool'])
+        payload = {key:value for key,value in step.items() if key != 'unavailable'}
+        payload['tool'] = 'finish'
+        validate_step(payload, tools, used, observations, final)
+        check_step(all(claim['assessment'] == 'unverified' for claim in step['claims']), 'invalid_finish')
+        return
+    if isinstance(step, dict) and step.get('tool') == 'finish':
+        check_step(final or bool(evidence_catalog(observations)), 'early_goal_finish')
+    validate_step(step, tools, used, observations, final)
+
+
 def step_context(tools, observations, final):
     used = {(row['tool'], row['option']) for row in observations}
     remaining = {}
@@ -209,6 +241,33 @@ def step_context(tools, observations, final):
             (remaining, used, observations, not choices))
 
 
+def research_report(step, observations):
+    catalog = evidence_catalog(observations)
+    claims = [{**claim, 'citations': [
+        dict(source=ref, quote=catalog[ref]['excerpt']) for ref in claim['citations']
+    ]} for claim in step['claims']]
+    return dict(at=now(), claims=claims, feasibility=step['feasibility'], observations=list(observations),
+                evidence_contract=EVIDENCE_CONTRACT, evidence_catalog_sha256=digest(catalog),
+                status='manager_review', publish_allowed=False)
+
+
+def collect_observation(tool, option, invoke):
+    output = []
+
+    def collect(check):
+        check()
+        rows = tool.read(option)
+        require(isinstance(rows, list) and len(rows) <= 8, 'research_source_invalid')
+        evidence_catalog([{'sources': rows}])
+        output.extend(rows)
+
+    if tool.operation:
+        invoke(tool.operation, digest(dict(tool=tool.name, option=option, value=tool.options[option])), collect)
+    else:
+        collect(lambda: None)
+    return dict(tool=tool.name, option=option, at=now(), status='observed' if output else 'empty', sources=output)
+
+
 def run(store, tools, decide, invoke, rounds, *, history=()):
     """Continue from verified observations supplied by the domain adapter."""
     observations = list(history)
@@ -216,30 +275,11 @@ def run(store, tools, decide, invoke, rounds, *, history=()):
         context, runtime = step_context(tools, observations, index == rounds - 1)
         step = decide(index, context)
         validate_step(step, *runtime)
-        if step['tool']=='finish':
-            catalog = evidence_catalog(observations)
-            claims = [{**claim, 'citations': [
-                dict(source=ref, quote=catalog[ref]['excerpt']) for ref in claim['citations']
-            ]} for claim in step['claims']]
-            result=dict(at=now(),claims=claims,feasibility=step['feasibility'],observations=observations,
-                        evidence_contract=EVIDENCE_CONTRACT, evidence_catalog_sha256=digest(catalog),
-                        status='manager_review',publish_allowed=False)
-            store.write('research-result.json',result)
+        if step['tool'] == 'finish':
+            result = research_report(step, observations)
+            store.write('research-result.json', result)
             return result
-        tool=tools[step['tool']]
-        option=step['option']
-        output=[]
-        def collect(check):
-            check()
-            rows=tool.read(option)
-            require(isinstance(rows,list) and len(rows)<=8,'research_source_invalid')
-            evidence_catalog([{'sources': rows}])
-            output.extend(rows)
-        if tool.operation:
-            invoke(tool.operation,digest(dict(tool=tool.name,option=option,value=tool.options[option])),collect)
-        else:
-            collect(lambda:None)
-        record=dict(tool=tool.name,option=option,at=now(),status='observed' if output else 'empty',sources=output)
-        store.write(f'observation-{index}.json',record)
+        record = collect_observation(tools[step['tool']], step['option'], invoke)
+        store.write(f'observation-{index}.json', record)
         observations.append(record)
     raise CompanyError('research_step_invalid')

@@ -24,7 +24,9 @@ ENV = dict(TAVILY_RESEARCHER_FREE_ONLY='1', GEMINI35_AUTONOMOUS_FREE_ENABLED='1'
 class ReplanningTests(TestCase):
     def test_failed_history_to_manager_and_separately_approved_investigation(self):
         for scenario in ('reinvestigate', 'alternative', 'hold', 'ask_owner', 'insufficient', 'key_changed',
-                         'scope_changed', 'expired', 'revoked', 'provider_error', 'timeout', 'research_timeout'):
+                         'scope_changed', 'expired', 'revoked', 'provider_error', 'timeout', 'research_timeout',
+                         'supervise', 'supervise_early', 'supervise_empty', 'supervise_stall', 'supervise_timeout',
+                         'supervise_signature', 'supervise_key', 'supervise_expired', 'supervise_revoked'):
             with self.subTest(scenario=scenario), TemporaryDirectory() as tmp, ExitStack() as stack:
                 store = Store(Path(tmp))
                 project = store.create('Research target', opt_in=True)
@@ -139,7 +141,7 @@ class ReplanningTests(TestCase):
                             self.assertEqual(send.call_count,4)
                         else:
                             steps = iter(('publisher_page','youtube_metrics','finish'))
-                            insufficient = scenario == 'insufficient'
+                            insufficient = scenario == 'insufficient' or scenario.startswith('supervise')
 
                             def respond_research(request, timeout):
                                 sent = json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
@@ -164,8 +166,115 @@ class ReplanningTests(TestCase):
                             self.assertEqual(bool(reviewed_handoff(source)),not insufficient)
                             deny('research-reinvestigate-run','owner_policy_exhausted')
                             self.assertEqual(send.call_count,5 if insufficient else 7)
+                            if scenario.startswith('supervise'):
+                                self.exercise_supervision(scenario, source, current, perform, deny, send, search, page, metric)
                 self.assertEqual((source.attempts(), recovery.attempts()), previous)
-                search.assert_not_called()
+                self.assertEqual(search.call_count, int(scenario == 'supervise_empty'))
+
+    def exercise_supervision(self, scenario, source, current, perform, deny, send, search, page, metric):
+        from research_supervision import supervision_store
+
+        held = stores(source)[1]
+        previous = held.attempts(), held.read('manager-review.json')
+        offer = current()['supervision']
+        self.assertEqual(offer['proposal']['historical_usage']['gemini'],5)
+        self.assertEqual(offer['proposal']['limits']['gemini'],5)
+        deny('research-supervision-run','owner_policy_required')
+        perform('research-supervision-approve',confirmed=True,review_hash=offer['review_hash'])
+        self.assertEqual(send.call_count,5)
+        self.assertEqual(current()['supervision']['status'],'active')
+        if scenario == 'supervise_signature':
+            path = supervision_store(source).root/'policy.json'
+            document = json.loads(path.read_text())
+            Store.atomic(path, {**document, 'signature':'0'*64})
+            deny('research-supervision-run','owner_policy_signature')
+            self.assertEqual(send.call_count,5)
+            return
+        if scenario == 'supervise_key':
+            with patch.dict('os.environ', {'TAVILY_API_KEY':'changed-fixture-key'}):
+                deny('research-supervision-run','owner_policy_key_changed')
+            self.assertEqual(send.call_count,5)
+            return
+        if scenario == 'supervise_expired':
+            with patch('owner_operating_policy.now', return_value='2099-01-01T00:00:00+09:00'):
+                deny('research-supervision-run','owner_policy_expired')
+            self.assertEqual(send.call_count,5)
+            return
+        if scenario == 'supervise_revoked':
+            perform('research-supervision-revoke')
+            deny('research-supervision-run','owner_policy_revoked')
+            self.assertEqual(send.call_count,5)
+            return
+        staff = []
+        reviews = []
+        search.return_value = []
+        report = dict(tool='finish', option='', claims=[dict(statement='Dates remain uncertain',
+                      assessment='unverified', citations=[])], feasibility='Check further dates.')
+
+        def respond(request, timeout):
+            wire = json.loads(request.data)
+            prompt = json.loads(wire['contents'][0]['parts'][0]['text'])
+            self.assertEqual(prompt['assignment']['manager_success_criteria'], 'Two independent sources for a claim')
+            deny('research-supervision-run','project_busy')
+            if prompt['goal']=='Review achievement of the assigned goal':
+                reviews.append(prompt)
+                accepted = scenario == 'supervise' and len(reviews) == 2
+                action = 'accept' if accepted else 'hold' if scenario == 'supervise_empty' or len(reviews)==2 else 'revise'
+                permitted = wire['generationConfig']['responseJsonSchema']['properties']['decision']['properties']['action']['enum']
+                self.assertEqual('accept' in permitted,accepted)
+                if len(reviews) == 2:
+                    self.assertNotIn('revise',permitted)
+                if accepted:
+                    self.assertEqual(prompt['staff_report']['claims'][0]['citations'],[
+                        dict(source=row['id'], quote=row['excerpt']) for row in (page,metric)])
+                return Reply(dict(decision=dict(action=action,rationale='Checked observation scope.',
+                    feedback='Compare both sources directly.',confirmation='Check the dates.',
+                    checks=[dict(criterion_id='objective',status='met' if accepted else 'unmet',
+                                 source='model_claim',evidence='Based on stored observations.')])))
+
+            staff.append(prompt)
+            if len(staff) == 1:
+                operation = offer['proposal']['units'][0]
+                self.assertEqual(digest(wire), operation['payload_sha256'])
+                if scenario == 'supervise_timeout':
+                    raise TimeoutError()
+                if scenario == 'supervise_early':
+                    return Reply(report)
+                if scenario == 'supervise_empty':
+                    return Reply(dict(tool='web_search',option='game',claims=[],feasibility=''))
+                return Reply(dict(tool='publisher_page',option='saved',claims=[],feasibility=''))
+            if scenario == 'supervise_empty':
+                return Reply({**report,'tool':'hold','unavailable':[
+                    dict(tool=tool['name'],reason='Cannot establish the requested date.')
+                    for tool in prompt['tools']]})
+            if scenario == 'supervise_stall':
+                return Reply(report)
+            if len(staff) == 2:
+                return Reply(dict(tool='youtube_metrics',option='saved',claims=[],feasibility=''))
+            self.assertEqual(prompt['manager_revision']['action'],'revise')
+            return Reply({**report,'claims':[dict(statement='A release and listing date are separately documented.',
+                         assessment='supported', citations=[page['id'],metric['id']])]})
+
+        send.side_effect = respond
+        if scenario in ('supervise_early','supervise_timeout'):
+            deny('research-supervision-run','research_step_invalid' if scenario=='supervise_early'
+                 else 'transport_or_response_failed')
+            self.assertEqual(current()['supervision']['status'],'stopped')
+            self.assertEqual(send.call_count,6)
+        else:
+            perform('research-supervision-run')
+            current_state = current()['supervision']
+            achieved = scenario == 'supervise'
+            self.assertEqual(current_state['status'],'achieved' if achieved else 'incomplete')
+            self.assertEqual(bool(reviewed_handoff(source)),achieved)
+            if scenario == 'supervise_empty':
+                self.assertEqual(current_state['choices'][0]['state'],'empty')
+                self.assertEqual(current_state['remaining']['tavily'],0)
+            if scenario == 'supervise_stall':
+                self.assertFalse(reviews[-1]['progress_since_revision'])
+            self.assertEqual(len(reviews),1 if scenario=='supervise_empty' else 2)
+        deny('research-supervision-run','owner_policy_exhausted')
+        self.assertEqual((held.attempts(), held.read('manager-review.json')),previous)
 
     def test_common_contract_for_nonvideo_fixture(self):
         from task_replanning import ACTIONS, context, schema, validate
@@ -182,3 +291,34 @@ class ReplanningTests(TestCase):
             with self.assertRaisesRegex(CompanyError,'replan_invalid'):
                 validate(dict(action='reinvestigate', tools=tools, reason='Fixture',
                               next_step='Test', success_criteria='Count verified'),contract)
+
+    def test_supervision_contract_nonvideo_and_exhausted_tools(self):
+        from staff_supervision import review_schema, run, validate_review
+        from role_json_schema import matches
+        from web_research import step_context, step_schema, validate_supervised_step
+
+        inventory = [dict(id='stock', description='Count independently verified inventory items.')]
+        events = []
+
+        def staff(index, previous):
+            events.append(('staff', index, previous and previous['action']))
+            return index == 0
+
+        def supervisor(index, previous):
+            events.append(('manager', index, previous and previous['action']))
+            return dict(action='revise' if index == 0 else 'hold')
+
+        self.assertEqual(run(staff, supervisor)['action'], 'hold')
+        self.assertEqual(events, [('staff',0,None),('manager',0,None),('staff',2,'revise'),('manager',1,'revise')])
+        context, runtime = step_context({}, [], False)
+        hold = dict(tool='hold', option='', feasibility='No source could confirm inventory.',
+                    claims=[dict(statement='Count unknown.', assessment='unverified', citations=[])], unavailable=[])
+        self.assertTrue(matches(hold, step_schema(context, supervised=True)))
+        validate_supervised_step(hold, *runtime)
+        value = dict(action='hold', rationale='No inventory evidence.', feedback='Obtain a new count.',
+                     confirmation='Compare two recorded counts.',
+                     checks=[dict(criterion_id='stock', status='unknown', evidence='No source', source='model_claim')])
+        contract = review_schema(inventory, can_accept=False, can_revise=False)
+        self.assertTrue(matches(value, contract))
+        self.assertFalse(matches({**value, 'action':'revise'}, contract))
+        validate_review(value, inventory)

@@ -23,7 +23,8 @@ MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 
 RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke',
                     'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke',
                     'research-replan-approve', 'research-replan-run', 'research-replan-revoke',
-                    'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke')
+                    'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke',
+                    'research-supervision-approve', 'research-supervision-run', 'research-supervision-revoke')
 
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
                       'production-publisher-approve','production-publisher-run','production-publisher-rights','production-publisher-revoke',
@@ -43,6 +44,7 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 RESEARCH_ERRORS = {
+    'supervision_blocked': '기존 보류와 서명된 검토 기록을 확인할 수 없어 새 보완 업무가 차단됐습니다.',
     'replan_blocked': '중단 기록이나 승인 조건을 확인할 수 없어 새 업무를 시작할 수 없습니다.',
     'replan_invalid': '관리자 재계획이 허용 행동 또는 입력 계약과 일치하지 않습니다.',
     'decision_recovery_blocked': '응답과 승인 범위를 연결할 수 없어 복구가 차단됐습니다. 관리자·대표 검토가 필요합니다.',

@@ -470,3 +470,47 @@ class ReplanningTests(TestCase):
         self.assertEqual(failure.exception.rule,'invalid_claim')
         self.assertEqual(failure.exception.safe_shape['max_citations'],5)
         self.assertNotIn('Raw fixture text',json.dumps(failure.exception.safe_shape))
+
+    def test_report_checkpoint_and_resume_only_signed_execution(self):
+        from autonomous_company import now
+        from owner_operating_policy import OwnerOperatingPolicy
+        from research_supervision import BUDGET, execute, worker_for
+        from web_research import observation_checkpoint
+
+        source = evidence('https://archive.example/measurement','Measurement','One observed sample.',
+                          'api_metric','fixture')
+        observation = dict(tool='archive',option='one',status='observed',at=now(),sources=[source])
+        checkpoint = observation_checkpoint([observation], now())
+        self.assertEqual(checkpoint['sources'],1)
+        with self.assertRaisesRegex(CompanyError,'research_source_invalid'):
+            observation_checkpoint([{**observation,'sources':[{**source,'excerpt':'tampered'}]}],now())
+        with self.assertRaisesRegex(CompanyError,'research_checkpoint_stale'):
+            observation_checkpoint([{**observation,'at':'2026-10-01T09:00:00+09:00'}],now())
+
+        with TemporaryDirectory() as tmp:
+            store = OwnerOperatingPolicy(Path(tmp)/'resume', {'checkpoint':digest(checkpoint)})
+            limits = {**BUDGET,'staff':1,'manager':1,'tavily':0,'official_gets':0}
+            work = dict(resume_stage='staff_report',assignment=dict(project={},
+                criteria=[dict(id='objective',description='Check sample.')]))
+            before = {key:limits[key] for key in ('staff','manager','tavily','official_gets')}
+            staff = worker_for(store,work,{},[observation],2,None,before,reporting=True)
+            self.assertNotIn('sha256',staff.contract['input']['evidence_catalog'][source['id']])
+            decision = dict(decision=dict(feasibility='One sample cannot verify the goal.',
+                claims=[dict(statement='Insufficient sample.',assessment='unverified',citations=[source['id']])]))
+            staff.validate_response(decision)
+            with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
+                staff.validate_response(dict(decision={**decision['decision'],'tool':'finish'}))
+            proposal = {**store.proposal([dict(id='staff-2',max_cost_usd=0,
+                                              payload_sha256=digest(staff._payload(None))),
+                                        dict(id='review-1',max_cost_usd=0)]),
+                        'limits':limits,'resume_checkpoint':checkpoint}
+            store.approve(proposal,digest(proposal),'fixture-key')
+            manager = dict(decision=dict(action='hold',rationale='Cannot confirm from one sample.',
+                feedback='Obtain independent evidence.',confirmation='Find matching records.',
+                checks=[dict(criterion_id='objective',status='unmet',source='model_claim',evidence='One sample.')]))
+            with patch('research_supervision.run_worker',side_effect=lambda worker,key,proof,wire,check:check()), patch(
+                    'research_supervision.approved_manager_result',side_effect=[decision,manager]):
+                execute(store,'fixture-key','fixture-gemini',proposal,work,{},[observation],lambda:None)
+            self.assertEqual(set(store.attempts()),{'staff-2','review-1'})
+            self.assertFalse(store.read('supervision-outcome.json')['goal_achieved'])
+            self.assertIsNone(store.read('manager-review.json'))

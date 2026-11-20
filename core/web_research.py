@@ -399,7 +399,8 @@ def validate_collection(action, tools, used, observations, final):
 def decision_shape(value, *, phase, tools, evidence_count):
     """Record only an allowlisted verb, expected missing fields and structural counts."""
     decision = value.get('decision') if isinstance(value, dict) else None
-    fields = (*ACTION_SCHEMA['required'],) if phase == 'collection' else ('tool','option','claims','feasibility')
+    fields = (ACTION_SCHEMA['required'] if phase == 'collection' else
+              ('claims','feasibility') if phase == 'resume_report' else ('tool','option','claims','feasibility'))
     known = ('observe','batch','report','hold','finish')
     verb = decision.get('action', decision.get('tool')) if isinstance(decision, dict) else None
     result = dict(phase=phase, shape='object' if isinstance(decision, dict) else 'non_object',
@@ -414,9 +415,35 @@ def decision_shape(value, *, phase, tools, evidence_count):
                                       'display_value' if option in selected.options.values() else 'other_string')
         else:
             result['option_shape'] = 'unrecognized_structure'
-    if phase == 'report' and isinstance(decision, dict) and isinstance(decision.get('claims'), list):
+    if phase in ('report','resume_report') and isinstance(decision, dict) and isinstance(decision.get('claims'), list):
         claims = decision['claims']
         result['claim_count'] = len(claims)
         result['max_citations'] = max((len(claim['citations']) for claim in claims if isinstance(claim, dict)
                                        and isinstance(claim.get('citations'), list)),default=0)
     return result
+
+
+def observation_checkpoint(observations, checked_at):
+    """Validate and fingerprint completed research without granting another tool call."""
+    current = datetime.fromisoformat(checked_at)
+    catalog = evidence_catalog(observations)
+    seen = set()
+    for row in observations:
+        key = row['tool'], row['option']
+        require(key not in seen and row['status'] in ('preserved','observed','empty','policy_blocked','unavailable'),
+                'research_checkpoint_invalid')
+        seen.add(key)
+        if row['status'] != 'preserved':
+            require(timedelta(0) <= current - datetime.fromisoformat(row['at']) < timedelta(hours=24),
+                    'research_checkpoint_stale')
+            require(bool(row['sources']) == (row['status']=='observed'), 'research_checkpoint_invalid')
+    require(all(timedelta(0) <= current - datetime.fromisoformat(row['observed_at']) < timedelta(days=30)
+                for row in catalog.values()), 'research_checkpoint_stale')
+    return dict(evidence_contract=EVIDENCE_CONTRACT, observations_sha256=digest(observations),
+                catalog_sha256=digest(catalog), sources=len(catalog))
+
+
+def report_step(decision):
+    """The report stage fixes the operation; the model supplies every substantive field."""
+    check_step(isinstance(decision, dict) and set(decision)=={'claims','feasibility'}, 'invalid_finish')
+    return {'tool':'finish','option':'',**decision}

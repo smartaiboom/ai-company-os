@@ -656,7 +656,11 @@ function researchSupervisionPanel(state, readonly) {
       ${(item.requests || []).map(request=>`<p>${h(request.kind==='robots'?'robots 확인':'공식 페이지 조회')} · HTTP ${h(request.http_status)} · ${sourceLink(request.url)}</p>`).join('')}`).join('')}
     ${(proposal?.tool_options || []).filter(tool=>!(state.choices || []).some(item=>item.tool===tool.name))
          .map(tool=>`<p>${h(tool.name)} · ${state.status==='active'?'대기':'미사용'}</p>`).join('')}
+    ${state.decision_shape?`<p>응답 단계 ${h(state.decision_shape.phase)} · 행동 ${h(state.decision_shape.action)}
+      · 누락 필드 ${h(state.decision_shape.missing.join(', ') || '없음')} · 허용 도구 ${h(state.decision_shape.eligible_tools)}개
+      · 근거 ${h(state.decision_shape.evidence_count)}건</p>`:''}
     ${(state.reports || []).map(item=>`<p>직원 보고 검증 완료 · ${h(item.report.feasibility)}</p>
+      ${item.collection_direction?.action==='hold'?`<p>수집 보류 · ${h(item.collection_direction.reason)}</p>`:''}
       ${item.unavailable.map(reason=>`<p>${h(reason.tool)} · ${h(reason.reason)}</p>`).join('')}`).join('')}
     ${(state.reviews || []).map(review=>`<p>관리자 ${h(decisions[review.action])} · ${h(review.rationale)}</p>
       <p>${h(review.feedback)} · 확인 기준 ${h(review.confirmation)}</p>

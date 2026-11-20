@@ -347,3 +347,49 @@ def run(store, tools, decide, invoke, rounds, *, history=()):
         store.write(f'observation-{index}.json', record)
         observations.append(record)
     raise CompanyError('research_step_invalid')
+
+
+ACTION_SCHEMA = obj(action=enum('observe','batch','report','hold'), tool=S, option=S, reason=S,
+                    selections=arr(obj(tool=S, option=S, reason=S)))
+
+
+def validate_collection(action, tools, used, observations, final):
+    fields = ACTION_SCHEMA['required']
+    check_step(isinstance(action, dict) and set(action) == set(fields), 'invalid_action_fields')
+    verb, tool, option, selections = (action[key] for key in ('action','tool','option','selections'))
+    check_step(verb in ('observe','batch','report','hold') and isinstance(selections, list), 'invalid_action')
+    report_text(action['reason'], 300)
+    if verb == 'observe':
+        check_step(selections == [], 'invalid_action_fields')
+        validate_step(dict(tool=tool, option=option, claims=[], feasibility=''), tools, used, observations, final)
+    else:
+        check_step(tool == '' and option == '', 'invalid_action_fields')
+        if verb == 'batch':
+            validate_supervised_step(dict(tool='batch', option='', claims=[], feasibility='', selections=selections),
+                                     tools, used, observations, final)
+        else:
+            check_step(selections == [], 'invalid_action_fields')
+            check_step(verb == 'hold' or not tools or any(row['status']=='observed' for row in observations)
+                       or any(row['scope']=='public_page' for row in evidence_catalog(observations).values()),
+                       'early_goal_finish')
+
+
+def decision_shape(value, *, phase, tools, evidence_count):
+    """Record only an allowlisted verb, expected missing fields and structural counts."""
+    decision = value.get('decision') if isinstance(value, dict) else None
+    fields = (*ACTION_SCHEMA['required'],) if phase == 'collection' else ('tool','option','claims','feasibility')
+    known = ('observe','batch','report','hold','finish')
+    verb = decision.get('action', decision.get('tool')) if isinstance(decision, dict) else None
+    result = dict(phase=phase, shape='object' if isinstance(decision, dict) else 'non_object',
+                  action=verb if verb in known or isinstance(verb, str) and verb in tools else 'unknown',
+                  missing=[name for name in fields if not isinstance(decision, dict) or name not in decision],
+                  eligible_tools=len(tools), evidence_count=evidence_count)
+    if phase == 'collection' and isinstance(decision, dict) and verb == 'observe':
+        name, option = decision.get('tool'), decision.get('option')
+        selected = tools.get(name) if isinstance(name, str) else None
+        if isinstance(option, str) and selected:
+            result['option_shape'] = ('known_id' if option in selected.options else
+                                      'display_value' if option in selected.options.values() else 'other_string')
+        else:
+            result['option_shape'] = 'unrecognized_structure'
+    return result

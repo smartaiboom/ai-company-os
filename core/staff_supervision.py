@@ -41,3 +41,19 @@ def run(staff, review):
         return first
     staff(final_staff, first)
     return review(1, first)
+
+
+def run_action_first(act, report, review):
+    """Keep one staff report and final review available after collection."""
+    last = LIMITS['initial_staff']
+    for index in range(last):
+        decision = act(index)
+        if decision['action'] in ('report', 'hold'):
+            report(index + 1, decision, None)
+            first = review(0 if index == 0 else 1, None)
+            if index == 0 and first['action'] == 'revise':
+                report(last, decision, first)
+                return review(1, first)
+            return first
+    report(last, None, None)
+    return review(1, None)

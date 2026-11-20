@@ -219,6 +219,8 @@ class LiveDialogueStore(DialogueStore):
                     return self._accept_proposal(candidate, value, 'gemini35_live_manager')
                 except DecisionViolation as exc:
                     attempt['decision_rejection'] = dict(rule=exc.rule, response_sha256=digest(value))
+                    if getattr(exc, 'safe_shape', None):
+                        attempt['decision_rejection']['shape'] = exc.safe_shape
                     raise
                 except CompanyError:
                     raise

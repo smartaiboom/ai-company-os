@@ -244,6 +244,10 @@ class ReplanningTests(TestCase):
             return {**report,'claims':[dict(statement='A release and listing date are documented.',
                          assessment='supported', citations=[official['id'],metric['id']])]}
 
+        def collection(verb, tool='', option='', selections=()):
+            return Reply(dict(decision=dict(action=verb,tool=tool,option=option,
+                                            reason='Check the evidence for this task.',selections=list(selections))))
+
         def respond(request, timeout):
             wire = json.loads(request.data)
             prompt = json.loads(wire['contents'][0]['parts'][0]['text'])
@@ -251,9 +255,8 @@ class ReplanningTests(TestCase):
             deny('research-supervision-run','project_busy')
             if prompt['goal']=='Review achievement of the assigned goal':
                 reviews.append(prompt)
-                accepted = (scenario in ('supervise','supervise_batch','supervise_search_official')
-                            or scenario == 'supervise_official' and len(reviews) == 2)
-                revise = scenario in ('supervise_stall','supervise_official') and len(reviews)==1
+                accepted = scenario in ('supervise','supervise_batch','supervise_search_official','supervise_official')
+                revise = scenario == 'supervise_stall' and len(reviews)==1
                 action = 'accept' if accepted else 'revise' if revise else 'hold'
                 permitted = wire['generationConfig']['responseJsonSchema']['properties']['decision']['properties']['action']['enum']
                 self.assertEqual('accept' in permitted,accepted)
@@ -273,46 +276,35 @@ class ReplanningTests(TestCase):
                                  source='model_claim',evidence='Based on stored observations.')])))
 
             staff.append(prompt)
+            if prompt.get('report_only'):
+                self.assertEqual(prompt['tools'],[])
+                if scenario in ('supervise_empty','supervise_stall'):
+                    self.assertEqual(prompt['collection_direction']['action'],'hold')
+                    return Reply(report)
+                return Reply(supported(prompt))
+            self.assertNotIn('evidence_catalog',prompt)
             if len(staff) == 1:
                 operation = offer['proposal']['units'][0]
                 self.assertEqual(digest(wire), operation['payload_sha256'])
                 if scenario == 'supervise_timeout':
                     raise TimeoutError()
                 if scenario == 'supervise_early':
-                    self.assertEqual(prompt['evidence_catalog'], {})
-                    return Reply(report)
-                self.assertIn(metric['id'],prompt['evidence_catalog'])
-                self.assertNotIn('youtube_metrics',[tool['name'] for tool in prompt['tools']])
+                    self.assertEqual(sum(prompt['source_counts'].values()), 0)
+                    return collection('report')
+                self.assertGreater(prompt['source_counts']['api_metric'],0)
                 if scenario in ('supervise_empty','supervise_search_official'):
-                    return Reply(dict(tool='web_search',option='game',claims=[],feasibility=''))
+                    return collection('observe','web_search','game')
                 if scenario.startswith('supervise_batch'):
-                    return Reply(dict(tool='batch',option='',claims=[],feasibility='',selections=[
+                    return collection('batch',selections=[
                         dict(tool='web_search',option='game',reason='Collect independent leads.'),
-                        dict(tool='official-page-rights',option='approved',reason='Read the already approved policy.')]))
+                        dict(tool='official-page-rights',option='approved',reason='Read the approved policy.')])
                 if scenario == 'supervise_official':
-                    return Reply(dict(tool='official-page-rights',option='approved',claims=[],feasibility=''))
-                return Reply(supported(prompt) if scenario == 'supervise' else report)
-            if scenario == 'supervise_empty':
-                return Reply({**report,'tool':'hold','unavailable':[
-                    dict(tool=tool['name'],reason='Cannot establish the requested date.')
-                    for tool in prompt['tools']]})
-            if scenario == 'supervise_stall':
-                self.assertTrue(prompt['report_only'])
-                return Reply(report)
-            if scenario == 'supervise_batch':
-                self.assertTrue(any(row['scope']=='search_lead' for row in prompt['evidence_catalog'].values()))
-                return Reply(supported(prompt))
+                    return collection('observe','official-page-rights','approved')
+                return collection('report' if scenario == 'supervise' else 'hold')
             if scenario == 'supervise_search_official':
-                if len(staff)==2:
-                    return Reply(dict(tool='official-page-rights',option='approved',claims=[],feasibility=''))
-                self.assertTrue(prompt['report_only'])
-                self.assertEqual(prompt['tools'],[])
-                return Reply(supported(prompt))
-            if not prompt['report_only']:
-                return Reply(report)
-            self.assertEqual(prompt['tools'],[])
-            self.assertEqual(prompt['manager_revision']['action'],'revise')
-            return Reply(supported(prompt))
+                self.assertGreater(prompt['source_counts']['search_lead'],0)
+                return collection('observe','official-page-rights','approved')
+            return collection('hold' if scenario=='supervise_empty' else 'report')
 
         send.side_effect = respond
         failures = dict(supervise_early='research_step_invalid',supervise_timeout='transport_or_response_failed',
@@ -340,9 +332,9 @@ class ReplanningTests(TestCase):
                 self.assertEqual(current_state['remaining']['tavily'],0)
             if scenario == 'supervise_stall':
                 self.assertFalse(reviews[-1]['progress_since_revision'])
-            self.assertEqual(len(reviews),2 if scenario in ('supervise_official','supervise_stall') else 1)
+            self.assertEqual(len(reviews),2 if scenario == 'supervise_stall' else 1)
             if scenario=='supervise_batch':
-                self.assertEqual(send.call_count,8)
+                self.assertEqual(send.call_count,9)
             if scenario=='supervise_search_official':
                 self.assertEqual(send.call_count,9)
         deny('research-supervision-run','owner_policy_exhausted')
@@ -431,27 +423,34 @@ class ReplanningTests(TestCase):
         tool = Tool('catalog','Read facts',{'approved':'public record'},lambda _: [])
         worker = worker_for(store, {}, {tool.name:tool}, [], 0, None, {})
         wire = worker._payload(None)['generationConfig']
-        encoded = json.dumps(wire['responseJsonSchema'])
         self.assertEqual(wire['responseMimeType'],'application/json')
-        self.assertNotIn('anyOf',encoded)
-        self.assertNotIn('enum',encoded)
-        valid = dict(decision=dict(tool='catalog',option='approved',claims=[],feasibility=''))
+        self.assertNotIn('anyOf',json.dumps(wire['responseJsonSchema']))
+        valid = dict(decision=dict(action='observe',tool='catalog',option='approved',
+                                   reason='Observe the record.',selections=[]))
         forged = dict(decision={**valid['decision'],'option':'unapproved'})
-        provider_decision = wire['responseJsonSchema']['properties']['decision']
-        self.assertEqual(provider_decision['properties']['option'], {'type':'string'})
-        self.assertNotIn('selections',provider_decision['required'])
         worker.validate_response(valid)
-        self.assertEqual(worker.contract['input']['hold_unavailable_tools'], ['catalog'])
-        hold = dict(decision=dict(tool='hold',option='',feasibility='Count needs confirmation.',
-                    claims=[dict(statement='Inventory unconfirmed.',assessment='unverified',citations=[])],
-                    unavailable=[dict(tool='catalog',reason='Catalog omits this item.')]))
-        worker.validate_response(hold)
         with self.assertRaisesRegex(CompanyError,'research_step_invalid') as rejected:
-            worker.validate_response(dict(decision={**hold['decision'],'unavailable':[]}))
-        self.assertEqual(rejected.exception.rule,'missing_hold_reason')
-        with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
             worker.validate_response(forged)
+        self.assertEqual(rejected.exception.safe_shape['action'],'observe')
+        self.assertEqual(rejected.exception.safe_shape['option_shape'],'other_string')
+        self.assertEqual(wire['responseJsonSchema']['properties']['decision']['properties']['option']['enum'],['','approved'])
+        self.assertEqual(worker.contract['input']['tools'][0]['options'],[dict(id='approved',display='public record')])
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid') as wrong_display:
+            worker.validate_response(dict(decision={**valid['decision'],'option':'public record'}))
+        self.assertEqual(wrong_display.exception.safe_shape['option_shape'],'display_value')
+        self.assertNotIn('unapproved',json.dumps(rejected.exception.safe_shape))
+        hold = dict(decision=dict(action='hold',tool='',option='',reason='Catalog omits this item.',selections=[]))
+        worker.validate_response(hold)
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid') as missing:
+            worker.validate_response(dict(decision={k:v for k,v in hold['decision'].items() if k!='reason'}))
+        self.assertEqual(missing.exception.safe_shape['missing'],['reason'])
 
-        final = worker_for(store, {}, {tool.name:tool}, [], 2, None, {})
+        final = worker_for(store, {}, {tool.name:tool}, [], 2, None, {}, reporting=True)
         with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
             final.validate_response(valid)
+        report = dict(decision=dict(tool='finish',option='',feasibility='More evidence is needed.',
+            claims=[dict(statement='Unknown',assessment='unverified',citations=[])]))
+        final.validate_response(report)
+        with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
+            final.validate_response(dict(decision={**report['decision'],'claims':[
+                dict(statement='Fake citation',assessment='unverified',citations=['invented'])]}))

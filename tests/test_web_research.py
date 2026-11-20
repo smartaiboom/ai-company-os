@@ -41,21 +41,27 @@ class ResearchTests(TestCase):
                           'search_lead')
             staff_calls=[]
             flow=['web_search','publisher_page','youtube_metrics','finish']
-            claim=dict(statement='Observed dates conflict',assessment='conflicting',
-                       citations=[dict(source=page['id'],quote='November 19'),
-                                  dict(source=metric['id'],quote='November 18')])
+            claim=dict(statement='The findings show audience growth',assessment='supported',
+                       citations=[page['id'],metric['id']])
             def send(req,timeout):
                 content=json.loads(json.loads(req.data)['contents'][0]['parts'][0]['text'])
                 if content['goal']=='Review video research':
-                    self.assertEqual(content['evidence']['claims'][0]['assessment'],'conflicting')
-                    return Reply(dict(action='use_with_limits',note='상충 날짜를 편집 기록에 표시합니다.'))
+                    checked = content['evidence']['claims'][0]
+                    self.assertEqual(checked['statement'], claim['statement'])
+                    self.assertEqual(checked['citations'], [
+                        dict(source=row['id'], quote=row['excerpt']) for row in (page, metric)
+                    ])
+                    return Reply(dict(action='hold',note='날짜와 단일 조회수로는 성장률을 확인할 수 없습니다.'))
                 step=flow[len(staff_calls)]
                 staff_calls.append(content)
                 if step=='finish':
                     return Reply(dict(tool=step,option='',claims=[claim,dict(statement='Rights uncertain',
                         assessment='unverified',citations=[])],feasibility='공식 파일 사용 조건 확인이 필요합니다.'))
                 if step=='publisher_page':
-                    self.assertEqual(content['observations'][0]['sources'],[lead])
+                    self.assertEqual(content['observations'][0]['sources'],[lead['id']])
+                    self.assertEqual(content['evidence_catalog'][lead['id']], lead)
+                if step=='web_search':
+                    self.assertEqual(content['evidence_catalog'], {})
                 return Reply(dict(tool=step,option='game' if step=='web_search' else 'saved',claims=[],feasibility=''))
             env=dict(TAVILY_RESEARCHER_FREE_ONLY='1',GEMINI35_AUTONOMOUS_FREE_ENABLED='1',
                 GEMINI35_MODEL=MODEL,GEMINI35_ENDPOINT=ENDPOINT,TAVILY_API_KEY='fake-researcher-credential',
@@ -72,7 +78,11 @@ class ResearchTests(TestCase):
                     action(workflow,pid,'research-run',{})
                 action(workflow,pid,'research-approve',dict(confirmed=True,review_hash=offer['review_hash']))
                 action(workflow,pid,'research-run',{})
-                self.assertEqual(status(workflow,project)['status'],'review')
+                state = status(workflow,project)
+                self.assertEqual(state['status'],'review')
+                self.assertEqual(state['review']['decision']['action'], 'hold')
+                from research_workflow import reviewed_handoff
+                self.assertIsNone(reviewed_handoff(research_store(store.root,project,base)))
                 self.assertEqual(search.call_count,1)
                 self.assertEqual(gemini.call_count,5)
                 signed=research_store(store.root,project,base)
@@ -88,7 +98,7 @@ class ResearchTests(TestCase):
         invalid = dict(tool='web_search', option='unapproved-fixture-option', claims=[], feasibility='')
         finish = dict(tool='finish', option='', claims=[dict(statement='Insufficient evidence',
             assessment='unverified', citations=[])], feasibility='공식 권리 자료가 필요합니다.')
-        manager = dict(action='use_with_limits', note='권리 확인 후 별도로 검토합니다.')
+        manager = dict(action='hold', note='권리 확인 후 별도로 검토합니다.')
         env = dict(TAVILY_RESEARCHER_FREE_ONLY='1', GEMINI35_AUTONOMOUS_FREE_ENABLED='1',
             GEMINI35_MODEL=MODEL, GEMINI35_ENDPOINT=ENDPOINT, TAVILY_API_KEY='fake-researcher-credential',
             GEMINI_API_KEY='fake-gemini-credential-123456789',
@@ -212,7 +222,8 @@ class ResearchTests(TestCase):
                         with self.assertRaisesRegex(CompanyError, 'project_busy'):
                             action(workflow, pid, 'research-recovery-run', {})
                         if is_partial:
-                            self.assertEqual(prompt['observations'][0]['sources'], [lead])
+                            self.assertEqual(prompt['observations'][0]['sources'], [lead['id']])
+                            self.assertEqual(prompt['evidence_catalog'][lead['id']], lead)
                             self.assertEqual(prompt['tools'], [])
                             self.assertTrue(prompt['finish_required'])
                         self.assertEqual(digest(wire), proposal['units'][0]['payload_sha256'])
@@ -229,7 +240,7 @@ class ResearchTests(TestCase):
                     else:
                         action(workflow, pid, 'research-recovery-run', {})
                         self.assertEqual(status(workflow, project)['recovery']['status'], 'review')
-                        self.assertEqual(reviewed_handoff(source)['review'], manager)
+                        self.assertIsNone(reviewed_handoff(source))
                         self.assertEqual(gemini.call_count, original_calls + 2)
                         correction_id = 'correct-research-1' if is_partial else 'correct-research-0'
                         self.assertEqual(set(recovery_store(source).attempts()), {correction_id,'research-4'})
@@ -309,24 +320,36 @@ class ResearchTests(TestCase):
                 correction_call(policy, 'fixture-key', operation, payload, feedback, apply)
             self.assertEqual(len(calls), 1)
 
-    def test_sources_and_quotes_fail_closed(self):
-        from web_research import validate_step
+    def test_source_references_fail_closed(self):
+        from role_json_schema import matches
+        from web_research import step_context, step_schema, validate_step
+
         for url in ('https://127.0.0.1/page','https://x.example@other.example/path',
                     'https://example.org/a?key=secret','https://example.org:443/a'):
             with self.assertRaisesRegex(CompanyError,'research_source_invalid'):
                 source_url(url)
-        rows=[evidence('https://first.example/a','One','same observation','public_page','original'),
-              evidence('https://second.example/b','Two','same observation','public_page','original')]
-        refs=[dict(source=r['id'],quote='same observation') for r in rows]
-        step=dict(tool='finish',option='',claims=[dict(statement='a claim',assessment='supported',citations=refs)],
-                  feasibility='possible')
-        with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
-            validate_step(step,{},set(),[{'sources':rows}],True)
-        step['claims'][0]['assessment']='unverified'
-        validate_step(step,{},set(),[{'sources':rows}],True)
-        refs[0]['quote']='invented'
-        with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
-            validate_step(step,{},set(),[{'sources':rows}],True)
+        a = evidence('https://first.example/a','One','same observation','public_page','original')
+        b = evidence('https://second.example/b','Two','same observation','public_page','original')
+        snippet = evidence('https://third.example/a','Snippet','search lead','search_lead')
+        independent = evidence('https://third.example/a','Official','release record','public_page','issuer')
+        step = dict(tool='finish', option='', claims=[dict(statement='Claim', assessment='supported',
+                    citations=[a['id'], independent['id']])], feasibility='Compare dates before publication.')
+        observations = [dict(tool='catalog', option='saved', sources=[a, independent])]
+        allowed, runtime = step_context({}, [], True)
+        self.assertFalse(matches(step, step_schema(allowed)))
+        allowed, runtime = step_context({}, observations, True)
+        self.assertTrue(matches(step, step_schema(allowed)))
+        validate_step(step, *runtime)
+        for rows in ([a,b], [a,snippet]):
+            claim = {**step['claims'][0], 'citations':[row['id'] for row in rows]}
+            with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
+                validate_step({**step,'claims':[claim]}, {}, set(), [{'sources':rows}], True)
+        for refs in ([a['id'], a['id']], ['invented'], [dict(source=a['id'], quote='fake')]):
+            claim = {**step['claims'][0], 'assessment':'unverified', 'citations':refs}
+            with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
+                validate_step({**step,'claims':[claim]}, {}, set(), observations, True)
+        with self.assertRaisesRegex(CompanyError,'research_source_invalid'):
+            validate_step(step, {}, set(), [{'sources':[{**a,'origin':'fake'}, independent]}], True)
         with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
             validate_step(dict(tool='url',option='https://example.org',claims=[],feasibility=''),{},set(),[],False)
 
@@ -396,8 +419,11 @@ class ResearchTests(TestCase):
             project=studio.workflow.store.load(pid)
             store=research_store(root,project,planning_base(project,jid))
             store.root.mkdir(mode=0o700)
-            result=dict(claims=[dict(statement='Unverified game release',assessment='unverified',citations=[])],
-                        feasibility='Check rights first',observations=[])
+            legacy = dict(id='a'*24, url='https://game.example/legacy', scope='public_page',
+                          origin='publisher', observed_at=now(), source_date=None, excerpt='Legacy exact excerpt.')
+            result=dict(claims=[dict(statement='Unverified game release',assessment='unverified',
+                                     citations=[dict(source=legacy['id'], quote='exact excerpt')])],
+                        feasibility='Check rights first',observations=[dict(sources=[legacy])])
             store.write('research-result.json',result)
             store.write('manager-review.json',dict(decision=dict(action='use_with_limits',note='Follow up'),
                 result_sha256=digest(result),at=now()))

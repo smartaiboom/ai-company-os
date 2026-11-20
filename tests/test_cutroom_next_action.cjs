@@ -7,7 +7,7 @@ const node = {addEventListener() {}};
 const document = {querySelectorAll: () => [], querySelector: () => node};
 const source = fs.readFileSync(path.join(__dirname,'../companies/video/studio/studio.js'),'utf8');
 const ui = vm.runInNewContext(source.replace(/\nroute\(\);\s*$/, '') +
-  '\n({nextWork, productionNext, projectPage, researchErrorText, researchRecoveryPanel})', {document, window: node});
+  '\n({nextWork, productionNext, projectPage, researchErrorText, researchRecoveryPanel, researchPanel})', {document, window: node});
 const clip = {scene_id:'scene-1',source:'operator_clip',request:'test'};
 const initial = {status:'unprepared',key_ready:false,clips:[],voices:{}};
 const available = {...initial,key_ready:true};
@@ -175,3 +175,12 @@ assert.doesNotMatch(stopped,/data-action=/);
 const blocked=ui.researchRecoveryPanel({status:'blocked',reason:'decision_recovery_blocked'},false);
 assert.match(blocked,/복구가 차단.*응답·예약 기록/s);
 assert.doesNotMatch(blocked,/data-action=/);
+
+const catalogPanel=ui.researchPanel({research:{status:'review',
+  review:{decision:{action:'hold',note:'인용과 주장이 맞지 않습니다.'}},
+  result:{feasibility:'추가 확인',claims:[{assessment:'supported',statement:'직원의 주장',
+    citations:[{source:'fixture-reference',quote:'<observed excerpt>'}]}]},
+  observations:[{tool:'web_search',at:'fixture',sources:[{id:'fixture-reference',scope:'search_lead',
+    title:'검색 결과',excerpt:'<observed excerpt>',url:'https://example.org/source'}]}]}});
+assert.match(catalogPanel,/관리자 보류.*직원 해석.*관측 발췌.*&lt;observed excerpt&gt;.*검색 단서/s);
+assert.doesNotMatch(catalogPanel,/<observed excerpt>/);

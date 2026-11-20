@@ -16,6 +16,7 @@ TAVILY='https://api.tavily.com/search'
 SEARCH_FIELDS=dict(search_depth='basic',max_results=5,auto_parameters=False,include_answer=False,
                    include_raw_content=False,include_images=False)
 FIELD_LIMIT=600
+EVIDENCE_CONTRACT = "evidence_reference_v1"
 
 
 def source_url(value):
@@ -37,8 +38,34 @@ def evidence(url,title,excerpt,scope,origin=None,observed_at=None,source_date=No
     require(scope in ('search_lead','public_page','api_metric','media_metadata'),'research_source_invalid')
     if observed_at is None:
         observed_at=now()
-    return dict(id=digest([url,excerpt,scope,observed_at])[:24],url=url,title=title,excerpt=excerpt,scope=scope,
-                origin=origin,host=host,observed_at=observed_at,source_date=source_date)
+    row = dict(url=url, title=title, excerpt=excerpt, scope=scope, origin=origin, host=host,
+               observed_at=observed_at, source_date=source_date)
+    fingerprint = digest(row)
+    return dict(id=fingerprint[:24], sha256=fingerprint, **row)
+
+
+def evidence_catalog(observations):
+    catalog = {}
+    for group in observations:
+        for row in group['sources']:
+            exact(row, ('id', 'sha256', 'url', 'title', 'excerpt', 'scope', 'origin', 'host',
+                        'observed_at', 'source_date'))
+            original = evidence(row['url'], row['title'], row['excerpt'], row['scope'],
+                                row['origin'], row['observed_at'], row['source_date'])
+            require(row == original and catalog.get(row['id'], row) == row, 'research_source_invalid')
+            catalog[row['id']] = dict(row)
+    return catalog
+
+
+def independent_sources(sources):
+    eligible = [source for source in sources if source['scope'] in ('public_page', 'api_metric')
+                and source['origin']]
+    return any(a['origin'] != b['origin'] and a['host'] != b['host']
+               for i, a in enumerate(eligible) for b in eligible[i+1:])
+
+
+def has_reviewable_claim(result):
+    return any(claim['assessment'] in ('supported', 'conflicting') for claim in result['claims'])
 
 
 def tavily_search(query,key):
@@ -103,14 +130,16 @@ STEP_RULES = {
     'invalid_finish': 'For finish return an empty option, one to five claims and a feasibility statement.',
     'invalid_claim': 'Use an allowed assessment and up to four citations with the required fields.',
     'invalid_report_text': 'Supply nonblank report text within the documented lengths.',
-    'invalid_citation': 'Cite a known observation once per claim and quote its excerpt exactly.',
+    'invalid_citation': 'Choose each reference ID at most once from the current evidence catalog. Omit references if none apply.',
     'insufficient_independent_evidence': 'Use two independent eligible origins or mark the claim unverified.',
 }
 
 
 def step_schema(context):
-    claims = arr(obj(statement=S, assessment=enum('supported', 'conflicting', 'unverified'),
-                     citations={**arr(obj(source=S, quote=S)), 'maxItems': 4}))
+    catalog = context['evidence_catalog']
+    assessments = ('supported', 'conflicting', 'unverified') if independent_sources(list(catalog.values())) else ('unverified',)
+    references = {**arr(enum(*catalog) if catalog else S), 'maxItems': min(4, len(catalog))}
+    claims = arr(obj(statement=S, assessment=enum(*assessments), citations=references))
     finish = obj(tool=enum('finish'), option=enum(''), claims={**claims, 'minItems': 1, 'maxItems': 5},
                  feasibility=S)
     selections = [
@@ -147,24 +176,19 @@ def validate_step(step, tools, used, observations, final=False):
 
     check_step(option == '' and 1 <= len(step['claims']) <= 5, 'invalid_finish')
     report_text(step['feasibility'], 460)
-    known = {row['id']: row for group in observations for row in group['sources']}
+    known = evidence_catalog(observations)
     for claim in step['claims']:
         check_step(isinstance(claim, dict) and set(claim) == {'statement', 'assessment', 'citations'},
                    'invalid_claim')
         report_text(claim['statement'], 400)
+        refs = claim['citations']
         check_step(claim['assessment'] in ('supported', 'conflicting', 'unverified')
-                   and isinstance(claim['citations'], list) and len(claim['citations']) <= 4, 'invalid_claim')
-        seen = set()
-        for ref in claim['citations']:
-            check_step(isinstance(ref, dict) and set(ref) == {'source', 'quote'}, 'invalid_claim')
-            report_text(ref['quote'], 200)
-            check_step(isinstance(ref['source'], str) and ref['source'] in known and ref['source'] not in seen
-                       and ref['quote'] in known[ref['source']]['excerpt'], 'invalid_citation', 'research_evidence_invalid')
-            seen.add(ref['source'])
+                   and isinstance(refs, list) and len(refs) <= 4, 'invalid_claim')
+        check_step(all(isinstance(ref, str) and ref in known for ref in refs)
+                   and len(set(refs)) == len(refs), 'invalid_citation', 'research_evidence_invalid')
         if claim['assessment'] != 'unverified':
-            sources = [known[row['source']] for row in claim['citations']]
-            origins = {row['origin'] for row in sources if row['origin']}
-            check_step(len(origins) >= 2 and len({row['host'] for row in sources if row['origin']}) >= 2
+            sources = [known[ref] for ref in refs]
+            check_step(independent_sources(sources)
                        and all(row['scope'] in ('public_page', 'api_metric') for row in sources),
                        'insufficient_independent_evidence', 'research_evidence_invalid')
 
@@ -180,7 +204,8 @@ def step_context(tools, observations, final):
         if choice['options']:
             choices.append(choice)
             remaining[tool.name] = tool
-    return (dict(tools=choices, observations=observations, finish_required=not choices),
+    return (dict(tools=choices, observations=observations, evidence_catalog=evidence_catalog(observations),
+                 finish_required=not choices),
             (remaining, used, observations, not choices))
 
 
@@ -192,7 +217,12 @@ def run(store, tools, decide, invoke, rounds, *, history=()):
         step = decide(index, context)
         validate_step(step, *runtime)
         if step['tool']=='finish':
-            result=dict(at=now(),claims=step['claims'],feasibility=step['feasibility'],observations=observations,
+            catalog = evidence_catalog(observations)
+            claims = [{**claim, 'citations': [
+                dict(source=ref, quote=catalog[ref]['excerpt']) for ref in claim['citations']
+            ]} for claim in step['claims']]
+            result=dict(at=now(),claims=claims,feasibility=step['feasibility'],observations=observations,
+                        evidence_contract=EVIDENCE_CONTRACT, evidence_catalog_sha256=digest(catalog),
                         status='manager_review',publish_allowed=False)
             store.write('research-result.json',result)
             return result
@@ -203,6 +233,7 @@ def run(store, tools, decide, invoke, rounds, *, history=()):
             check()
             rows=tool.read(option)
             require(isinstance(rows,list) and len(rows)<=8,'research_source_invalid')
+            evidence_catalog([{'sources': rows}])
             output.extend(rows)
         if tool.operation:
             invoke(tool.operation,digest(dict(tool=tool.name,option=option,value=tool.options[option])),collect)

@@ -548,19 +548,20 @@ function researchPanel(p) {
   const labels={setup_required:'무료 Tavily Researcher 계정과 서버 설정이 필요합니다.',
     available:'업무에 필요한 검색 또는 보존된 전문 자료를 직원이 선택합니다.',active:'승인한 범위 내에서 조사와 관리자 검토를 진행합니다.',
     review:'관리자가 조사 결과와 미확인 항목을 검토했습니다.',revoked:'조사 승인이 철회됐습니다.',
-    expired:'조사 승인 유효 시간이 지났습니다.',stopped:'실패 또는 미확정 요청에서 조사를 중단했습니다.'};
+    expired:'조사 승인 유효 시간이 지났습니다.',contract_changed:'조사 계약이 바뀌었습니다. 기존 승인으로 실행할 수 없습니다.',stopped:'실패 또는 미확정 요청에서 조사를 중단했습니다.'};
   return `<section class="panel" id="cross-research"><h2>웹·전문 자료 교차 조사</h2><p>${h(labels[r.status])}</p>
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
     ${researchRecoveryPanel(r.recovery,p.readonly)}
-    ${r.review?`<p><strong>관리자 의견</strong> ${h(r.review.decision.note)}</p>`:''}
+    ${r.review?`<p><strong>관리자 ${r.review.decision.action==='hold'?'보류':'제한적 활용 의견'}</strong> ${h(r.review.decision.note)}</p>`:''}
     ${r.result?`<p><strong>제작 가능성</strong> ${h(r.result.feasibility)}</p>
-      ${r.result.claims.map(c=>`<p><strong>${h(({supported:'근거 일치',conflicting:'근거 상충',unverified:'미확인'})[c.assessment])}</strong> ${h(c.statement)}
-        ${c.citations.map(ref=>`<span> · ${h(ref.source)} “${h(ref.quote)}”</span>`).join('')}</p>`).join('')}
+      ${r.result.claims.map(c=>`<p><strong>직원 해석 · ${h(({supported:'근거 일치',conflicting:'근거 상충',unverified:'미확인'})[c.assessment])}</strong> ${h(c.statement)}</p>
+        ${c.citations.map(ref=>`<blockquote><strong>관측 발췌</strong> · ${h(ref.source)} · “${h(ref.quote)}”</blockquote>`).join('')}`).join('')}
       `:''}
     ${r.observations?.length?`<details><summary>실제 관측과 출처</summary>${r.observations.map(o=>`<p>${h(o.tool)} · ${h(o.at)} · ${o.status==='empty'?'결과 없음':''}</p>
-        ${o.sources.map(ref=>`<p>${h(ref.id)} · ${h(ref.title)} · ${h(ref.excerpt)} · ${sourceLink(ref.url)}</p>`).join('')}`).join('')}</details>`:''}
+        ${o.sources.map(ref=>`<p>${h(ref.id)} · ${h(({search_lead:'검색 단서',public_page:'직접 확인한 페이지',api_metric:'API 관측',media_metadata:'미디어 메타데이터'})[ref.scope] || ref.scope)}
+          · ${h(ref.origin || '원출처 미확인')} · ${h(ref.title)} · ${h(ref.excerpt)} · ${sourceLink(ref.url)}</p>`).join('')}`).join('')}</details>`:''}
     </section>`;
 }
 function researchCommand(action) {

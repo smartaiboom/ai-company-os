@@ -336,6 +336,7 @@ def state(source, base, tools, scope):
                         if entry['result'] and entry['result'].get('diagnostics')), {})
     return dict(status=step, proposal=grant['proposal'], expires_at=grant['expires_at'], remaining=budget(store, grant['proposal']['limits']),
                 failure=diagnostics.get('category'), failure_rule=(diagnostics.get('decision_receipt') or {}).get('rule'),
+                provider_response=diagnostics.get('provider_response'),
                 outcome=outcome, observations=observations, reviews=reviews, reports=reports, choices=choices,
                 evidence_count=len(evidence_catalog(observations)),
                 result=store.read('research-result.json'), review=store.read('manager-review.json'))

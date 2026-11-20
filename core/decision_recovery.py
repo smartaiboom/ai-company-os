@@ -72,6 +72,9 @@ def delegated_call(store, key, operation, payload_hash, execute):
         diagnostics = dict(category=category)
         if details:
             diagnostics['decision_receipt'] = details
+        provider_response = getattr(exc, 'provider_response', None)
+        if provider_response:
+            diagnostics['provider_response'] = provider_response
         store.finish(reservation, 'failed_or_uncertain', diagnostics=diagnostics)
         raise
     store.finish(reservation, 'completed')

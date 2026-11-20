@@ -648,7 +648,9 @@ function researchSupervisionPanel(state, readonly) {
     ${state.assignment?`<p>관리자 수행 목표 · ${h(state.assignment.manager_direction)}</p><p>성공 기준 · ${h(state.assignment.manager_success_criteria)}</p>`:''}
     ${state.remaining?`<p>잔여 승인 횟수 · 직원 ${h(state.remaining.staff)}회 · 관리자 ${h(state.remaining.manager)}회 · Tavily ${h(state.remaining.tavily)}회 · 공식 GET ${h(state.remaining.official_gets || 0)}회</p>`:''}
     ${state.expires_at?`<p>유효 기한 ${h(time(state.expires_at))}</p>`:''}
-    ${state.failure?`<p>${h(failures[state.failure] || state.failure)}${state.failure_rule?' · '+h(state.failure_rule):''}</p>`:''}
+    ${state.failure?`<p>${h(failures[state.failure] || state.failure)}${state.failure_rule?' · '+h(state.failure_rule):''}
+      ${state.provider_response?` · HTTP ${h(state.provider_response.http_status)} ${h(state.provider_response.status || '')}
+         ${state.provider_response.response_schema_rejected?' · 응답 스키마 거절':''}`:''}</p>`:''}
     <p>도구 수행 · 근거 ${h(state.evidence_count || 0)}건</p>
     ${(state.choices || []).map(item=>`<p>${h(item.tool)} · ${h(item.option)} · ${h(tools[item.state])}</p>
       ${(item.requests || []).map(request=>`<p>${h(request.kind==='robots'?'robots 확인':'공식 페이지 조회')} · HTTP ${h(request.http_status)} · ${sourceLink(request.url)}</p>`).join('')}`).join('')}

@@ -16,6 +16,7 @@ from decision_recovery import DecisionViolation, failure_kind
 from autonomous_company import CompanyError, require, exact, digest, now, parse, fcntl
 from autonomous_live import LiveStore
 from autonomous_gemini35 import Gemini35Adapter, MODEL, ENDPOINT
+from gemini_connection_once import http_error_metadata
 from goal_dialogue import DialogueStore, FIELDS, safe_text
 
 LIVE_TRANSPORT_ENABLED = False
@@ -226,11 +227,14 @@ class LiveDialogueStore(DialogueStore):
             except Exception as exc:
                 if isinstance(exc, HTTPError) and type(exc.code) is int:
                     attempt['http_status'] = exc.code
+                    attempt['provider_response'] = http_error_metadata(exc)
                 attempt.update(status='uncertain', finished_at=now(),
                                reason=exc.code if isinstance(exc, CompanyError) else 'transport_or_response_failed')
                 self._event(p, 'gemini_request_unresolved', attempt_id=attempt['id'])
                 error = CompanyError(attempt['reason'])
                 error.failure_category = failure_kind(attempt)
+                if 'provider_response' in attempt:
+                    error.provider_response = attempt['provider_response']
                 if isinstance(exc, DecisionViolation) and attempt.get('decision_rejection'):
                     error.decision_receipt = dict(attempt_id=attempt['id'],
                         total_tokens=attempt['usage'].get('total_tokens'), **attempt['decision_rejection'])

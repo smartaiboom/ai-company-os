@@ -49,6 +49,45 @@ def error_category(exc, stage):
     return 'local_unexpected_error'
 
 
+def http_error_metadata(error):
+    """Keep only fixed provider error codes and a flag for a rejected response schema."""
+    metadata = {'http_status':error.code}
+    try:
+        raw = error.read(16385)
+        if len(raw) > 16384:
+            return metadata
+        envelope = json.loads(raw)
+        data = envelope['error']
+        if not isinstance(data, dict):
+            return metadata
+        status = data.get('status')
+        if status in ('INVALID_ARGUMENT','FAILED_PRECONDITION','PERMISSION_DENIED','RESOURCE_EXHAUSTED',
+                      'UNAUTHENTICATED','NOT_FOUND','INTERNAL','UNAVAILABLE'):
+            metadata['status'] = status
+        details = data.get('details')
+        if isinstance(details, list):
+            for item in details:
+                if not isinstance(item, dict):
+                    continue
+                if item.get('reason') in ('API_KEY_INVALID','API_KEY_SERVICE_BLOCKED','BILLING_DISABLED',
+                                         'QUOTA_EXCEEDED','RATE_LIMIT_EXCEEDED'):
+                    metadata['reason'] = item['reason']
+                violations = item.get('fieldViolations')
+                if isinstance(violations, list) and any(isinstance(v, dict)
+                    and isinstance(v.get('field'), str)
+                    and re.search(r'response_?(?:json_?)?schema',v['field'],re.IGNORECASE)
+                    for v in violations):
+                    metadata['response_schema_rejected'] = True
+    except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError, HTTPException):
+        pass
+    finally:
+        try:
+            error.close()
+        except OSError:
+            pass
+    return metadata
+
+
 class WallTimeout(TimeoutError):
     pass
 

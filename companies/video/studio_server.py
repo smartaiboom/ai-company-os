@@ -1012,7 +1012,19 @@ def main():
     parser.add_argument('--port', type=int, default=8000)
     parser.add_argument('--root', type=Path, default=ROOT/'studio')
     parser.add_argument('--reference', type=Path, action='append')
+    parser.add_argument('--env-file', type=Path)
+    parser.add_argument('--research-readiness', action='store_true')
     args = parser.parse_args()
+    if args.env_file or args.research_readiness:
+        from local_research_config import load_environment, readiness
+        if args.env_file:
+            try:
+                load_environment(args.env_file)
+            except CompanyError as exc:
+                parser.error(exc.code)
+        if args.research_readiness:
+            print(json.dumps(readiness(), ensure_ascii=False))
+            return
     references = args.reference if args.reference is not None else [ROOT/'20261111_validation', ROOT/'20261111_reference']
     with make_server(args.host, args.port, Studio(args.root, references)) as server:
         print(f'Studio · http://{args.host}:{server.server_port}', flush=True)

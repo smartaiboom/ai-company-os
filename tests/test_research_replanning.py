@@ -27,7 +27,7 @@ class ReplanningTests(TestCase):
                          'scope_changed', 'expired', 'revoked', 'provider_error', 'timeout', 'research_timeout',
                          'supervise', 'supervise_early', 'supervise_empty', 'supervise_stall', 'supervise_timeout',
                          'supervise_signature', 'supervise_key', 'supervise_expired', 'supervise_revoked',
-                         'supervise_official', 'supervise_search_official'):
+                         'supervise_official', 'supervise_search_official', 'supervise_batch', 'supervise_batch_fail'):
             with self.subTest(scenario=scenario), TemporaryDirectory() as tmp, ExitStack() as stack:
                 store = Store(Path(tmp))
                 project = store.create('Research target', opt_in=True)
@@ -169,7 +169,10 @@ class ReplanningTests(TestCase):
                             self.assertEqual(send.call_count,5 if insufficient else 7)
                             if scenario.startswith('supervise'):
                                 fetch = None
-                                if scenario.endswith('official'):
+                                if scenario == 'supervise_early':
+                                    stack.enter_context(patch('research_workflow.cached_publishers', return_value=([], [])))
+                                    stack.enter_context(patch('research_workflow.cached_youtube', return_value=[]))
+                                if scenario.endswith('official') or scenario.startswith('supervise_batch'):
                                     import publisher_discovery as publisher
                                     from owner_operating_policy import OwnerOperatingPolicy
                                     saved = OwnerOperatingPolicy(store.root/'approved-publisher', {'scope':'fixture'})
@@ -181,13 +184,16 @@ class ReplanningTests(TestCase):
                                     inputs.return_value = (base,queries,object(),{})
                                     stack.enter_context(patch('research_workflow.cached_commons', return_value=[]))
                                     stack.enter_context(patch('publisher_discovery.store_for',return_value=saved))
+                                    fetched = dict(status=200,text='<title>Rights policy</title><p>Released for editorial use.</p>')
+                                    if scenario == 'supervise_batch_fail':
+                                        from decision_recovery import ProviderFailure
+                                        fetched = ProviderFailure('publisher_http_failure')
                                     fetch = stack.enter_context(patch('publisher_discovery.fetch_public',side_effect=[
-                                        dict(status=200,text='User-agent: *\nDisallow: /private/'),
-                                        dict(status=200,text='<title>Rights policy</title><p>Released for editorial use.</p>')]))
+                                        dict(status=200,text='User-agent: *\nDisallow: /private/'), fetched]))
                                 self.exercise_supervision(scenario, source, current, perform, deny, send, search,
                                                           page, metric, fetch)
                 self.assertEqual((source.attempts(), recovery.attempts()), previous)
-                self.assertEqual(search.call_count, int(scenario in ('supervise_empty','supervise_search_official')))
+                self.assertEqual(search.call_count, int(scenario in ('supervise_empty','supervise_search_official','supervise_batch','supervise_batch_fail')))
 
     def exercise_supervision(self, scenario, source, current, perform, deny, send, search, page, metric, fetch=None):
         from research_supervision import supervision_store
@@ -229,9 +235,14 @@ class ReplanningTests(TestCase):
         staff = []
         reviews = []
         search.return_value = [evidence('https://www.klei.com/creation-guidelines','Policy','A search lead.',
-                                       'search_lead')] if scenario == 'supervise_search_official' else []
+                                       'search_lead')] if scenario in ('supervise_search_official','supervise_batch','supervise_batch_fail') else []
         report = dict(tool='finish', option='', claims=[dict(statement='Dates remain uncertain',
                       assessment='unverified', citations=[])], feasibility='Check further dates.')
+
+        def supported(prompt):
+            official = next((row for row in prompt['evidence_catalog'].values() if row['origin']=='Klei Entertainment'),page)
+            return {**report,'claims':[dict(statement='A release and listing date are documented.',
+                         assessment='supported', citations=[official['id'],metric['id']])]}
 
         def respond(request, timeout):
             wire = json.loads(request.data)
@@ -240,16 +251,19 @@ class ReplanningTests(TestCase):
             deny('research-supervision-run','project_busy')
             if prompt['goal']=='Review achievement of the assigned goal':
                 reviews.append(prompt)
-                accepted = scenario in ('supervise','supervise_official') and len(reviews) == 2
-                action = 'accept' if accepted else 'hold' if scenario == 'supervise_empty' or len(reviews)==2 else 'revise'
+                accepted = (scenario in ('supervise','supervise_batch','supervise_search_official')
+                            or scenario == 'supervise_official' and len(reviews) == 2)
+                revise = scenario in ('supervise_stall','supervise_official') and len(reviews)==1
+                action = 'accept' if accepted else 'revise' if revise else 'hold'
                 permitted = wire['generationConfig']['responseJsonSchema']['properties']['decision']['properties']['action']['enum']
                 self.assertEqual('accept' in permitted,accepted)
-                if len(reviews) == 2:
+                if len(reviews) == 2 or scenario=='supervise_search_official':
                     self.assertNotIn('revise',permitted)
                 if accepted:
                     sources = (page,metric)
                     if fetch:
-                        sources = (next(row for row in prompt['evidence_catalog'].values() if row['scope']=='public_page'),metric)
+                        sources = (next(row for row in prompt['evidence_catalog'].values()
+                                        if row['origin']=='Klei Entertainment'),metric)
                         self.assertIn('Released for editorial use.',sources[0]['excerpt'])
                     self.assertEqual(prompt['staff_report']['claims'][0]['citations'],[
                         dict(source=row['id'], quote=row['excerpt']) for row in sources])
@@ -265,44 +279,56 @@ class ReplanningTests(TestCase):
                 if scenario == 'supervise_timeout':
                     raise TimeoutError()
                 if scenario == 'supervise_early':
+                    self.assertEqual(prompt['evidence_catalog'], {})
                     return Reply(report)
+                self.assertIn(metric['id'],prompt['evidence_catalog'])
+                self.assertNotIn('youtube_metrics',[tool['name'] for tool in prompt['tools']])
                 if scenario in ('supervise_empty','supervise_search_official'):
                     return Reply(dict(tool='web_search',option='game',claims=[],feasibility=''))
-                if fetch:
+                if scenario.startswith('supervise_batch'):
+                    return Reply(dict(tool='batch',option='',claims=[],feasibility='',selections=[
+                        dict(tool='web_search',option='game',reason='Collect independent leads.'),
+                        dict(tool='official-page-rights',option='approved',reason='Read the already approved policy.')]))
+                if scenario == 'supervise_official':
                     return Reply(dict(tool='official-page-rights',option='approved',claims=[],feasibility=''))
-                return Reply(dict(tool='publisher_page',option='saved',claims=[],feasibility=''))
+                return Reply(supported(prompt) if scenario == 'supervise' else report)
             if scenario == 'supervise_empty':
                 return Reply({**report,'tool':'hold','unavailable':[
                     dict(tool=tool['name'],reason='Cannot establish the requested date.')
                     for tool in prompt['tools']]})
             if scenario == 'supervise_stall':
+                self.assertTrue(prompt['report_only'])
                 return Reply(report)
-            if len(staff) == 2:
-                if scenario == 'supervise_search_official':
-                    self.assertTrue(any(row['scope']=='search_lead' for row in prompt['evidence_catalog'].values()))
+            if scenario == 'supervise_batch':
+                self.assertTrue(any(row['scope']=='search_lead' for row in prompt['evidence_catalog'].values()))
+                return Reply(supported(prompt))
+            if scenario == 'supervise_search_official':
+                if len(staff)==2:
                     return Reply(dict(tool='official-page-rights',option='approved',claims=[],feasibility=''))
-                return Reply(dict(tool='youtube_metrics',option='saved',claims=[],feasibility=''))
+                self.assertTrue(prompt['report_only'])
+                self.assertEqual(prompt['tools'],[])
+                return Reply(supported(prompt))
+            if not prompt['report_only']:
+                return Reply(report)
+            self.assertEqual(prompt['tools'],[])
             self.assertEqual(prompt['manager_revision']['action'],'revise')
-            if fetch:
-                official = next(row['id'] for row in prompt['evidence_catalog'].values() if row['scope']=='public_page')
-                if scenario == 'supervise_search_official':
-                    return Reply({**report,'claims':[dict(statement='An independent source remains missing.',
-                                 assessment='unverified',citations=[official])]})
-            else:
-                official = page['id']
-            return Reply({**report,'claims':[dict(statement='A release and listing date are separately documented.',
-                         assessment='supported', citations=[official,metric['id']])]})
+            return Reply(supported(prompt))
 
         send.side_effect = respond
-        if scenario in ('supervise_early','supervise_timeout'):
-            deny('research-supervision-run','research_step_invalid' if scenario=='supervise_early'
-                 else 'transport_or_response_failed')
-            self.assertEqual(current()['supervision']['status'],'stopped')
+        failures = dict(supervise_early='research_step_invalid',supervise_timeout='transport_or_response_failed',
+                        supervise_batch_fail='publisher_http_failure')
+        if scenario in failures:
+            deny('research-supervision-run',failures[scenario])
+            stopped = current()['supervision']
+            self.assertEqual(stopped['status'],'stopped')
             self.assertEqual(send.call_count,6)
+            if scenario=='supervise_batch_fail':
+                self.assertEqual([item['state'] for item in stopped['choices']],['observed','failed'])
+                self.assertIn('general-web',supervision_store(source).attempts())
         else:
             perform('research-supervision-run')
             current_state = current()['supervision']
-            achieved = scenario in ('supervise','supervise_official')
+            achieved = scenario in ('supervise','supervise_official','supervise_batch','supervise_search_official')
             if fetch:
                 self.assertEqual(fetch.call_count,2)
                 self.assertEqual(current_state['remaining']['official_gets'],0)
@@ -314,7 +340,11 @@ class ReplanningTests(TestCase):
                 self.assertEqual(current_state['remaining']['tavily'],0)
             if scenario == 'supervise_stall':
                 self.assertFalse(reviews[-1]['progress_since_revision'])
-            self.assertEqual(len(reviews),1 if scenario=='supervise_empty' else 2)
+            self.assertEqual(len(reviews),2 if scenario in ('supervise_official','supervise_stall') else 1)
+            if scenario=='supervise_batch':
+                self.assertEqual(send.call_count,8)
+            if scenario=='supervise_search_official':
+                self.assertEqual(send.call_count,9)
         deny('research-supervision-run','owner_policy_exhausted')
         self.assertEqual((held.attempts(), held.read('manager-review.json')),previous)
 
@@ -364,3 +394,31 @@ class ReplanningTests(TestCase):
         self.assertTrue(matches(value, contract))
         self.assertFalse(matches({**value, 'action':'revise'}, contract))
         validate_review(value, inventory)
+
+    def test_preserved_sources_and_batch_dependency_contract(self):
+        from web_research import Tool, preserved_observations, step_context, validate_supervised_step
+
+        fresh = evidence('https://archive.example/fresh','Inventory','Earlier measurement',
+                         'api_metric','archive','2026-11-19T09:00:00+09:00')
+        stale = evidence('https://archive.example/stale','Old','Old count','api_metric',
+                         'archive','2026-10-01T09:00:00+09:00')
+        lead = evidence('https://archive.example/lead','Lead','Needs confirmation','search_lead',
+                        observed_at='2026-11-19T09:00:00+09:00')
+        local = Tool('inventory','Reusable archive',{'saved':'records'},
+                     lambda *_:self.fail('Preserved evidence executes no tool'),preserved=(fresh,stale,lead))
+        archived, notes = preserved_observations({'inventory':local},at='2026-11-20T09:00:00+09:00')
+        self.assertEqual(archived[0]['sources'],[fresh])
+        self.assertEqual(archived[0]['status'],'preserved')
+        self.assertEqual({key:notes[0][key] for key in ('preserved','stale','excluded')},
+                         dict(preserved=1,stale=1,excluded=1))
+        a = Tool('official-a','Page A',{'approved':'a'},None,requests=({'id':'robots'},))
+        b = Tool('official-b','Page B',{'approved':'b'},None,requests=({'id':'robots'},))
+        _, runtime = step_context({a.name:a,b.name:b}, archived, False)
+        batch = dict(tool='batch',option='',claims=[],feasibility='',selections=[
+            dict(tool=a.name,option='approved',reason='Explicit path A.'),
+            dict(tool=b.name,option='approved',reason='Explicit path B.')])
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid') as error:
+            validate_supervised_step(batch,*runtime)
+        self.assertEqual(error.exception.rule,'batch_dependency')
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid'):
+            validate_supervised_step({**batch,'selections':batch['selections']+[batch['selections'][0]]},*runtime)

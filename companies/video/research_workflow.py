@@ -4,7 +4,7 @@ import hmac
 import os
 import re
 
-from autonomous_company import CompanyError, digest, exact, now, require
+from autonomous_company import CompanyError, digest, exact, now, parse, require
 from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config
 from decision_recovery import correction_call, correction_feedback, failure_kind
 from mission_production import ProductionManager, approved_manager_result, canonical_bytes, draft_id, production_keys
@@ -111,15 +111,34 @@ def cached_youtube(workflow,project):
     job=project['representative'].get('mission_one_job')
     if not job:
         return []
-    mission=MissionOneStore(workflow.store.root/'mission_one_provider').load(job)
+    store = MissionOneStore(workflow.store.root/'mission_one_provider')
+    mission = store.load(job)
+    web = mission.get('employee_web')
     try:
-        rows=usable_observations(mission.get('employee_web'))
-    except CompanyError:
+        rows = usable_observations(web)
+        # Authenticate the original collection without treating that grant as current transmission permission.
+        path = store._grant_path(job)
+        require(path.is_file() and not path.is_symlink() and path.stat().st_size < store.max_consent_bytes,
+                'invalid_operating_consent')
+        signed = parse(path.read_text())
+        grant = signed['record']
+        approved = grant['body']['mission_web']
+        require(hmac.compare_digest(signed['signature'],store._sign(grant))
+                and grant['id'] == mission['real_ai']['consent']['operating_grant_id']
+                and grant['revoked_at'] is None and approved['policy_confirmed'] is True
+                and approved['free_usage_verified'] is True and approved['policy'] == web['policy']
+                and web['provenance'] in ('employee_requested_api','provider_model_claim'),
+                'invalid_operating_consent')
+    except (CompanyError, OSError, KeyError, TypeError):
         return []
+    completed = {(item['url'], item['finished_at']) for item in web.get('attempts', [])
+                 if item.get('status') == 'completed' and item.get('http_status') == 200}
     result=[]
     for row in rows[:6]:
         video_id=row['id'].split(':',1)[-1]
-        if re.fullmatch(r'[A-Za-z0-9_-]{11}',video_id):
+        if (re.fullmatch(r'[A-Za-z0-9_-]{11}',video_id)
+                and (row.get('api_request_url'), row['observed_at']) in completed
+                and re.fullmatch(r'[a-f0-9]{64}', row.get('raw_evidence_sha256',''))):
             excerpt=(f"YouTube Data API observed views={row['view_count']}, duration_seconds={row['duration_seconds']}. "
                      "One sample; Shorts classification, growth, audience location and rights unverified.")
             result.append(evidence('https://youtu.be/'+video_id,row['title'][:200],excerpt,'api_metric',
@@ -134,7 +153,7 @@ def cached_publishers(manager,plan):
     store=store_for(manager,plan)
     data=store.read('discovery.json')
     done=store.read('done.json')
-    if not data or not done or done['result_sha256']!=digest(data):
+    if not data or not done or not store.read('policy.json') or store.read('revoked.json') or done['result_sha256']!=digest(data):
         return [],[]
     origin=PROFILES[data['profile']]['issuer']
     at=data['access_checked_at']
@@ -151,7 +170,7 @@ def cached_commons(manager,plan):
     store=store_for_recovery(manager,plan)
     result=store.read('candidates.json')
     done=store.read('done.json')
-    if not result or not done or done['result_sha256']!=digest(result):
+    if not result or not done or not store.read('policy.json') or store.read('revoked.json') or done['result_sha256']!=digest(result):
         return []
     rows=[]
     for candidate in result['candidates'][:8]:
@@ -184,7 +203,7 @@ def available(workflow,project,inputs,search_key=None):
             ('youtube_metrics','Reuse fresh YouTube Data API observations in their original measurement scope.',
              cached_youtube(workflow,project))):
         if rows:
-            tools[name]=Tool(name,description,{'saved':'Recorded observations only: '+digest(rows)[:16]},lambda option,rows=rows:rows)
+            tools[name]=Tool(name,description,{'saved':'Recorded observations only: '+digest(rows)[:16]},lambda option,rows=rows:rows,preserved=tuple(rows))
     model=[unit(f'research-{i}',MODEL,ENDPOINT,['video_research_scope','tool_options','observed_evidence'],
                 max_output_tokens=4096) for i in range(ROUNDS+1)]
     scope={**store.proposal([search,*model]),'tool_options':[tool.describe(set()) for tool in tools.values()],

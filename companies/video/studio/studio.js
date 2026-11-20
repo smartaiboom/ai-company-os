@@ -630,13 +630,20 @@ function researchSupervisionPanel(state, readonly) {
   const tools={observed:'관측 확보',empty:'호출 결과 0건',failed:'호출 중단',unconfirmed:'수행 결과 미확정',policy_blocked:'접근 정책으로 차단',unavailable:'공식 페이지 접근 불가'};
   const decisions={revise:'보완 지시',hold:'보류',alternative:'대안 제안',ask_owner:'대표 질문',accept:'목표 달성 확인'};
   const checks={met:'충족',unmet:'미충족',unknown:'미확인'};
+  const configReasons={gemini_free_execution_disabled:'Gemini 무료 실행 설정 꺼짐',
+    independent_production_key_missing:'독립 제작 프로젝트 키 미설정',production_project_key_mismatch:'제작 프로젝트 키 불일치',
+    gemini_model_or_endpoint_mismatch:'Gemini 모델·주소 불일치',gemini_key_missing:'Gemini 키 누락',
+    tavily_key_missing_or_invalid:'Tavily 키 누락 또는 형식 불일치',tavily_free_only_disabled:'Tavily 무료 전용 설정 꺼짐'};
   const failures={provider_failure:'공급자 실패 응답',outcome_uncertain:'전송·결과 미확정',
     decision_invalid:'판단 규칙 위반',provider_response_invalid:'응답 계약 오류'};
   const actions={available:['research-supervision-approve'],
     active:['research-supervision-run','research-supervision-revoke']};
   return `<div class="subpanel"><h3>목표 기반 보완 업무</h3><p>${h(labels[state.status])}</p>
+    ${(state.readiness?.configuration_blockers || []).map(code=>`<p>${h(configReasons[code] || code)}</p>`).join('')}
     ${proposal?`<p>이전 누적 · Gemini 예약 ${h(proposal.historical_usage.gemini)}회 · Tavily 예약 ${h(proposal.historical_usage.tavily)}회</p>
       <p>추가 · 직원 ${h(limits.staff)}회 · 관리자 ${h(limits.manager)}회(최종 독립 검토 1회 포함) · Gemini 합계 ${h(limits.gemini)}회 · Tavily ${h(limits.tavily)}회 · 공식 HTML·robots GET ${h(limits.official_gets || 0)}회 · 보완 최대 ${h(limits.revisions)}회 · 다운로드 0회 · 비용 $0</p>
+      ${limits.final_staff_report_reserved?`<p>최종 직원 보고 1회와 독립 검토 1회 확보 · 도구 선택은 판단당 최대 ${h(proposal.max_batch_tools)}개</p>`:''}
+      ${(proposal.preserved_sources || []).map(source=>`<p>보존 자료 · ${h(source.tool)} · 사용 가능 ${h(source.preserved)}건 · 기간 경과 ${h(source.stale)}건 · 제외 ${h(source.excluded)}건</p>`).join('')}
       ${!proposal.direct_page_available?`<p>직접 확인한 공식 페이지 도구가 현재 목록에 없습니다. 공개 검색은 단서를 수집할 수 있습니다.</p>`:''}`:''}
     ${state.assignment?`<p>관리자 수행 목표 · ${h(state.assignment.manager_direction)}</p><p>성공 기준 · ${h(state.assignment.manager_success_criteria)}</p>`:''}
     ${state.remaining?`<p>잔여 승인 횟수 · 직원 ${h(state.remaining.staff)}회 · 관리자 ${h(state.remaining.manager)}회 · Tavily ${h(state.remaining.tavily)}회 · 공식 GET ${h(state.remaining.official_gets || 0)}회</p>`:''}
@@ -705,7 +712,7 @@ function researchPanel(p) {
       ${r.result.claims.map(c=>`<p><strong>직원 해석 · ${h(({supported:'근거 일치',conflicting:'근거 상충',unverified:'미확인'})[c.assessment])}</strong> ${h(c.statement)}</p>
         ${c.citations.map(ref=>`<blockquote><strong>관측 발췌</strong> · ${h(ref.source)} · “${h(ref.quote)}”</blockquote>`).join('')}`).join('')}
       `:''}
-    ${r.observations?.length?`<details><summary>실제 관측과 출처</summary>${r.observations.map(o=>`<p>${h(o.tool)} · ${h(o.at)} · ${o.status==='empty'?'결과 없음':''}</p>
+    ${r.observations?.length?`<details><summary>실제 관측과 출처</summary>${r.observations.map(o=>`<p>${h(o.tool)} · ${h(o.at)} · ${o.status==='empty'?'결과 없음':o.status==='preserved'?'보존 자료 · 이번 업무 조회 없음':''}</p>
         ${o.sources.map(ref=>`<p>${h(ref.id)} · ${h(({search_lead:'검색 단서',public_page:'직접 확인한 페이지',api_metric:'API 관측',media_metadata:'미디어 메타데이터'})[ref.scope] || ref.scope)}
           · ${h(ref.origin || '원출처 미확인')} · ${h(ref.title)} · ${h(ref.excerpt)} · ${sourceLink(ref.url)}</p>`).join('')}`).join('')}</details>`:''}
     </section>`;

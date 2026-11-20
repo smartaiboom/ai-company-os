@@ -184,3 +184,20 @@ class StudioTests(unittest.TestCase):
         for value in ('bytes=-0', 'bytes=101-', 'bytes=20-12', 'bytes=1-2,4-5', 'bytes=-'):
             with self.subTest(value=value), self.assertRaises(ValueError):
                 byte_range(value, 100)
+
+    def test_cutroom_dotenv_diagnostics_preserve_independent_key_check(self):
+        import os
+        from local_research_config import load_environment, readiness
+
+        with TemporaryDirectory() as tmp, patch.dict('os.environ', {'GEMINI_API_KEY':'process-fixture-secret'}, clear=True):
+            env = Path(tmp)/'.env'
+            env.write_text("export GEMINI_API_KEY='file-fixture-secret'\n"
+                           "TAVILY_API_KEY=fake-tavily-123456\nTAVILY_RESEARCHER_FREE_ONLY=1\n")
+            load_environment(env)
+            result = readiness()
+            self.assertEqual(os.environ['GEMINI_API_KEY'],'process-fixture-secret')
+            self.assertNotIn('GEMINI_PRODUCTION_PROJECT_API_KEY',os.environ)
+            self.assertEqual(result['configuration_blockers'],
+                             ['gemini_free_execution_disabled','independent_production_key_missing'])
+            self.assertEqual(result['provider_account_condition'],'unverified_locally')
+            self.assertNotIn('fixture-secret',json.dumps(result))

@@ -1,5 +1,6 @@
 """Bounded evidence gathering over the existing signed operating policy."""
 from dataclasses import dataclass
+from datetime import datetime, timedelta
 import http.client
 import json
 import re
@@ -116,10 +117,43 @@ class Tool:
     operation: dict | None = None
     requests: tuple = ()
     observe: object = None
+    preserved: tuple = ()
 
     def describe(self,used):
         return dict(name=self.name,description=self.description,
                     options={key:value for key,value in self.options.items() if (self.name,key) not in used})
+
+
+def preserved_observations(tools, *, at=None):
+    """Only adapters can provide preserved rows; no tool executor is called."""
+    current = datetime.fromisoformat(at or now())
+    observations, notes = [], []
+    for tool in tools.values():
+        if not tool.preserved:
+            continue
+        require(not tool.operation and not tool.requests and not tool.observe, 'research_source_invalid')
+        rows = list(evidence_catalog([{'sources':tool.preserved}]).values())
+        selected = []
+        stale = excluded = 0
+        for row in rows:
+            try:
+                timestamp = datetime.fromisoformat(row['observed_at'])
+                fresh = timedelta(0) <= current - timestamp < timedelta(days=30)
+            except (ValueError, TypeError):
+                fresh = False
+            if row['scope'] not in ('public_page','api_metric','media_metadata'):
+                excluded += 1
+            elif not fresh:
+                stale += 1
+            elif sum(len(item['sources']) for item in observations) + len(selected) >= 12:
+                excluded += 1
+            else:
+                selected.append(row)
+        notes.append(dict(tool=tool.name, preserved=len(selected), stale=stale, excluded=excluded,
+                          interpretation='Historical context. Check measurement scope, conflicts and current rights.'))
+        if selected:
+            observations.append(dict(tool=tool.name, option='saved', at=None, status='preserved', sources=selected))
+    return observations, notes
 
 
 STEP_RULES = {
@@ -155,6 +189,11 @@ def step_schema(context, *, supervised=False):
             feasibility=S, unavailable={**arr(obj(tool=enum(*(tool['name'] for tool in context['tools']))
                 if selections else S, reason=S)), 'minItems':len(selections), 'maxItems':len(selections)})
         choices = [*selections, hold]
+        if len(selections) > 1:
+            items = [obj(tool=enum(tool['name']), option=enum(*tool['options']), reason=S)
+                     for tool in context['tools']]
+            choices.append(obj(tool=enum('batch'), option=enum(''), claims={**claims,'maxItems':0},
+                               feasibility=enum(''), selections={**arr({'anyOf':items}),'minItems':2,'maxItems':2}))
         if catalog or not selections:
             choices.append(finish)
         return {'anyOf': choices}
@@ -205,6 +244,22 @@ def validate_step(step, tools, used, observations, final=False):
 
 
 def validate_supervised_step(step, tools, used, observations, final):
+    if isinstance(step, dict) and step.get('tool') == 'batch':
+        check_step(set(step) == {'tool','option','claims','feasibility','selections'} and step['option'] == ''
+                   and step['claims'] == [] and step['feasibility'] == '', 'invalid_tool_batch')
+        selections = step['selections']
+        check_step(not final and isinstance(selections, list) and len(selections) == 2, 'invalid_tool_batch')
+        names = set()
+        for item in selections:
+            check_step(isinstance(item, dict) and set(item) == {'tool','option','reason'}, 'invalid_tool_batch')
+            report_text(item['reason'], 300)
+            validate_step(dict(tool=item['tool'], option=item['option'], claims=[], feasibility=''),
+                          tools, used, observations, final)
+            check_step(item['tool'] not in names, 'invalid_tool_batch')
+            names.add(item['tool'])
+        # Two pages share a host policy check. Keep that dependency in separate decisions.
+        check_step(sum(bool(tools[name].requests) for name in names) <= 1, 'batch_dependency')
+        return
     if isinstance(step, dict) and step.get('tool') == 'hold':
         check_step('unavailable' in step, 'missing_hold_reason')
         reasons = step['unavailable']

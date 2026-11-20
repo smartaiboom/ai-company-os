@@ -3,7 +3,7 @@ from autonomous_company import require, validate_checks
 from goal_dialogue import safe_text
 from role_json_schema import CHECK, S, arr, enum, obj
 
-LIMITS = dict(staff=3, manager=2, initial_staff=2, revisions=1, final_review_reserved=1)
+LIMITS = dict(staff=3, manager=2, initial_staff=2, revisions=1, final_staff_report_reserved=1, final_review_reserved=1)
 CONTRACT = 'goal_supervision_v1'
 
 
@@ -29,11 +29,15 @@ def validate_review(value, criteria):
 
 def run(staff, review):
     """Reserve one employee decision and the final independent review for a single revision."""
-    for index in range(LIMITS['initial_staff']):
+    final_staff = LIMITS['initial_staff']
+    for index in range(final_staff):
         if staff(index, None):
             break
+    else:
+        staff(final_staff, None)
+        return review(1, None)
     first = review(0, None)
     if first['action'] != 'revise':
         return first
-    staff(LIMITS['initial_staff'], first)
+    staff(final_staff, first)
     return review(1, first)

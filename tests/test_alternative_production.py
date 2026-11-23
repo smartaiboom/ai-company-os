@@ -21,6 +21,17 @@ class StrategyTests(TestCase):
         self.assertEqual(assignment['role'],'accounting')
         self.assertEqual(assignment['next_reviewer'],'owner')
 
+    def test_provider_payload_excludes_local_artifact_and_ledger_references(self):
+        worker=StrategyManager(Path('/tmp/unused-strategy'),dict(input=dict(goal='Explain a game',
+            audience='beginners',plan_sha256='do-not-send',timeline_sha256='do-not-send',quality=['do-not-send'],
+            scenes=[dict(scene_id='scene-1',narration='Approved line',frames=48,speech_sha256='do-not-send')]),
+            schema=SCHEMA,system='Fixture'))
+        payload=worker._payload(None)
+        self.assertNotIn('do-not-send',json.dumps(payload))
+        self.assertEqual(worker._context(None)['scenes'],
+                         [dict(scene_id='scene-1',narration='Approved line',frames=48)])
+        self.assertNotIn('tools',payload)
+
     def test_unverified_assets_cannot_create_executable_work(self):
         worker=StrategyManager(Path('/tmp/unused-strategy'),dict(input=dict(scenes=[dict(scene_id='scene-1')],
                                                                              local_ready=True),schema=SCHEMA))

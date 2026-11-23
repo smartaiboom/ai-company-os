@@ -305,13 +305,20 @@ function alternativePanel(p) {
       <ul>${a.decision.work.map(row=>`<li>${h(row.scene_id)} · ${h(row.title)} · ${h(row.labels.join(' / '))} · ${h(row.camera)}</li>`).join('')}</ul>`:''}
     ${a.assignment?`<p>영상 제작 담당 인계 · ${h(a.assignment.scenes.length)}개 장면 · 다음 검토 대표</p>`:''}
     ${a.status==='hold'?'<p>추가 권리, 기획 검토 또는 대표 답변이 필요합니다.</p>':''}
-    ${a.status==='stopped'?'<p>실패 또는 미확정 실행 기록을 확인하세요.</p>':''}
+    ${a.status==='stopped'?'<p>실패 또는 미확정 실행 기록을 확인하세요. 기존 요청은 다시 실행할 수 없습니다.</p>':''}
+    ${a.run?`<p>Gemini 시도 ${h(a.run.attempts)}회 · 완료 ${h(a.run.completed)}회 ·
+      응답 ${a.run.response_received?'수신 확인':'미확정'} · 토큰 ${h(a.run.total_tokens??'미확인')}
+      ${a.reason?` · ${h(a.reason)}`:''}</p>`:''}
     ${a.status==='unavailable'?`<p>제작 준비 요건 확인 · ${h(a.reason)}</p>`:''}
     ${action?`<button class="button secondary" data-action="alternative-${action}">${alternativeLabels[a.status]}</button>`:''}
     ${a.receipt?`<p>로컬 렌더 및 디코딩 완료 · ${h(a.receipt.seconds)}초 · ${a.evaluation?'대표 시청 의견 기록됨':'영상 시청 품질 대표 평가 대기'}</p>
       <video controls preload="metadata" src="${h(a.url)}"></video>
       ${a.evaluation?`<p>대표 시청 의견 · ${h(a.evaluation.feedback)}</p>`:
         '<button class="button secondary" data-action="alternative-evaluate">시청 의견 저장</button>'}`:''}
+    ${a.fixture?`<details><summary>검증용 시범 영상 · 모의 관리자 및 모의 대표 승인</summary>
+      <p>실제 FFmpeg로 제작한 파일입니다. 운영 전략 결과와 별도로 보관합니다.</p>
+      <video controls preload="metadata" src="${h(a.fixture.url)}"></video>
+    </details>`:''}
     </section>`;
 }
 function alternativeCommand(action) {

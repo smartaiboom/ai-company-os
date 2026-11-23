@@ -1,5 +1,6 @@
 """A separately reviewed local pilot backed by the existing production renderer."""
 import re
+from pathlib import Path
 from shutil import which
 
 from autonomous_company import CompanyError, digest, exact, now, parse, require
@@ -10,6 +11,8 @@ from owner_operating_policy import OwnerOperatingPolicy
 from production_video import portrait_font, render, units, validate_portrait
 from role_json_schema import S, arr, enum, obj
 from task_replanning import strategy_schema, strategy_assignment
+
+FIXTURE_ROOT=Path(__file__).resolve().parents[2]/'artifacts'/'alternative-production-fixtures'
 
 ROLES={'local_graphics':'visual_production'}
 ROUTES=(*ROLES,'research','rights_cleared_assets','capture','restructure','hold','ask_owner')
@@ -26,6 +29,18 @@ SYSTEM=('Act as the production manager. Preserve the approved objective, narrati
 class StrategyManager(ProductionManager):
     marker_name='.alternative-production-manager-v1'
     acceptance_scope='alternative_production_manager_once_v1'
+
+    def _context(self,p):
+        inputs=self.contract['input']
+        data={key:inputs[key] for key in ('goal','audience','feedback','limits','source_limits',
+                                         'local_ready','research_context') if key in inputs}
+        fields=('scene_id','narration','caption','frames','caption_frames','visual_need','third_party_media')
+        data['scenes']=[{key:row[key] for key in fields if key in row} for row in inputs['scenes']]
+        return data
+
+    def _policy(self,p):
+        return {**super()._policy(p),'provider_quota':'unknown','provider_billing':'unknown',
+                'external_tools':[],'max_cost_usd':0}
 
     def validate_plan(self,value):
         assignment=strategy_assignment(value,SCHEMA,self.contract['input'],ROLES)
@@ -68,6 +83,13 @@ def setup(workflow,project):
         quality=plan['review_criteria'],limits=dict(cost_usd=0,downloads=0,publishing=False),
         source_limits='Visual use requires asset-level rights. The pilot includes no third-party media or AI image generator.',
         local_ready=bool(which('ffmpeg') and which('ffprobe') and portrait_font()))
+    from research_workflow import status as research_status
+    research=research_status(workflow,project) or {}
+    supervision=research.get('supervision') or {}
+    outcome=supervision.get('outcome') or {}
+    if (outcome.get('decision') or {}).get('action')=='hold' and outcome.get('goal_achieved') is False:
+        inputs['research_context']=dict(decision='hold',
+            reason='Official source text and asset-level editing rights were not established. Search leads are not evidence of rights.')
     root=parent.root/'alternative_production'
     require(not root.is_symlink(),'invalid_acceptance_path')
     return StrategyManager(root,dict(input=inputs,schema=SCHEMA,system=SYSTEM)),spec,speech
@@ -81,7 +103,7 @@ def records(manager):
 def view(manager):
     jid=draft_id(manager)
     if not jid:
-        return dict(status='unprepared',input=manager.contract['input'])
+        return dict(status='unprepared',input=manager._context(None))
     draft=manager.load(jid)
     attempts=draft['real_ai']['attempts']
     if not attempts:
@@ -91,9 +113,13 @@ def view(manager):
         require(review.is_file() and not review.is_symlink(),'strategy_approval_required')
         saved=parse(review.read_text())
         return dict(status='prepared',review_hash=saved['review_hash'],expires_at=saved['body']['expires_at'],
-                    input=manager.contract['input'])
-    if attempts[0]['status']!='completed':
-        return dict(status='stopped')
+                    input=manager._context(None))
+    attempt=attempts[0]
+    run=dict(attempts=1,completed=int(attempt['status']=='completed'),
+             response_received=attempt.get('response_received',attempt['status']=='completed'),
+             total_tokens=(attempt.get('usage') or {}).get('total_tokens'))
+    if attempt['status']!='completed':
+        return dict(status='stopped',reason=attempt.get('reason'),run=run)
     decision=approved_manager_result(manager)
     store=records(manager)
     approval=store.read('approval.json')
@@ -101,8 +127,45 @@ def view(manager):
     assignment=strategy_assignment(decision,SCHEMA,manager.contract['input'],ROLES)
     return dict(status='rendered' if receipt else 'stopped' if store.read('started.json') else
                 'assigned' if approval else 'review' if assignment else 'hold',
-                decision=decision,proposal_sha256=digest(decision),assignment=approval['assignment'] if approval else None,
+                run=run,decision=decision,proposal_sha256=digest(decision),assignment=approval['assignment'] if approval else None,
                 receipt=receipt,evaluation=store.read('evaluation.json'))
+
+
+def fixture(project_id):
+    """Resolve a local, explicitly mock preview without involving the operational pilot."""
+    if not re.fullmatch(r'company-[a-f0-9]{32}',project_id):
+        return None
+    folder=FIXTURE_ROOT/project_id
+    manifest=folder/'sample.json'
+    if any(path.is_symlink() for path in (manifest,folder,FIXTURE_ROOT,FIXTURE_ROOT.parent)):
+        return None
+    if not manifest.is_file() or manifest.stat().st_size>1024:
+        return None
+    try:
+        data=parse(manifest.read_text())
+        exact(data,('id','sha256','provenance'))
+    except (CompanyError,OSError,ValueError):
+        return None
+    if not all(isinstance(value,str) for value in data.values()):
+        return None
+    if (data['provenance']!='mock_manager_and_mock_approval'
+            or not re.fullmatch(r'mock-[a-f0-9]{32}',data['id'])
+            or not re.fullmatch(r'[a-f0-9]{64}',data['sha256'])):
+        return None
+    video=folder/data['id']/'video.mp4'
+    if video.is_symlink() or video.parent.is_symlink() or not video.is_file():
+        return None
+    return data,video
+
+
+def fixture_media(project_id,fixture_id):
+    from local_melo_tts import file_hash
+    found=fixture(project_id)
+    if not found or found[0]['id']!=fixture_id:
+        raise FileNotFoundError
+    data,path=found
+    require(file_hash(path)==data['sha256'],'representative_artifact_changed')
+    return path
 
 
 def status(workflow,project):
@@ -113,6 +176,9 @@ def status(workflow,project):
         result=view(manager)
         if result.get('receipt'):
             result['url']=f"/media/workspace/{project['id']}/alternative/{result['receipt']['id']}"
+        sample=fixture(project['id'])
+        if sample:
+            result['fixture']=dict(**sample[0],url=f"/media/workspace/{project['id']}/alternative-fixture/{sample[0]['id']}")
         return result
     except (CompanyError,FileNotFoundError) as exc:
         return dict(status='unavailable',reason=getattr(exc,'code','strategy_inputs_missing'))

@@ -946,6 +946,10 @@ def make_server(host, port, studio):
                     return self.send_json(200, studio.dashboard())
                 if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})', path):
                     return self.send_json(200, studio.detail(*match.groups()))
+                if match := re.fullmatch(rf'/media/workspace/({PROJECT})/alternative-fixture/(mock-[a-f0-9]{{32}})', path):
+                    from alternative_production import fixture_media
+                    studio.project('workspace',match[1])
+                    return self.file(fixture_media(*match.groups()),'video/mp4')
                 if match := re.fullmatch(rf'/media/workspace/({PROJECT})/alternative/([a-f0-9]{{32}})', path):
                     from alternative_production import media
                     project=studio.project('workspace',match[1])

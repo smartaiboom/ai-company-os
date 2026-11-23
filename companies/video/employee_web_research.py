@@ -45,7 +45,7 @@ def _timestamp(value):
     return date
 
 
-def collect(store, project, task_id, request, key, authorize, *, provenance=None):
+def collect(store, project, task_id, request, key, authorize, *, provenance=None, dispatch=None):
     """One employee tool batch. Every GET is consumed before transport; never replay it."""
     validate_queries(request)
     require(isinstance(key,str) and len(key)>=16 and key.isascii()
@@ -73,15 +73,18 @@ def collect(store, project, task_id, request, key, authorize, *, provenance=None
         store.save(project)
         try:
             req = Request(url, headers={'x-goog-api-key':key, 'Accept':'application/json'}, method='GET')
-            with send_once(req, 30) as response:
-                entry['http_status'] = response.status
-                require(response.status == 200, 'employee_web_http_error')
-                raw = response.read(POLICY['max_response_bytes']+1)
-            require(len(raw) <= POLICY['max_response_bytes'], 'employee_web_response_limit')
-            require(key.encode() not in raw, 'secret_in_web_response')
-            data = json.loads(raw)
-            require(isinstance(data, dict) and isinstance(data.get('items'), list)
-                    and len(data['items']) <= 10 and 'error' not in data, 'employee_web_invalid_response')
+            def receive():
+                with send_once(req, 30) as response:
+                    entry['http_status'] = response.status
+                    require(response.status == 200, 'employee_web_http_error')
+                    raw=response.read(POLICY['max_response_bytes']+1)
+                require(len(raw) <= POLICY['max_response_bytes'], 'employee_web_response_limit')
+                require(key.encode() not in raw, 'secret_in_web_response')
+                data=json.loads(raw)
+                require(isinstance(data, dict) and isinstance(data.get('items'), list)
+                        and len(data['items']) <= 10 and 'error' not in data, 'employee_web_invalid_response')
+                return data
+            data=dispatch(resource,entry['request_hash'],receive) if dispatch else receive()
         except Exception as exc:
             entry.update(status='failed', finished_at=now())
             if hasattr(exc, 'code') and type(exc.code) is int:

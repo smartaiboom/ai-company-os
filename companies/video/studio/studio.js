@@ -441,6 +441,7 @@ function productionPanel(p) {
   </section>`;
 }
 function operations(p) {
+  if (p.research?.general) return '';
   if (p.readonly) return '<p class="warning">기존 검증 사례 · 읽기 전용</p>';
   if (p.stage === 'completed') return '<p class="warning">최종 대표 승인이 기록되었습니다. 게시 작업은 별도입니다.</p>';
   const attempt = p.flow.render_attempts.at(-1);
@@ -780,31 +781,58 @@ function researchSupervisionCommand(action, project) {
 function researchPanel(p) {
   const r=p.research;
   if (!r) return '';
-  const actions={available:['research-approve','조사 범위 검토·승인'],active:['research-run','웹·전문 자료 조사 실행']};
+  const actions={available:['research-approve','조사 범위 검토·승인'],active:['research-run',r.general?(r.version>1?'보고서 재작성 시작':'실제 조사 시작'):'웹·전문 자료 조사 실행']};
   const action=actions[r.status];
   const labels={setup_required:'무료 Tavily Researcher 계정과 서버 설정이 필요합니다.',
     available:'업무에 필요한 검색 또는 보존된 전문 자료를 직원이 선택합니다.',active:'승인한 범위 내에서 조사와 관리자 검토를 진행합니다.',
+    approved_report:'대표 승인 완료 · 조사·기획만 완료',rejected_report:'대표 반려 완료',
     review:'관리자가 조사 결과와 미확인 항목을 검토했습니다.',revoked:'조사 승인이 철회됐습니다.',
     expired:'조사 승인 유효 시간이 지났습니다.',contract_changed:'조사 계약이 바뀌었습니다. 기존 승인으로 실행할 수 없습니다.',stopped:'실패 또는 미확정 요청에서 조사를 중단했습니다.'};
-  return `<section class="panel" id="cross-research"><h2>웹·전문 자료 교차 조사</h2><p>${h(labels[r.status])}</p>
+  return `<section class="panel" id="cross-research"><h2>${r.general?'조사·기획 보고서':'웹·전문 자료 교차 조사'}</h2><p>${h(labels[r.status])}</p>
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
+    ${r.general?(r.reports||[]).map(({report,decision})=>`<details open><summary>보고서 v${h(report.version)} · ${decision?'대표 결정 기록':'대표 검토 대기'}</summary>
+      ${report.revision?`<p>이전 v${h(report.revision.version)} 수정 요청 · ${h(report.revision.feedback)}</p>`:''}
+      <p>${report.provenance==='offline_fixture'?'오프라인 모의 결과':'공급자 모델 결과'} ·
+        공개 영상 길이 표본 ${h(report.duration_sample.join(', ')||'미확인')}${report.duration_sample.length?'초 · Shorts 여부 미확인':''}</p>
+      <p>관리자 ${report.manager.action==='hold'?'근거 부족으로 보류':'제한적 활용'} · ${h(report.manager.note)}</p>
+      <p>직원 조사 · ${h(report.staff.feasibility)}</p>
+      ${report.staff.claims.map(c=>`<p>${h(c.assessment==='unverified'?'미확인':'직원 해석')} · ${h(c.statement)}</p>`).join('')}
+      <ol>${report.manager.topics.map(topic=>`<li><strong>${h(topic.title)}</strong> · 제안 길이 ${h(topic.length)}
+        <p>${h(topic.rationale)}</p><p>화면 확보 검토 · ${h(topic.visuals)} · 권리 미확인</p>
+        <p>출처 ID ${h(topic.source_ids.join(', ')||'없음 · 가설')}</p></li>`).join('')}</ol>
+      ${report.staff.observations.flatMap(o=>o.sources).map(ref=>`<p>${h(ref.id)} · ${h(ref.title)} · ${h(ref.excerpt)}
+        · 관측 ${h(ref.observed_at)} · 게시 ${h(ref.source_date||'미확인')} · ${sourceLink(ref.url)}</p>`).join('')}
+      ${decision?`<p>대표 결정 · ${h(({approve:'승인',revise:'수정 요청',reject:'반려'})[decision.action])} · ${h(decision.feedback)}</p>`:
+        `<button class="button" data-action="research-report-review">보고서 승인·수정·반려</button>`}
+      </details>`).join(''):''}
     ${researchRecoveryPanel(r.recovery,p.readonly)}
     ${researchReplanPanel(r.replan,p.readonly)}
     ${researchSupervisionPanel(r.supervision,p.readonly)}
-    ${r.review?`<p><strong>관리자 ${r.review.decision.action==='hold'?'보류':'제한적 활용 의견'}</strong> ${h(r.review.decision.note)}</p>`:''}
-    ${r.result?`<p><strong>제작 가능성</strong> ${h(r.result.feasibility)}</p>
+    ${!r.general&&r.review?`<p><strong>관리자 ${r.review.decision.action==='hold'?'보류':'제한적 활용 의견'}</strong> ${h(r.review.decision.note)}</p>`:''}
+    ${!r.general&&r.result?`<p><strong>제작 가능성</strong> ${h(r.result.feasibility)}</p>
       ${r.result.claims.map(c=>`<p><strong>직원 해석 · ${h(({supported:'근거 일치',conflicting:'근거 상충',unverified:'미확인'})[c.assessment])}</strong> ${h(c.statement)}</p>
         ${c.citations.map(ref=>`<blockquote><strong>관측 발췌</strong> · ${h(ref.source)} · “${h(ref.quote)}”</blockquote>`).join('')}`).join('')}
       `:''}
-    ${r.observations?.length?`<details><summary>실제 관측과 출처</summary>${r.observations.map(o=>`<p>${h(o.tool)} · ${h(o.at)} · ${o.status==='empty'?'결과 없음':o.status==='preserved'?'보존 자료 · 이번 업무 조회 없음':''}</p>
+    ${!r.general&&r.observations?.length?`<details><summary>실제 관측과 출처</summary>${r.observations.map(o=>`<p>${h(o.tool)} · ${h(o.at)} · ${o.status==='empty'?'결과 없음':o.status==='preserved'?'보존 자료 · 이번 업무 조회 없음':''}</p>
         ${o.sources.map(ref=>`<p>${h(ref.id)} · ${h(({search_lead:'검색 단서',public_page:'직접 확인한 페이지',api_metric:'API 관측',media_metadata:'미디어 메타데이터'})[ref.scope] || ref.scope)}
           · ${h(ref.origin || '원출처 미확인')} · ${h(ref.title)} · ${h(ref.excerpt)} · ${sourceLink(ref.url)}</p>`).join('')}`).join('')}</details>`:''}
     </section>`;
 }
 function researchCommand(action) {
   const p=detail, r=p.research;
+  if (action==='research-report-review') {
+    const report=r.reports.at(-1).report;
+    return modal('조사·기획 보고서 검토',
+      '<label>대표 결정<select name="action"><option value="approve">승인</option><option value="revise">수정 요청</option><option value="reject">반려</option></select></label>'+
+      '<label>검토 의견 또는 수정 지시<textarea name="feedback" maxlength="1200"></textarea></label>',
+      '대표 결정 저장',async data=>{
+        await api(detailApi(p)+'/'+action,{action:data.get('action'),feedback:data.get('feedback'),
+          version:report.version,sha256:report.sha256});
+        return {message:'대표 결정을 저장했습니다.'};
+      });
+  }
   if (Object.hasOwn(supervisionTitles,action)) return researchSupervisionCommand(action,p);
   if (Object.hasOwn(replanTitles,action)) return researchReplanCommand(action,p);
   const titles={'research-approve':'조사 범위 검토·승인','research-run':'웹·전문 자료 조사 실행','research-revoke':'조사 범위 철회',
@@ -816,6 +844,8 @@ function researchCommand(action) {
   const proposal=offer.proposal;
   const feedback=proposal?.feedback;
   const fields=approve?`<p>Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
+    ${r.general?`<p>YouTube 공개 검색·메타데이터 GET 최대 ${h(proposal.max_youtube_requests||0)}회 · 영상 생성 없음</p>
+      <p>Gemini에는 원래 목표, 프로젝트 조건, 자료 발췌 및 수정 요청의 이전 보고서가 전달됩니다.</p>`:''}
     ${recovery?`<p>기존 Gemini 예약 ${h(proposal.source_usage.gemini.reserved)}회 · Tavily 예약 ${h(proposal.source_usage.tavily.reserved)}회</p>
       <p>추가 범위 중 수정 판단 최대 ${h(proposal.max_corrections)}회 · 독립 관리자 검토 ${h(proposal.manager_review_calls)}회 · 승인 후 ${h(proposal.valid_hours)}시간 · 현재 공급자 키에 서명 결합</p>
       <p>단계 ${h(feedback.step)} · 규칙 ${h(feedback.rule)} · 계약 ${h(proposal.decision_contract)}</p>
@@ -826,7 +856,7 @@ function researchCommand(action) {
       },null,2))}</pre></details>`:''}
     <ul>${proposal.tool_options.map(t=>`<li>${h(t.name)} · ${h(Object.values(t.options).join(' / '))}</li>`).join('')}</ul>
     <p>Tavily에 선택한 공개 검색어만, Google에 업무 범위·출처 발췌·조사 결과${recovery?'·규칙 코드와 이전 시도 참조':''}를 보냅니다.</p>
-    <label class="check"><input type="checkbox" name="confirmed" required>Tavily Researcher 및 결제·종량제 비활성, Google 무료 프로젝트와 잔여 한도 및 두 제공처의 데이터 처리를 확인했습니다.</label>`:
+    <label class="check"><input type="checkbox" name="confirmed" required>Tavily Researcher 및 결제·종량제 비활성, Google 무료 프로젝트와 잔여 한도 및 두 제공처의 데이터 처리를 확인했습니다.${r.general&&proposal.max_youtube_requests?' YouTube 무료 한도와 공개 메타데이터 이용 조건도 확인했습니다.':''}</label>`:
     action==='research-recovery-run'?'<p id="research-recovery-progress" role="status">승인한 범위에서 실행합니다.</p>':
       '<p>현재 서명 범위에 적용됩니다.</p>';
   modal(titles[action],fields,titles[action],async data=>{
@@ -1057,6 +1087,16 @@ function nextWork(p,controlSource,selected) {
   const select=(...actions)=>actions.map(name=>controlSource.querySelector(`[data-action="${name}"]`)?.outerHTML||'').join('');
   const refresh=actionButton('refresh','상태 새로고침');
   if (p.readonly) return {message:'기존 검증 사례 · 읽기 전용'};
+  if (p.research?.general) {
+    const item=p.research;
+    const buttons=select('research-report-review','research-approve','research-run');
+    const message={setup_required:'Gemini·Tavily 무료 설정과 YouTube 키를 확인하세요.',
+      available:item.version>1?'수정 지시를 보존했습니다. 재작성 전송 범위를 승인하세요.':'조사 범위를 확인하고 승인하세요.',
+      active:'승인된 조사·기획 작업을 실행할 수 있습니다.',review:'대표가 최신 조사·기획 보고서를 검토할 차례입니다.',
+      approved_report:'조사·기획 보고서 승인 완료',rejected_report:'조사·기획 보고서 반려',
+      stopped:'조사 요청이 실패하거나 미확정 상태입니다. 이전 기록을 보존합니다.'};
+    return {message:message[item.status]||'조사 상태 및 승인 유효 기간을 확인하세요.',target:'cross-research',buttons:buttons||refresh};
+  }
   if (stage==='completed') return {message:'최종 대표 승인이 기록되었습니다. 게시 승인은 별도입니다.'};
   const kind=stage==='awaiting_plan_approval'?'plan':stage==='awaiting_video_approval'?'video':null;
   if (kind && f[`${kind}_versions`].length) {

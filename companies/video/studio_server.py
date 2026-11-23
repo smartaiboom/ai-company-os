@@ -20,7 +20,7 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
-RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke',
+RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke', 'research-report-review',
                     'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke',
                     'research-replan-approve', 'research-replan-run', 'research-replan-revoke',
                     'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke',
@@ -59,6 +59,8 @@ RESEARCH_ERRORS = {
     'transport_or_response_failed': 'Gemini 호출 또는 응답 확인 중 중단됐습니다.',
 }
 ERRORS = {
+    'general_report_only':'이 프로젝트는 조사·기획 보고서 검토만 지원합니다.',
+    'general_report_changed':'최신 조사 보고서와 검토 상태를 확인하세요.',
     'strategy_approval_required':'이 시범 제작 제안의 대표 승인과 실행 상태를 확인하세요.',
     'strategy_requires_separate_review':'추가 권리 또는 기획 검토가 필요한 제안입니다.',
     'strategy_local_unavailable':'로컬 렌더 도구와 한글 글꼴을 확인하세요.',
@@ -777,6 +779,9 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
+        if name not in RESEARCH_ACTIONS:
+            from general_research_report import eligible
+            require(not eligible(self.workflow,self.project(key,pid)),'general_report_only')
         if name=='rework-quality-decide':
             self.rework_quality_decide(pid,body)
         elif name=='rework-finalize-recover':

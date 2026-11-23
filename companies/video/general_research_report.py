@@ -1,0 +1,141 @@
+"""Representative review of research-only reports, independent of script approvals."""
+import re
+
+from autonomous_company import digest, exact, now, require
+from goal_dialogue import safe_text
+from owner_operating_policy import OwnerOperatingPolicy
+from role_json_schema import S, arr, enum, obj
+from web_research import evidence_catalog
+
+MODE='general_research_report_v1'
+
+
+def eligible(workflow,project):
+    from video_mission_one import GAME_GOAL, MissionOneStore
+    flow=project['representative']
+    job_id=flow.get('mission_one_job')
+    if (not job_id or flow['stage']!='research_planning' or flow['plan_versions'] or flow['planning_jobs']
+            or flow.get('budget_job') or project['goal']==GAME_GOAL):
+        return False
+    store=MissionOneStore(workflow.store.root/'mission_one_provider')
+    job=store.load(job_id)
+    return (job['status']=='ready' and not job['real_ai']['attempts'] and not job['real_ai']['consent']
+            and not store._grant_path(job_id).exists())
+
+
+def base_for(workflow,project):
+    flow=project['representative']
+    return dict(mode=MODE,mission=flow['mission_one_job'],target=project['goal'],audience=flow['audience'],
+                constraints=flow['constraints'],output='research and planning report only; no script, voice or video',
+                required='Use observed dates, views, durations, source links and sample limits. Report duration distribution, '
+                         'format and hooks only within observed evidence. Recommend three topics with rationale, proposed length '
+                         'and visual feasibility. Distinguish rights unknown and proposals from observations.')
+
+
+def versions(workflow,project):
+    from research_workflow import research_store
+    base=base_for(workflow,project)
+    history=[]
+    while True:
+        version=len(history)+1
+        base={**base,'version':version}
+        store=research_store(workflow.store.root,project,base)
+        result=store.read('research-result.json')
+        review=store.read('manager-review.json')
+        if not result or not review:
+            return base,store,history
+        require(review['result_sha256']==digest(result),'general_report_changed')
+        report=dict(version=version,staff=result,manager=review['decision'],at=review['at'],
+                    provenance=review.get('provenance','provider_model_claim'),revision=base.get('previous'),
+                    duration_sample=duration_sample(result['observations']))
+        report['sha256']=digest(report)
+        decision=store.read('owner-review.json')
+        require(not decision or decision['report_sha256']==report['sha256'],'general_report_changed')
+        history.append(dict(report=report,decision=decision))
+        if not decision or decision['action']!='revise':
+            return base,store,history
+        base={**base_for(workflow,project),'previous':dict(version=version,report_sha256=report['sha256'],
+            feedback=decision['feedback'],manager=report['manager'],staff_claims=result['claims'])}
+
+
+def review(workflow,project,body):
+    exact(body,('action','version','sha256','feedback'))
+    require(eligible(workflow,project),'research_scope_invalid')
+    _,store,history=versions(workflow,project)
+    require(history and history[-1]['decision'] is None,'general_report_changed')
+    current=history[-1]['report']
+    require(current['version']==body['version'] and current['sha256']==body['sha256']
+            and body['action'] in ('approve','revise','reject'),'general_report_changed')
+    if body['feedback'] or body['action']=='revise':
+        safe_text(body['feedback'],1200)
+        require(body['feedback'].strip(),'invalid_text')
+    else:
+        require(body['feedback']=='','invalid_text')
+    store.write('owner-review.json',dict(action=body['action'],feedback=body['feedback'],
+                                        report_sha256=current['sha256'],at=now()))
+
+
+def duration_sample(observations):
+    seconds=[]
+    for row in evidence_catalog(observations).values():
+        if row['scope']=='api_metric' and row['origin']=='youtube_data_api':
+            match=re.fullmatch(r'YouTube Data API views=\d+; duration_seconds=(\d+)\. .*',row['excerpt'])
+            if match:
+                seconds.append(int(match[1]))
+    return sorted(seconds)
+
+
+def manager_schema(result):
+    catalog=evidence_catalog(result['observations'])
+    refs={**arr(enum(*catalog) if catalog else S),'maxItems':min(3,len(catalog))}
+    return obj(action=enum('hold','use_with_limits') if any(row['scope']=='api_metric' for row in catalog.values())
+               else enum('hold'),note=S,topics={**arr(obj(title=S,rationale=S,length=S,visuals=S,source_ids=refs,
+                    rights=enum('unverified'))),'minItems':3,'maxItems':3})
+
+
+def validate_manager(value,result):
+    catalog=evidence_catalog(result['observations'])
+    require(len({topic['title'].strip().casefold() for topic in value['topics']})==3,'general_report_changed')
+    for topic in value['topics']:
+        require(len(set(topic['source_ids']))==len(topic['source_ids'])
+                and all(ref in catalog for ref in topic['source_ids']),'research_evidence_invalid')
+        for key in ('title','rationale','length','visuals'):
+            safe_text(topic[key],320)
+
+
+def youtube_tool(query,key):
+    from employee_web_research import ENDPOINT, TOOL, collect, usable_observations
+    from production_operating import unit
+    from web_research import Tool, evidence
+    operations={name:unit('youtube-'+name,'youtube_data_api_v3',ENDPOINT+name,
+                          ['approved_public_query' if name=='search' else 'public_video_ids'],
+                          **({'query':query} if name=='search' else {})) for name in ('search','videos')}
+
+    def observe(option,invoke):
+        # The existing collector builds exactly one search and one optional metadata request.
+        class WorkingState:
+            def save(self,_project):
+                pass
+
+        def dispatch(resource,sha,receive):
+            response=[]
+            def execute(check):
+                check()
+                response.append(receive())
+            invoke(operations[resource],sha,execute)
+            return response[0]
+
+        receipt=collect(WorkingState(),{},'general-research',dict(tool=TOOL,queries=[
+            dict(query=query,purpose='shorts_examples',lookback_days=30,order='viewCount')]),
+            key,lambda:None,provenance='employee_requested_api',dispatch=dispatch)
+        rows=[]
+        if any(row['status']=='metadata_verified' for row in receipt['observations']):
+            for row in usable_observations(receipt):
+                rows.append(evidence('https://youtu.be/'+row['id'].split(':',1)[1],row['title'][:200],
+                    f"YouTube Data API views={row['view_count']}; duration_seconds={row['duration_seconds']}. "
+                    "A top search sample, Shorts format and rights unverified.",
+                    'api_metric','youtube_data_api',row['observed_at'],row['published_at']))
+        return dict(status='observed' if rows else 'empty',sources=rows)
+
+    return Tool('youtube_sample','Sample up to five recent game videos. View counts and durations are observed; Shorts format is unconfirmed.',
+                {'sample':query},None,requests=tuple(operations.values()),observe=observe)

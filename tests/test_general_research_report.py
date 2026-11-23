@@ -100,3 +100,16 @@ class GeneralResearchTests(TestCase):
                 self.assertEqual(studio.project('workspace',pid),before)
                 self.assertEqual(yt.call_count,2)
                 self.assertEqual(ai.call_count,5)
+
+    def test_branch_distinguishes_missing_evidence_from_rewording(self):
+        from general_research_report import evidence_branch, manager_schema
+        from web_research import evidence
+        lead=evidence('https://example.com/guide','제작 안내','Short video guide','search_lead')
+        feedback='최근 인기 게임과 실제 영상 조회수, 영상 길이, 관측 날짜 및 사용 조건을 확인해 주세요.'
+        plan=evidence_branch(feedback,[dict(sources=[lead])],now())
+        self.assertEqual(plan['route'],'collect')
+        self.assertEqual(set(plan['missing']),{'recent_examples','rights_conditions','video_metrics'})
+        self.assertEqual(evidence_branch('기존 문장 요약과 가독성을 개선해 주세요.',[],now())['route'],'rewrite')
+        self.assertTrue(evidence_branch('조금 더 보완해 주세요.',[],now())['uncertain'])
+        result=dict(observations=[dict(status='preserved',sources=[lead])])
+        self.assertEqual(manager_schema(result,collection=True)['properties']['action']['enum'],['hold'])

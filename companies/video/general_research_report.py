@@ -1,5 +1,6 @@
 """Representative review of research-only reports, independent of script approvals."""
 import re
+from datetime import datetime, timedelta
 
 from autonomous_company import digest, exact, now, require
 from goal_dialogue import safe_text
@@ -32,6 +33,33 @@ def base_for(workflow,project):
                          'and visual feasibility. Distinguish rights unknown and proposals from observations.')
 
 
+def evidence_branch(feedback, observations, at):
+    """Compare requested evidence against the prior report's verified evidence types."""
+    rows=list(evidence_catalog(observations).values())
+    when=datetime.fromisoformat(at)
+    metrics=[row for row in rows if row['scope']=='api_metric' and row['origin']=='youtube_data_api'
+             and timedelta(0)<=when-datetime.fromisoformat(row['observed_at'])<timedelta(days=30)]
+    pages=[row for row in rows if row['scope']=='public_page']
+    rules={
+        'video_metrics':r'조회수|영상.{0,4}길이|관측\s*(시점|날짜)|view count|duration',
+        'recent_examples':r'최근|인기|순위|새.{0,4}(사례|게임|영상)|게임명|실제.{0,5}(영상|쇼츠)|recent|trending',
+        'rights_conditions':r'라이선스|사용\s*조건|편집\s*권|사용\s*권|license|licen[cs]ing',
+    }
+    requested=[kind for kind,pattern in rules.items() if re.search(pattern,feedback,re.I)]
+    missing=[]
+    if 'video_metrics' in requested and not metrics:
+        missing.append('video_metrics')
+    if 'recent_examples' in requested:
+        missing.append('recent_examples')  # A top sample alone does not establish popularity or cover newly requested examples.
+    if 'rights_conditions' in requested:
+        missing.append('rights_conditions')  # A page excerpt alone never establishes asset-level permission.
+    polishing=bool(re.search(r'요약|표현|문장|가독|형식|정리|명확|summary|wording|clarif',feedback,re.I))
+    uncertainty=not requested and not polishing
+    return dict(method='rule_based',route='collect' if missing or uncertainty else 'rewrite',
+                requested=requested,missing=missing,uncertain=uncertainty,
+                available=dict(metrics=len(metrics),direct_pages=len(pages),search_leads=sum(r['scope']=='search_lead' for r in rows)))
+
+
 def versions(workflow,project):
     from research_workflow import research_store
     base=base_for(workflow,project)
@@ -40,6 +68,13 @@ def versions(workflow,project):
         version=len(history)+1
         base={**base,'version':version}
         store=research_store(workflow.store.root,project,base)
+        if base.get('previous') and not store.read('policy.json'):
+            prior=history[-1]
+            branch=evidence_branch(prior['decision']['feedback'],prior['report']['staff']['observations'],
+                                   prior['decision']['at'])
+            if branch['route']=='collect':
+                base={**base,'revision_plan':branch}
+                store=research_store(workflow.store.root,project,base)
         result=store.read('research-result.json')
         review=store.read('manager-review.json')
         if not result or not review:
@@ -85,18 +120,36 @@ def duration_sample(observations):
     return sorted(seconds)
 
 
-def manager_schema(result):
+def observed_metrics(result,*,fresh_only=False):
+    return {row['id'] for group in result['observations'] if not fresh_only or group['status']=='observed'
+            for row in group['sources'] if row['scope']=='api_metric' and row['origin']=='youtube_data_api'}
+
+
+def manager_schema(result,*,collection=False):
     catalog=evidence_catalog(result['observations'])
     refs={**arr(enum(*catalog) if catalog else S),'maxItems':min(3,len(catalog))}
-    return obj(action=enum('hold','use_with_limits') if any(row['scope']=='api_metric' for row in catalog.values())
-               else enum('hold'),note=S,topics={**arr(obj(title=S,rationale=S,length=S,visuals=S,source_ids=refs,
-                    rights=enum('unverified'))),'minItems':3,'maxItems':3})
+    candidate=dict(title=S,rationale=S,length=S,visuals=S,source_ids=refs,rights=enum('unverified'))
+    if collection:
+        candidate['game']=S
+    usable=len(observed_metrics(result,fresh_only=collection))>=(3 if collection else 1)
+    return obj(action=enum('hold','use_with_limits') if usable
+               else enum('hold'),note=S,topics={**arr(obj(**candidate)),'minItems':3,'maxItems':3})
 
 
-def validate_manager(value,result):
+def validate_manager(value,result,*,collection=False):
     catalog=evidence_catalog(result['observations'])
     require(len({topic['title'].strip().casefold() for topic in value['topics']})==3,'general_report_changed')
+    if collection and value['action']=='use_with_limits':
+        games={topic['game'].strip().casefold() for topic in value['topics']}
+        require(len(games)==3 and not games.intersection({'','미확인','unknown'}),'research_evidence_invalid')
+        all_metrics=set()
+        for topic in value['topics']:
+            metrics=set(topic['source_ids']) & observed_metrics(result,fresh_only=True)
+            require(metrics and not metrics.intersection(all_metrics),'research_evidence_invalid')
+            all_metrics.update(metrics)
     for topic in value['topics']:
+        if collection:
+            safe_text(topic['game'],100)
         require(len(set(topic['source_ids']))==len(topic['source_ids'])
                 and all(ref in catalog for ref in topic['source_ids']),'research_evidence_invalid')
         for key in ('title','rationale','length','visuals'):

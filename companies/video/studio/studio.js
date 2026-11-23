@@ -781,7 +781,7 @@ function researchSupervisionCommand(action, project) {
 function researchPanel(p) {
   const r=p.research;
   if (!r) return '';
-  const actions={available:['research-approve','조사 범위 검토·승인'],active:['research-run',r.general?(r.version>1?'보고서 재작성 시작':'실제 조사 시작'):'웹·전문 자료 조사 실행']};
+  const actions={available:['research-approve',r.revision_branch?.route==='collect'?'추가 조사 범위 검토·승인':'조사 범위 검토·승인'],active:['research-run',r.general?(r.revision_branch?.route==='collect'?'승인된 추가 조사 시작':r.version>1?'보고서 재작성 시작':'실제 조사 시작'):'웹·전문 자료 조사 실행']};
   const action=actions[r.status];
   const labels={setup_required:'무료 Tavily Researcher 계정과 서버 설정이 필요합니다.',
     available:'업무에 필요한 검색 또는 보존된 전문 자료를 직원이 선택합니다.',active:'승인한 범위 내에서 조사와 관리자 검토를 진행합니다.',
@@ -792,18 +792,27 @@ function researchPanel(p) {
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
+    ${r.revision_branch?`<p><strong>수정 요청 분기 · 규칙 기반</strong> ·
+      ${r.revision_branch.route==='collect'?(r.revision_branch.uncertain?'새 자료 필요 여부 미확정 · 추가 조사 범위 선택 가능':'새 근거 수집 필요'):'기존 자료로 재작성'}
+      · 기존 API 표본 ${h(r.revision_branch.available.metrics)}건 · 직접 확인 페이지 ${h(r.revision_branch.available.direct_pages)}건
+      · 검색 단서 ${h(r.revision_branch.available.search_leads)}건</p>`:''}
     ${r.general?(r.reports||[]).map(({report,decision})=>`<details open><summary>보고서 v${h(report.version)} · ${decision?'대표 결정 기록':'대표 검토 대기'}</summary>
       ${report.revision?`<p>이전 v${h(report.revision.version)} 수정 요청 · ${h(report.revision.feedback)}</p>`:''}
       <p>${report.provenance==='offline_fixture'?'오프라인 모의 결과':'공급자 모델 결과'} ·
         공개 영상 길이 표본 ${h(report.duration_sample.join(', ')||'미확인')}${report.duration_sample.length?'초 · Shorts 여부 미확인':''}</p>
-      <p>관리자 ${report.manager.action==='hold'?'근거 부족으로 보류':'제한적 활용'} · ${h(report.manager.note)}</p>
+      <p><strong>검토 요약</strong> · 관리자 ${report.manager.action==='hold'?'근거 부족으로 보류':'제한적 활용'} · ${h(report.manager.note)}</p>
       <p>직원 조사 · ${h(report.staff.feasibility)}</p>
       ${report.staff.claims.map(c=>`<p>${h(c.assessment==='unverified'?'미확인':'직원 해석')} · ${h(c.statement)}</p>`).join('')}
-      <ol>${report.manager.topics.map(topic=>`<li><strong>${h(topic.title)}</strong> · 제안 길이 ${h(topic.length)}
-        <p>${h(topic.rationale)}</p><p>화면 확보 검토 · ${h(topic.visuals)} · 권리 미확인</p>
-        <p>출처 ID ${h(topic.source_ids.join(', ')||'없음 · 가설')}</p></li>`).join('')}</ol>
-      ${report.staff.observations.flatMap(o=>o.sources).map(ref=>`<p>${h(ref.id)} · ${h(ref.title)} · ${h(ref.excerpt)}
-        · 관측 ${h(ref.observed_at)} · 게시 ${h(ref.source_date||'미확인')} · ${sourceLink(ref.url)}</p>`).join('')}
+      <table><thead><tr><th>후보</th><th>추천 근거</th><th>제안 길이</th><th>화면·권리</th><th>출처 ID</th></tr></thead>
+      <tbody>${report.manager.topics.map(topic=>`<tr><td>${topic.game?`<strong>${h(topic.game)}</strong> · `:''}${h(topic.title)}</td>
+        <td>${h(topic.rationale)}</td><td>${h(topic.length)}</td><td>${h(topic.visuals)} · 권리 미확인</td>
+        <td>${h(topic.source_ids.join(', ')||'없음 · 가설')}</td></tr>`).join('')}</tbody></table>
+      <details><summary>출처·관측 기록</summary>
+        ${report.staff.observations.flatMap(o=>o.sources).map(ref=>`<p>${h(ref.id)} · ${h(ref.title)} · ${h(ref.excerpt)}
+        · 관측 ${h(ref.observed_at)} · 게시 ${h(ref.source_date||'미확인')} · ${sourceLink(ref.url)}</p>`).join('')||'<p>저장된 관측 없음</p>'}
+      </details>
+      <p>영상 표본의 Shorts 분류·도입부 실제 화면·편집 권리는 공개 메타데이터로 확인할 수 없습니다.</p>
+      ${report.manager.action==='hold'?'<p>미확인 사항 · 근거 부족으로 후보를 검증하지 못했습니다. 제안 길이와 화면 가능성은 가설입니다.</p>':''}
       ${decision?`<p>대표 결정 · ${h(({approve:'승인',revise:'수정 요청',reject:'반려'})[decision.action])} · ${h(decision.feedback)}</p>`:
         `<button class="button" data-action="research-report-review">보고서 승인·수정·반려</button>`}
       </details>`).join(''):''}
@@ -844,6 +853,11 @@ function researchCommand(action) {
   const proposal=offer.proposal;
   const feedback=proposal?.feedback;
   const fields=approve?`<p>Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
+    ${proposal.revision_plan?`<p>신규 직원 작업 · 보존 자료와 수정 지시를 대조하고 공개 영상의 조회수·길이·시점·출처를 확인합니다.
+      Tavily 자료는 단서로 취급하며 관리자 검토에서 게임별 신규 표본의 적합성과 미확인 항목을 표시합니다.</p>
+      <p>계정 청구·실시간 잔량 미확인 · 무료 전용 $0 · 다운로드, 실제 화면 열람 및 편집 권리 인증 없음.</p>
+      <p>전송 필드 · Gemini에는 기존 보고와 수정 요청, 승인된 목표·제약 및 발췌, Tavily에는 공개 질의,
+      YouTube에는 공개 질의와 발견된 영상 ID가 전송됩니다.</p>`:''}
     ${r.general?`<p>YouTube 공개 검색·메타데이터 GET 최대 ${h(proposal.max_youtube_requests||0)}회 · 영상 생성 없음</p>
       <p>Gemini에는 원래 목표, 프로젝트 조건, 자료 발췌 및 수정 요청의 이전 보고서가 전달됩니다.</p>`:''}
     ${recovery?`<p>기존 Gemini 예약 ${h(proposal.source_usage.gemini.reserved)}회 · Tavily 예약 ${h(proposal.source_usage.tavily.reserved)}회</p>
@@ -1091,7 +1105,7 @@ function nextWork(p,controlSource,selected) {
     const item=p.research;
     const buttons=select('research-report-review','research-approve','research-run');
     const message={setup_required:'Gemini·Tavily 무료 설정과 YouTube 키를 확인하세요.',
-      available:item.version>1?'수정 지시를 보존했습니다. 재작성 전송 범위를 승인하세요.':'조사 범위를 확인하고 승인하세요.',
+      available:item.revision_branch?.route==='collect'?'저장된 수정 요청으로 추가 조사 범위를 검토하세요.':item.version>1?'수정 지시를 보존했습니다. 재작성 전송 범위를 승인하세요.':'조사 범위를 확인하고 승인하세요.',
       active:'승인된 조사·기획 작업을 실행할 수 있습니다.',review:'대표가 최신 조사·기획 보고서를 검토할 차례입니다.',
       approved_report:'조사·기획 보고서 승인 완료',rejected_report:'조사·기획 보고서 반려',
       stopped:'조사 요청이 실패하거나 미확정 상태입니다. 이전 기록을 보존합니다.'};

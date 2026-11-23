@@ -792,8 +792,8 @@ function researchPanel(p) {
     ${r.diagnostics?.failure?.code==='research_new_evidence_required'?'<p>직원이 신규 수집 전에 종료를 요청해 보고서 제출을 차단했습니다.</p>':''}
     ${r.general&&r.revision_branch?.route==='collect'&&r.status==='stopped'?
       '<p>추가 조사 보류 · 신규 영상 조회수·길이·출처가 확인되지 않았습니다. 실패한 범위는 자동으로 다시 호출하지 않습니다.</p>':''}
-    ${r.general&&r.observations?.some(o=>o.tool==='youtube_sample'&&o.status==='empty')?
-      '<p>공개 검색에서 적격 영상 메타데이터를 얻지 못했습니다. 조회수·길이·게임별 근거는 미확인입니다.</p>':''}
+    ${r.general&&r.observations?.some(o=>o.tool.startsWith('youtube_sample')&&o.status==='empty')?
+      '<p>일부 공개 질의에서 적격 표본을 얻지 못했습니다. 후보별 확인 여부는 관측 기록을 확인하세요.</p>':''}
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
@@ -818,6 +818,8 @@ function researchPanel(p) {
         <td>${h(topic.rationale)}</td><td>${h(topic.length)}</td><td>${h(topic.visuals)} · 권리 미확인</td>
         <td>${h(topic.source_ids.join(', ')||'없음 · 가설')}</td></tr>`).join('')}</tbody></table>
       <details><summary>출처·관측 기록</summary>
+        ${report.staff.observations.filter(o=>o.query).map(o=>`<p>${h(o.query)} · ${h(o.sources.length)}건
+          · ${h(({no_results:'정상 빈 검색',duplicate_video_ids:'기존 영상 ID만 발견',metadata_ineligible:'적격 메타데이터 없음'})[o.reason]||'관측 완료')}</p>`).join('')}
         ${report.staff.observations.flatMap(o=>o.sources).map(ref=>`<p>${h(ref.id)} · ${h(ref.title)} · ${h(ref.excerpt)}
         · 관측 ${h(ref.observed_at)} · 게시 ${h(ref.source_date||'미확인')} · ${sourceLink(ref.url)}</p>`).join('')||'<p>저장된 관측 없음</p>'}
       </details>
@@ -871,6 +873,8 @@ function researchCommand(action) {
         project:r.work_scope.provider_project,providers:r.work_scope.allowed,gemini_inputs:r.work_scope.gemini_inputs,
         phases:r.work_scope.phases
       },null,2))}</pre></details>`:''}
+    ${proposal.youtube_quota?`<p>YouTube 업무 예산 · 검색 전용 버킷 ${h(proposal.youtube_quota.search_list)}회 ·
+      영상 메타데이터 일반 버킷 ${h(proposal.youtube_quota.videos_list)}단위. 실제 잔량은 미확인입니다.</p>`:''}
     ${proposal.revision_plan?`<p>신규 직원 작업 · 보존 자료와 수정 지시를 대조하고 공개 영상의 조회수·길이·시점·출처를 확인합니다.
       Tavily 자료는 단서로 취급하며 관리자 검토에서 게임별 신규 표본의 적합성과 미확인 항목을 표시합니다.</p>
       <p>계정 청구·실시간 잔량 미확인 · 무료 전용 $0 · 다운로드, 실제 화면 열람 및 편집 권리 인증 없음.</p>

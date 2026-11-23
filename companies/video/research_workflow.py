@@ -224,17 +224,27 @@ def available(workflow,project,inputs,search_key=None):
     extras=[]
     if base.get('mode'):
         from general_research_report import youtube_tool
-        tool=youtube_tool(queries['topic'],os.getenv('YOUTUBE_DATA_API_KEY',''))
-        tools[tool.name]=tool
-        extras=list(tool.requests)
+        key=os.getenv('YOUTUBE_DATA_API_KEY','')
+        if base.get('adaptive_sample'):
+            from general_research_report import discovery_queries
+            seen=set()
+            for index,query in enumerate(discovery_queries(base)):
+                tool=youtube_tool(query,key,variant=index,seen=seen)
+                tools[tool.name]=tool
+                extras.extend(tool.requests)
+        else:
+            tool=youtube_tool(queries['topic'],key)
+            tools[tool.name]=tool
+            extras=list(tool.requests)
+    rounds=len(extras)//2+2 if base.get('adaptive_sample') else ROUNDS
     model=[unit(f'research-{i}',MODEL,ENDPOINT,['video_research_scope','tool_options','observed_evidence'],
-                max_output_tokens=4096) for i in range(ROUNDS+1)]
+                max_output_tokens=4096) for i in range(rounds+1)]
     collection=base.get('revision_plan')
     rewrite=bool(base.get('previous') and not collection)
     metric_priority=bool(collection and set(collection['missing']).intersection(('video_metrics','recent_examples')))
     if collection:
-        names={'youtube_sample'} if metric_priority else {'web_search','youtube_sample'}
-        tools={name:tool for name,tool in tools.items() if name in names}
+        tools={name:tool for name,tool in tools.items()
+               if name.startswith('youtube_sample') or not metric_priority and name=='web_search'}
     if rewrite:
         tools={}
         extras=[]
@@ -245,8 +255,11 @@ def available(workflow,project,inputs,search_key=None):
     if base.get('revision_plan'):
         scope['revision_plan']=base['revision_plan']
         scope['collection_guard']=COLLECTION_GUARD
-        unused={'research-0','research-3'} if metric_priority else {'research-0'}
-        scope['max_model_calls']=3 if metric_priority else ROUNDS
+        unused={'research-0','research-3'} if metric_priority and not base.get('adaptive_sample') else {'research-0'}
+        scope['max_model_calls']=rounds if base.get('adaptive_sample') else 3 if metric_priority else ROUNDS
+        if base.get('adaptive_sample'):
+            scope['youtube_quota']=dict(search_list=len(extras)//2,videos_list=len(extras)//2,
+                                        search_bucket_cost_per_call=1,general_bucket_cost_per_call=1)
         scope['units']=[operation for operation in scope['units'] if operation['id'] not in unused]
     if extras:
         scope['max_youtube_requests']=len(extras)
@@ -277,10 +290,12 @@ def linked_attempt(store, name, row):
     if name == 'manager-replan':
         from research_replanning import ReplanManager
         worker = ReplanManager(store.root/'manager', {})
-    elif name == f'research-{ROUNDS}':
+    elif name.startswith('research-') and (store.root/'manager-review').is_dir() and name==max(
+            (item['id'] for item in store.read('policy.json')['proposal']['units']
+             if re.fullmatch(r'research-\d+',item['id'])),key=lambda value:int(value.split('-')[1]),default=''):
         worker = ResearchReview(store.root/'manager-review', {})
     else:
-        match = re.fullmatch(r'(?:correct-)?research-([0-3])', name)
+        match = re.fullmatch(r'(?:correct-)?research-(\d+)', name)
         if not match:
             return None
         worker = ResearchStep(store.root/('step-'+match[1]), {})
@@ -327,6 +342,9 @@ def research_diagnostics(store, ledger):
                        category=((row['result'] or {}).get('diagnostics') or {}).get('category', 'outcome_uncertain'))
         attempt = linked_attempt(store, name, row)
         if not attempt:
+            provider_response=((row['result'] or {}).get('diagnostics') or {}).get('provider_response')
+            if provider_response:
+                failure['provider_response']=provider_response
             continue
         code = attempt.get('reason')
         if code in RESEARCH_ERROR_STAGES:
@@ -344,10 +362,14 @@ def research_diagnostics(store, ledger):
     return dict(providers=providers, failure=failure)
 
 
-def step_worker(store, base, tools, index, observations, feedback=None):
-    context, runtime = step_context(tools, observations, index == ROUNDS - 1)
+def step_worker(store, base, tools, index, observations, feedback=None, *, rounds=ROUNDS):
+    context, runtime = step_context(tools, observations, index == rounds - 1)
     collection_required=bool(base.get('revision_plan') and context['tools'] and
                              not any(row['status']!='preserved' for row in observations))
+    if base.get('adaptive_sample') and context['tools']:
+        fresh={row['url'] for group in observations if group['status']=='observed'
+               for row in group['sources'] if row['scope']=='api_metric'}
+        collection_required=len(fresh)<3
     context['observations'] = [
         {**row, 'sources': [source['id'] for source in row['sources']]} for row in observations
     ]
@@ -567,6 +589,7 @@ def status(workflow,project):
 
 def execute_research(store, credential, gemini, base, tools, model, *, history=(), proposal=None, preflight=None,
                      provenance='provider_model_claim',work=None):
+    rounds=len(model)-1 if base.get('adaptive_sample') else ROUNDS
     def check_before_send(check):
         check()
         if preflight:
@@ -585,7 +608,7 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
 
     def decide(index, context):
         feedback = proposal['feedback'] if proposal and index == len(history) else None
-        worker = step_worker(store, base, tools, index, context['observations'], feedback)
+        worker = step_worker(store, base, tools, index, context['observations'], feedback, rounds=rounds)
         payload = digest(worker._payload(None))
 
         def execute(proof, check):
@@ -599,7 +622,7 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
 
     if base.get('revision_plan'):
         require(tools,'research_collection_unavailable')
-    result = run(store, tools, decide, invoke, ROUNDS, history=history)
+    result = run(store, tools, decide, invoke, rounds, history=history)
     review_schema = REVIEW_SCHEMA if has_reviewable_claim(result) else obj(action=enum('hold'), note=S)
     instructions=''
     if base.get('mode'):

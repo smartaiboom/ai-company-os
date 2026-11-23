@@ -15,7 +15,7 @@ POLICY = dict(tool=TOOL, provider='youtube_data_api_v3', max_requests=8, max_sea
 ENDPOINT = 'https://www.googleapis.com/youtube/v3/'
 
 
-def validate_queries(value):
+def validate_queries(value, *, exploratory=False):
     exact(value, ('tool', 'queries'))
     require(value['tool'] == TOOL and isinstance(value['queries'], list) and 1 <= len(value['queries']) <= 4,
             'invalid_employee_search_request')
@@ -23,7 +23,7 @@ def validate_queries(value):
         exact(query, ('query', 'purpose', 'lookback_days', 'order'))
         text(query['query'], 200)
         require(query['purpose'] in ('game_interest', 'shorts_examples')
-                and type(query['lookback_days']) is int and 1 <= query['lookback_days'] <= 30
+                and type(query['lookback_days']) is int and 1 <= query['lookback_days'] <= (90 if exploratory else 30)
                 and query['order'] in ('relevance', 'date', 'viewCount'), 'invalid_employee_search_request')
     return value
 
@@ -45,9 +45,9 @@ def _timestamp(value):
     return date
 
 
-def collect(store, project, task_id, request, key, authorize, *, provenance=None, dispatch=None):
+def collect(store, project, task_id, request, key, authorize, *, provenance=None, dispatch=None, exploratory=False, seen=None):
     """One employee tool batch. Every GET is consumed before transport; never replay it."""
-    validate_queries(request)
+    validate_queries(request,exploratory=exploratory)
     require(isinstance(key,str) and len(key)>=16 and key.isascii()
             and key not in json.dumps(request,ensure_ascii=False), 'invalid_employee_web_key')
     authorize()
@@ -105,14 +105,22 @@ def collect(store, project, task_id, request, key, authorize, *, provenance=None
             params = dict(part='snippet', type='video', q=query['query'], regionCode='KR',
                 relevanceLanguage='ko', maxResults=5, videoCategoryId='20', order=query['order'],
                 publishedAfter=window_start.isoformat(), publishedBefore=window_end.isoformat())
-            if query['purpose'] == 'shorts_examples':
+            if exploratory:
+                # Sample public videos by query. Duration and dates are verified from videos.list.
+                for field in ('videoCategoryId','relevanceLanguage','regionCode'):
+                    params.pop(field)
+            elif query['purpose'] == 'shorts_examples':
                 params['videoDuration'] = 'short'
             search, _ = get('search', params)
             ids = [item.get('id', {}).get('videoId') for item in search['items']]
             require(all(isinstance(vid, str) and re.fullmatch(r'[A-Za-z0-9_-]{11}', vid) for vid in ids)
                     and len(set(ids)) == len(ids), 'employee_web_invalid_video_ids')
+            raw_count=len(ids)
+            if seen is not None:
+                ids=[vid for vid in ids if vid not in seen]
+                seen.update(ids)
             if not ids:
-                state['observations'].append(dict(id=f'q{index}', query=query, status='unverified', reason='no_results'))
+                state['observations'].append(dict(id=f'q{index}', query=query, status='unverified', reason='duplicate_video_ids' if raw_count else 'no_results'))
                 continue
             videos, entry = get('videos', dict(part='snippet,contentDetails,statistics', id=','.join(ids)))
             returned = set()
@@ -129,7 +137,7 @@ def collect(store, project, task_id, request, key, authorize, *, provenance=None
                 views = statistics.get('viewCount')
                 view_count = int(views) if isinstance(views,str) and re.fullmatch(r'\d{1,18}', views) else None
                 reason = []
-                if snippet.get('categoryId') != '20':
+                if not exploratory and snippet.get('categoryId') != '20':
                     reason.append('not_gaming_category')
                 if not window_start <= date <= window_end:
                     reason.append('outside_requested_window')
@@ -140,8 +148,10 @@ def collect(store, project, task_id, request, key, authorize, *, provenance=None
                 state['observations'].append(dict(id=f'q{index}:{vid}', query=query,
                     url='https://www.youtube.com/watch?v='+vid, source='YouTube Data API v3',
                     api_request_url=entry['url'], observed_at=entry['finished_at'], published_at=published,
-                    title=title, duration_seconds=duration, view_count=view_count, region_filter='KR',
-                    category_id=snippet.get('categoryId'), sample_scope='employee query top 5; KR availability, not audience location; language relevance, not proof; channel size unknown',
+                    title=title, duration_seconds=duration, view_count=view_count, region_filter=None if exploratory else 'KR',
+                    category_id=snippet.get('categoryId'), sample_scope=(
+                        'top query sample; audience geography and language unverified' if exploratory else
+                        'employee query top 5; KR availability, not audience location; language relevance, not proof; channel size unknown'),
                     status='unverified' if reason else 'metadata_verified', limitations=reason,
                     shorts_classification='unverified', growth_rate=None, rights='unverified',
                     raw_evidence_sha256=digest(item),

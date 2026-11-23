@@ -60,6 +60,10 @@ def evidence_branch(feedback, observations, at):
                 available=dict(metrics=len(metrics),direct_pages=len(pages),search_leads=sum(r['scope']=='search_lead' for r in rows)))
 
 
+def reviewed_search(report):
+    return any(row['tool'].startswith('youtube_sample') for row in report['staff']['observations'])
+
+
 def versions(workflow,project):
     from research_workflow import research_store
     base=base_for(workflow,project)
@@ -75,6 +79,10 @@ def versions(workflow,project):
             if branch['route']=='collect':
                 base={**base,'revision_plan':branch}
                 store=research_store(workflow.store.root,project,base)
+                if not store.root.exists() and (reviewed_search(prior['report'])) and set(branch['missing']).intersection(
+                        ('video_metrics','recent_examples')):
+                    base={**base,'adaptive_sample':True}
+                    store=research_store(workflow.store.root,project,base)
         result=store.read('research-result.json')
         review=store.read('manager-review.json')
         if not result or not review:
@@ -82,7 +90,7 @@ def versions(workflow,project):
         require(review['result_sha256']==digest(result),'general_report_changed')
         report=dict(version=version,staff=result,manager=review['decision'],at=review['at'],
                     provenance=review.get('provenance','provider_model_claim'),revision=base.get('previous'),
-                    duration_sample=duration_sample(result['observations']))
+                    duration_sample=duration_sample(result['observations'],fresh_only=bool(base.get('adaptive_sample'))))
         report['sha256']=digest(report)
         decision=store.read('owner-review.json')
         require(not decision or decision['report_sha256']==report['sha256'],'general_report_changed')
@@ -112,7 +120,9 @@ def review(workflow,project,body):
                                         report_sha256=current['sha256'],at=now()))
 
 
-def duration_sample(observations):
+def duration_sample(observations,*,fresh_only=False):
+    if fresh_only:
+        observations=[row for row in observations if row['status']=='observed']
     seconds=[]
     for row in evidence_catalog(observations).values():
         if row['scope']=='api_metric' and row['origin']=='youtube_data_api':
@@ -158,13 +168,33 @@ def validate_manager(value,result,*,collection=False):
             safe_text(topic[key],320)
 
 
-def youtube_tool(query,key):
+def discovery_queries(base):
+    """Offer separate hypotheses for demand, gameplay and format in the project's search domain."""
+    target=base['target']
+    mobile=bool(re.search(r'모바일|mobile',target,re.I))
+    root='모바일 게임' if mobile else '게임'
+    english='mobile gaming' if mobile else 'gaming'
+    known=[topic.get('game','').strip() for topic in base['previous']['manager']['topics']]
+    games=[name for name in known if name and name.lower() not in ('미확인','unknown')
+           and len(name)<=36 and re.fullmatch(r"[\w .'-]+",name)]
+    # Three requested candidates, with discovery, gameplay and Shorts-oriented perspectives.
+    themes=(f'{root} 인기',f'{english} trending',f'{root} 인기 순위',
+            f'{root} 플레이 하이라이트',f'{english} gameplay highlights',f'{root} 공략',
+            f'{root} 쇼츠',f'{english} shorts',f'{english} gameplay shorts')
+    tailored=[f'{game} gameplay shorts' for game in dict.fromkeys(games)]
+    return list(dict.fromkeys([*tailored,*themes]))[:len(themes)]
+
+
+def youtube_tool(query,key,*,variant=None,seen=None):
     from employee_web_research import ENDPOINT, TOOL, collect, usable_observations
     from production_operating import unit
     from web_research import Tool, evidence
-    operations={name:unit('youtube-'+name,'youtube_data_api_v3',ENDPOINT+name,
+    lookback=30 if variant is None else (30,60,90)[variant%3]
+    order='viewCount' if variant is None or variant%2==0 else 'relevance'
+    operations={name:unit('youtube-'+name+(f'-{variant}' if variant is not None else ''),'youtube_data_api_v3',ENDPOINT+name,
                           ['approved_public_query' if name=='search' else 'public_video_ids'],
-                          **({'query':query} if name=='search' else {})) for name in ('search','videos')}
+                          **({'query':query, **({'lookback_days':lookback,'profile':'public_video_sample','order':order}
+                               if variant is not None else {})} if name=='search' else {})) for name in ('search','videos')}
 
     def observe(option,invoke):
         # The existing collector builds exactly one search and one optional metadata request.
@@ -176,13 +206,24 @@ def youtube_tool(query,key):
             response=[]
             def execute(check):
                 check()
-                response.append(receive())
+                if variant is None:
+                    response.append(receive())
+                    return
+                from urllib.error import HTTPError
+                from decision_recovery import ProviderFailure
+                try:
+                    response.append(receive())
+                except HTTPError as exc:
+                    exc.close()
+                    error=ProviderFailure('employee_web_failed_no_retry')
+                    error.provider_response={'http_status':exc.code}
+                    raise error from None
             invoke(operations[resource],sha,execute)
             return response[0]
 
         receipt=collect(WorkingState(),{},'general-research',dict(tool=TOOL,queries=[
-            dict(query=query,purpose='shorts_examples',lookback_days=30,order='viewCount')]),
-            key,lambda:None,provenance='employee_requested_api',dispatch=dispatch)
+            dict(query=query,purpose='shorts_examples',lookback_days=lookback,order=order)]),
+            key,lambda:None,provenance='employee_requested_api',dispatch=dispatch,exploratory=variant is not None,seen=seen)
         rows=[]
         if any(row['status']=='metadata_verified' for row in receipt['observations']):
             for row in usable_observations(receipt):
@@ -190,7 +231,16 @@ def youtube_tool(query,key):
                     f"YouTube Data API views={row['view_count']}; duration_seconds={row['duration_seconds']}. "
                     "A top search sample, Shorts format and rights unverified.",
                     'api_metric','youtube_data_api',row['observed_at'],row['published_at']))
-        return dict(status='observed' if rows else 'empty',sources=rows)
+        diagnostic={}
+        if variant is not None:
+            diagnostic=dict(query=query,requests=[{field:entry[field] for field in
+                ('request_hash','http_status','response_sha256','finished_at')} for entry in receipt['attempts']],
+                rejected=sum(':' in row['id'] and row['status']!='metadata_verified'
+                             for row in receipt['observations']))
+            if not rows:
+                diagnostic['reason']=next((row['reason'] for row in receipt['observations'] if ':' not in row['id']),
+                                          'metadata_ineligible')
+        return dict(status='observed' if rows else 'empty',sources=rows,**diagnostic)
 
-    return Tool('youtube_sample','Sample up to five recent game videos. View counts and durations are observed; Shorts format is unconfirmed.',
+    return Tool('youtube_sample' if variant is None else f'youtube_sample_{variant}','Sample up to five recent game videos. View counts and durations are observed; Shorts format is unconfirmed.',
                 {'sample':query},None,requests=tuple(operations.values()),observe=observe)

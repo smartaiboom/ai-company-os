@@ -173,3 +173,14 @@ class GeneralResearchTests(TestCase):
                 charge(work,'fixture',gemini,digest(i),lambda check:check())
             with self.assertRaisesRegex(CompanyError,'owner_policy_exhausted'):
                 check_stage(work,'fixture',stage)
+
+    def test_adaptive_query_choices_have_separate_signed_requests(self):
+        from general_research_report import discovery_queries, youtube_tool
+        queries=discovery_queries(dict(target='모바일 국내 게임 조사',previous={'manager':{'topics':[{'game':'유효 게임'}]}}))
+        self.assertEqual(len(queries),len(set(queries)))
+        self.assertGreater(len(queries),3)
+        self.assertIn('유효 게임 gameplay shorts', queries)
+        tools=[youtube_tool(q,'fixture-credential-not-used',variant=i) for i,q in enumerate(queries)]
+        ids=[item['id'] for tool in tools for item in tool.requests]
+        self.assertEqual(len(ids),len(set(ids)))
+        self.assertEqual({tool.requests[0]['lookback_days'] for tool in tools},{30,60,90})

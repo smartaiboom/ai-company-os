@@ -184,3 +184,34 @@ class GeneralResearchTests(TestCase):
         ids=[item['id'] for tool in tools for item in tool.requests]
         self.assertEqual(len(ids),len(set(ids)))
         self.assertEqual({tool.requests[0]['lookback_days'] for tool in tools},{30,60,90})
+
+    def test_mobile_games_require_attributed_dated_metadata_and_distinct_titles(self):
+        from general_research_report import manager_schema, validate_manager
+        from mobile_game_evidence import game_evidence, planned_queries
+        from web_research import evidence
+
+        stamp=now()
+        def row(index,title):
+            return evidence(f'https://youtu.be/abcdefghij{index}',title,
+                            'YouTube Data API views=100; duration_seconds=20. Sample.',
+                            'api_metric','youtube_data_api',stamp,stamp)
+        minecraft=[row(i,f'Minecraft play {i}') for i in range(5)]
+        result=dict(at=stamp,observations=[dict(status='preserved',sources=minecraft)])
+        refs=game_evidence(result['observations'],stamp)
+        self.assertEqual({entry['game'] for entry in refs.values()},{'마인크래프트'})
+        self.assertEqual(manager_schema(result,collection=True,diverse=True)['properties']['action']['enum'],['hold'])
+        self.assertFalse(any('Minecraft' in query or '마인크래프트' in query
+                             for _,query in planned_queries(result['observations'],stamp)))
+        broad=[row(5,'Brawl Stars ranked'),row(6,'Genshin Impact battle'),row(7,'Unknown mobile title'),
+               row(8,'Minecraft vs Brawl Stars'),row(5,'Minecraft conflicting title')]
+        result['observations'].append(dict(status='observed',sources=broad))
+        self.assertEqual(len({entry['game'] for entry in game_evidence(result['observations'],stamp).values()}),2)
+        result['observations'][-1]['sources'].pop()
+        candidates=[dict(game=game,title=game,rationale='metadata only',length='20초',visuals='unverified',
+                         rights='unverified',source_ids=[source['id']])
+                    for game,source in zip(('마인크래프트','브롤스타즈','원신'),[minecraft[0],*broad[:2]],strict=True)]
+        value=dict(action='use_with_limits',topics=candidates)
+        validate_manager(value,result,collection=True,diverse=True)
+        candidates[1]['source_ids']=[minecraft[1]['id']]
+        with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
+            validate_manager(value,result,collection=True,diverse=True)

@@ -813,7 +813,7 @@ function researchPanel(p) {
       ${r.revision_branch.route==='collect'?(r.revision_branch.uncertain?'새 자료 필요 여부 미확정 · 추가 조사 범위 선택 가능':'새 근거 수집 필요'):'기존 자료로 재작성'}
       · 기존 API 표본 ${h(r.revision_branch.available.metrics)}건 · 직접 확인 페이지 ${h(r.revision_branch.available.direct_pages)}건
       · 검색 단서 ${h(r.revision_branch.available.search_leads)}건</p>`:''}
-    ${r.general?(r.reports||[]).map(({report,decision})=>`<details open><summary>보고서 v${h(report.version)} · ${decision?'대표 결정 기록':'대표 검토 대기'}</summary>
+    ${r.general?(r.reports||[]).map(({report,decision})=>`<details ${report.version===r.reports.at(-1).report.version?'open':''}><summary>보고서 v${h(report.version)} · ${decision?'대표 결정 기록':'대표 검토 대기'}</summary>
       ${report.revision?`<p>이전 v${h(report.revision.version)} 수정 요청 · ${h(report.revision.feedback)}</p>`:''}
       <p>${report.provenance==='offline_fixture'?'오프라인 모의 결과':'공급자 모델 결과'} ·
         공개 영상 길이 표본 ${h(report.duration_sample.join(', ')||'미확인')}${report.duration_sample.length?'초 · Shorts 여부 미확인':''}</p>
@@ -824,6 +824,10 @@ function researchPanel(p) {
       <tbody>${report.manager.topics.map(topic=>`<tr><td>${topic.game?`<strong>${h(topic.game)}</strong> · `:''}${h(topic.title)}</td>
         <td>${h(topic.rationale)}</td><td>${h(topic.length)}</td><td>${h(topic.visuals)} · 권리 미확인</td>
         <td>${h(topic.source_ids.join(', ')||'없음 · 가설')}</td></tr>`).join('')}</tbody></table>
+      ${report.game_evidence?`<p>제목과 모바일 지원 출처가 연결된 게임
+        ${h(new Set(Object.values(report.game_evidence).map(row=>row.game)).size)}종입니다.</p>
+        ${Object.entries(report.game_evidence).map(([id,row])=>`<p>${h(row.game)} · 관측 ID ${h(id)} ·
+          모바일 지원 ${sourceLink(row.platform_source)} · 영상에 쓰인 플랫폼 미확인</p>`).join('')}`:''}
       <details><summary>출처·관측 기록</summary>
         ${report.staff.observations.filter(o=>o.query).map(o=>`<p>${h(o.query)} · ${h(o.sources.length)}건
           · ${h(({no_results:'정상 빈 검색',duplicate_video_ids:'기존 영상 ID만 발견',metadata_ineligible:'적격 메타데이터 없음'})[o.reason]||'관측 완료')}</p>`).join('')}

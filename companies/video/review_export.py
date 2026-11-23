@@ -45,9 +45,11 @@ def clean_title(value, private):
 def public_sources(report,private):
     result={}
     for group in report['staff']['observations']:
-        if group['status']!='observed':
+        if group['status']!='observed' and not (group['status']=='preserved' and report.get('game_evidence')):
             continue
         for row in group['sources']:
+            if group['status']=='preserved' and row['id'] not in report['game_evidence']:
+                continue
             if row['scope']!='api_metric' or row['origin']!='youtube_data_api':
                 continue
             metric=re.fullmatch(METRIC,row['excerpt'])
@@ -82,6 +84,12 @@ def assemble(project,history,store):
         supported_name=(isinstance(name,str) and 2<=len(name)<=30
                         and any(name.casefold() in sources[ref]['title'].casefold() for ref in refs)
                         and re.fullmatch(r'[\w -]+',name) and clean_title(name,private)==name)
+        if report.get('game_evidence') is not None:
+            from mobile_game_evidence import canonical_game
+            canonical=canonical_game(name) if isinstance(name,str) else None
+            supported_name=bool(canonical and any(report['game_evidence'].get(ref,{}).get('game')==canonical
+                                                  for ref in refs))
+            name=canonical
         if supported_name:
             games.add(name.casefold())
         sample=sources.get(refs[0]) if refs else None
@@ -114,6 +122,17 @@ def assemble(project,history,store):
     for key,row in sources.items():
         lines.append(f"| [{labels[key]}]({row['url']}) | {row['title']} | {row['views']:,} | "
                      f"{row['seconds']}초 | {row['observed']} | {row['published']} |")
+    if report.get('game_evidence') is not None:
+        from mobile_game_evidence import MOBILE_GAMES
+        verified={}
+        for ref,row in report['game_evidence'].items():
+            game=row['game']
+            if ref in labels and game in MOBILE_GAMES and row['platform_source']==MOBILE_GAMES[game][1]:
+                verified.setdefault(game,[]).append(labels[ref])
+        lines+=['','## 게임별 연결 근거','',
+                '공식 출처는 모바일 지원을 확인한다. 영상의 실제 플랫폼은 미확인이다.']
+        for game,refs in verified.items():
+            lines.append(f'- {game} · 관측 {", ".join(refs)} · [공식 모바일 지원]({MOBILE_GAMES[game][1]})')
     lines+=['','## 미확인 사항과 실행 요약','',
             '- 공개 메타데이터는 실제 시청, Shorts 분류, 편집·게시 권리, 전체 인기 순위를 확인하지 않는다.']
     counts={}

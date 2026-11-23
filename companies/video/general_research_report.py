@@ -83,6 +83,14 @@ def versions(workflow,project,*,through=None):
                         ('video_metrics','recent_examples')):
                     base={**base,'adaptive_sample':True}
                     store=research_store(workflow.store.root,project,base)
+                    if not store.root.exists() and any(row['tool'].startswith('youtube_sample_')
+                            for row in prior['report']['staff']['observations']) and re.search(r'모바일|mobile',base['target'],re.I):
+                        from mobile_game_evidence import planned_queries
+                        base={**base,'diverse_games':planned_queries(prior['report']['staff']['observations'],
+                                                                    prior['decision']['at'])}
+                        # Use JSON-shaped sequences so a reloaded signed scope compares identically.
+                        base['diverse_games']=[list(item) for item in base['diverse_games']]
+                        store=research_store(workflow.store.root,project,base)
         result=store.read('research-result.json')
         review=store.read('manager-review.json')
         if not result or not review:
@@ -91,6 +99,8 @@ def versions(workflow,project,*,through=None):
         report=dict(version=version,staff=result,manager=review['decision'],at=review['at'],
                     provenance=review.get('provenance','provider_model_claim'),revision=base.get('previous'),
                     duration_sample=duration_sample(result['observations'],fresh_only=bool(base.get('adaptive_sample'))))
+        if 'game_evidence' in review:
+            report['game_evidence']=review['game_evidence']
         report['sha256']=digest(report)
         decision=store.read('owner-review.json')
         require(not decision or decision['report_sha256']==report['sha256'],'general_report_changed')
@@ -99,6 +109,8 @@ def versions(workflow,project,*,through=None):
             return base,store,history
         base={**base_for(workflow,project),'previous':dict(version=version,report_sha256=report['sha256'],
             feedback=decision['feedback'],manager=report['manager'],staff_claims=result['claims'])}
+        if 'game_evidence' in review:
+            base['verified_mobile_report']=True
         if review.get('work_anchor'):
             base['work_anchor']=review['work_anchor']
 
@@ -137,21 +149,33 @@ def observed_metrics(result,*,fresh_only=False):
             for row in group['sources'] if row['scope']=='api_metric' and row['origin']=='youtube_data_api'}
 
 
-def manager_schema(result,*,collection=False):
+def manager_schema(result,*,collection=False,diverse=False):
     catalog=evidence_catalog(result['observations'])
     refs={**arr(enum(*catalog) if catalog else S),'maxItems':min(3,len(catalog))}
     candidate=dict(title=S,rationale=S,length=S,visuals=S,source_ids=refs,rights=enum('unverified'))
     if collection:
         candidate['game']=S
     usable=len(observed_metrics(result,fresh_only=collection))>=(3 if collection else 1)
+    if diverse:
+        from mobile_game_evidence import game_evidence
+        usable=len({row['game'] for row in game_evidence(result['observations'],result['at']).values()})>=3
     return obj(action=enum('hold','use_with_limits') if usable
                else enum('hold'),note=S,topics={**arr(obj(**candidate)),'minItems':3,'maxItems':3})
 
 
-def validate_manager(value,result,*,collection=False):
+def validate_manager(value,result,*,collection=False,diverse=False):
     catalog=evidence_catalog(result['observations'])
     require(len({topic['title'].strip().casefold() for topic in value['topics']})==3,'general_report_changed')
-    if collection and value['action']=='use_with_limits':
+    if diverse and value['action']=='use_with_limits':
+        from mobile_game_evidence import canonical_game,game_evidence
+        verified=game_evidence(result['observations'],result['at'])
+        games={canonical_game(topic['game']) for topic in value['topics']}
+        require(len(games)==3 and None not in games,'research_evidence_invalid')
+        for topic in value['topics']:
+            keys=topic['source_ids']
+            require(keys and all(ref in verified and verified[ref]['game']==canonical_game(topic['game']) for ref in keys),
+                    'research_evidence_invalid')
+    elif collection and value['action']=='use_with_limits':
         games={topic['game'].strip().casefold() for topic in value['topics']}
         require(len(games)==3 and not games.intersection({'','미확인','unknown'}),'research_evidence_invalid')
         all_metrics=set()

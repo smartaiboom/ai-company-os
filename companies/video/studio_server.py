@@ -26,6 +26,9 @@ RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke',
                     'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke',
                     'research-supervision-approve', 'research-supervision-run', 'research-supervision-revoke')
 
+ALTERNATIVE_ACTIONS = ('alternative-prepare', 'alternative-consent', 'alternative-decide',
+                       'alternative-approve', 'alternative-render', 'alternative-evaluate')
+
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
                       'production-publisher-approve','production-publisher-run','production-publisher-rights','production-publisher-revoke',
                       'production-relevance-approve','production-relevance-run','production-relevance-rights','production-relevance-revoke',
@@ -56,6 +59,9 @@ RESEARCH_ERRORS = {
     'transport_or_response_failed': 'Gemini 호출 또는 응답 확인 중 중단됐습니다.',
 }
 ERRORS = {
+    'strategy_approval_required':'이 시범 제작 제안의 대표 승인과 실행 상태를 확인하세요.',
+    'strategy_requires_separate_review':'추가 권리 또는 기획 검토가 필요한 제안입니다.',
+    'strategy_local_unavailable':'로컬 렌더 도구와 한글 글꼴을 확인하세요.',
     'research_scope_invalid': '현재 업무와 조사 범위가 일치하지 않습니다.',
     'research_search_disabled': '무료 전용 Tavily 계정과 서버 설정을 확인하세요.',
     'research_search_failed': '검색 응답을 확인하지 못했습니다. 이 범위에서 후속 호출을 중단했습니다.',
@@ -248,7 +254,9 @@ class Studio:
         autonomous_production = production_status(self.workflow,p) if production else None
         from research_workflow import status as research_status
         research=research_status(self.workflow,p) if key=='workspace' and mission else None
-        return {**self.card(key, p), 'research':research, 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
+        from alternative_production import status as alternative_status
+        alternative=alternative_status(self.workflow,p) if key=='workspace' else None
+        return {**self.card(key, p), 'alternative':alternative, 'research':research, 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
                 'autonomous_production': autonomous_production,
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
@@ -823,6 +831,9 @@ class Studio:
             exact(body,('version','sha256'))
             self.workflow.produce(pid,version=body['version'],sha256=body['sha256'],
                 changes='관리자 제작 계획·승인 대본과 로컬 인수 소스 결합',imported=True)
+        elif name in ALTERNATIVE_ACTIONS:
+            from alternative_production import action as alternative_action
+            alternative_action(self.workflow,pid,name,body)
         elif name in PRODUCTION_ACTIONS:
             from mission_production import production_action
             ready=production_action(self.workflow,pid,name,body)
@@ -935,6 +946,10 @@ def make_server(host, port, studio):
                     return self.send_json(200, studio.dashboard())
                 if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})', path):
                     return self.send_json(200, studio.detail(*match.groups()))
+                if match := re.fullmatch(rf'/media/workspace/({PROJECT})/alternative/([a-f0-9]{{32}})', path):
+                    from alternative_production import media
+                    project=studio.project('workspace',match[1])
+                    return self.file(media(studio.workflow,project,match[2]),'video/mp4')
                 if match := re.fullmatch(rf'/media/workspace/({PROJECT})/production-voice/(scene-[1-9][0-9]{{0,2}})', path):
                     from mission_production import SceneSpeechReceipts, approved_manager_result, production_manager
                     pid, scene = match.groups()
@@ -961,7 +976,7 @@ def make_server(host, port, studio):
                     project = studio.project('workspace', match[1])
                     plan = matching_plan(project, body['version'], body['sha256'])
                     return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS+RESEARCH_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS+RESEARCH_ACTIONS+ALTERNATIVE_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
                     try:
                         result=studio.action(*match.groups(), body)
                     except CompanyError as exc:

@@ -289,6 +289,56 @@ function commonsTrace(label,rows) {
   }).join('')}</details>`;
 }
 
+const alternativeLabels={unprepared:'전략 요청 준비',prepared:'무료 관리자 요청 승인',approved:'관리자 전략 실행',
+  review:'대표 시범 제작 승인',assigned:'로컬 시범 영상 제작'};
+const alternativeActions={unprepared:'prepare',prepared:'consent',approved:'decide',review:'approve',assigned:'render'};
+function alternativePanel(p) {
+  const a=p.alternative;
+  if (!a) return '';
+  const labels={local_graphics:'자체 설명 그래픽',research:'조사 재검토',rights_cleared_assets:'권리 확인 자료',
+    capture:'자체 캡처 검토',restructure:'대본·장면 재구성 검토',hold:'보류',ask_owner:'대표 질문'};
+  const action=alternativeActions[a.status];
+  return `<section class="panel"><h2>대체 제작 시범</h2>
+    <p>원본 대본, 자막, 음성, 타임라인과 영상 버전을 보존합니다. 시범 영상은 별도로 검토합니다.</p>
+    ${a.decision?`<p><strong>${h(labels[a.decision.route])}</strong> ${h(a.decision.reason)}</p>
+      <p>성공 기준 ${h(a.decision.success_criteria)} · 위험 ${h(a.decision.risk)}</p>
+      <ul>${a.decision.work.map(row=>`<li>${h(row.scene_id)} · ${h(row.title)} · ${h(row.labels.join(' / '))} · ${h(row.camera)}</li>`).join('')}</ul>`:''}
+    ${a.assignment?`<p>영상 제작 담당 인계 · ${h(a.assignment.scenes.length)}개 장면 · 다음 검토 대표</p>`:''}
+    ${a.status==='hold'?'<p>추가 권리, 기획 검토 또는 대표 답변이 필요합니다.</p>':''}
+    ${a.status==='stopped'?'<p>실패 또는 미확정 실행 기록을 확인하세요.</p>':''}
+    ${a.status==='unavailable'?`<p>제작 준비 요건 확인 · ${h(a.reason)}</p>`:''}
+    ${action?`<button class="button secondary" data-action="alternative-${action}">${alternativeLabels[a.status]}</button>`:''}
+    ${a.receipt?`<p>로컬 렌더 및 디코딩 완료 · ${h(a.receipt.seconds)}초 · ${a.evaluation?'대표 시청 의견 기록됨':'영상 시청 품질 대표 평가 대기'}</p>
+      <video controls preload="metadata" src="${h(a.url)}"></video>
+      ${a.evaluation?`<p>대표 시청 의견 · ${h(a.evaluation.feedback)}</p>`:
+        '<button class="button secondary" data-action="alternative-evaluate">시청 의견 저장</button>'}`:''}
+    </section>`;
+}
+function alternativeCommand(action) {
+  const p=detail, a=p.alternative;
+  const title=action==='alternative-evaluate'?'시청 의견 저장':alternativeLabels[a.status];
+  const fields={
+    'alternative-prepare':'<p>기존 무료 Gemini 프로젝트의 관리자 전략 요청 1회를 검토할 수 있게 준비합니다.</p>'+
+      ['free','quota','docs'].map((name,i)=>`<label class="check"><input type="checkbox" name="${name}" required>${['무료 프로젝트 및 결제 미연결','충분한 무료 한도','현재 제공자 문서 및 적용 조건'][i]} 확인</label>`).join(''),
+    'alternative-consent':`<p>아래 자료를 무료 Gemini에 한 번 전송합니다. 다운로드·게시·유료 전환은 이 범위에 없습니다.</p>
+      <details><summary>데이터 전송 범위</summary><pre>${h(JSON.stringify(a.input,null,2))}</pre></details>
+      <label class="check"><input type="checkbox" name="confirmed" required>전송 범위와 무료 서비스 데이터 처리에 동의합니다.</label>`,
+    'alternative-decide':'<p>서명한 관리자 요청 1회를 실행합니다.</p>',
+    'alternative-approve':'<label class="check"><input type="checkbox" name="confirmed" required>표시된 설명 그래픽과 기존 음성으로 별도 로컬 시범 제작을 승인합니다.</label>',
+    'alternative-evaluate':'<label>시범 영상 시청 의견<textarea name="feedback" required maxlength="1000"></textarea></label>',
+    'alternative-render':'<p>승인한 장면을 로컬에서 합성합니다. 실제 게임 화면 및 외부 요청은 포함되지 않습니다.</p>'
+  };
+  modal(title,fields[action],title,async data=>{
+    let body={};
+    if (action==='alternative-prepare') body={free:data.has('free'),quota:data.has('quota'),docs:data.has('docs')};
+    if (action==='alternative-consent') body={review_hash:a.review_hash,confirmed:data.has('confirmed')};
+    if (action==='alternative-evaluate') body={sha256:a.receipt.sha256,feedback:data.get('feedback')};
+    if (action==='alternative-approve') body={proposal_sha256:a.proposal_sha256,confirmed:data.has('confirmed')};
+    try { await api(detailApi(p)+'/'+action,body); }
+    catch(error) { await route(); throw error; }
+    return {message:'대체 제작 상태를 갱신했습니다.'};
+  });
+}
 function productionPanel(p) {
   const a=p.autonomous_production;
   if (!a) return '';
@@ -791,7 +841,7 @@ function projectPage(p, chosen={}) {
   <h1>${h(p.goal)}</h1><p class="muted">${h(s[1])} · ${h(time(p.updated_at))}</p></section>
   <section class="panel next-work" id="next-work" aria-labelledby="next-heading"></section>
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
-  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${researchPanel(p)}${productionPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
+  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${researchPanel(p)}${alternativePanel(p)}${productionPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
   <aside class="stack"><section class="panel" id="work-detail"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
   ${operations(p)}${p.stage!=='plan_revision'?reworkPanel(p):''}${p.rework&&p.mission?`<details class="subpanel"><summary>이전 미션 기획 보존 · 참고용 (최신 재작업 아님)</summary><p>아래 내부 수락은 이전 버전의 기록입니다. 최신 진행 상황은 위 AI 재작업 현황을 확인하세요.</p>${missionStatus(p.mission)}</details>`:missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
@@ -1348,6 +1398,7 @@ main.addEventListener('click',async event=>{
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
   else if (button.dataset.action?.startsWith('research-')) researchCommand(button.dataset.action);
+  else if (button.dataset.action?.startsWith('alternative-')) alternativeCommand(button.dataset.action);
   else if (button.dataset.action?.startsWith('production-')) productionCommand(button.dataset.action,button.dataset.scene);
   else if (button.dataset.action==='mission-preview') {
     const project=detail;

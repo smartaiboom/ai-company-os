@@ -36,3 +36,21 @@ def validate(value, contract):
 def history_link(policy, ledger, observations):
     return dict(policy_sha256=digest(policy), ledger_sha256=digest(ledger),
                 observations_sha256=digest(observations))
+
+
+def strategy_schema(routes, work_schema):
+    return obj(route=enum(*routes),reason=S,success_criteria=S,risk=S,work=arr(work_schema))
+
+
+def strategy_assignment(decision, contract, inputs, roles):
+    """Bind validated work to a specialist and the original approved input."""
+    require(matches(decision,contract),'strategy_invalid')
+    for field in ('reason','success_criteria','risk'):
+        safe_text(decision[field],460)
+    role=roles.get(decision['route'])
+    require(bool(role)==bool(decision['work']),'strategy_invalid')
+    if not role:
+        return None
+    return dict(role=role,input_sha256=digest(inputs),decision_sha256=digest(decision),
+                work=decision['work'],completion=decision['success_criteria'],risk=decision['risk'],
+                next_reviewer='owner')

@@ -91,6 +91,16 @@ def versions(workflow,project,*,through=None):
                         # Use JSON-shaped sequences so a reloaded signed scope compares identically.
                         base['diverse_games']=[list(item) for item in base['diverse_games']]
                         store=research_store(workflow.store.root,project,base)
+        transition=store.read('continuation.json')
+        if transition and transition['route']=='collect':
+            saved=transition['checkpoint']
+            require(digest(saved)==transition['checkpoint_sha256'],'general_report_changed')
+            base={**base,'continuation':dict(source_sha256=digest(base), checkpoint_sha256=digest(saved),
+                excluded_units=saved['excluded_units'], excluded_payloads=saved['excluded_payloads'])}
+            base.pop('work_anchor',None)
+            if base.get('adaptive_sample') and re.search(r'모바일|mobile',base['target'],re.I):
+                base['verified_mobile_report']=True
+            store=research_store(workflow.store.root,project,base)
         result=store.read('research-result.json')
         review=store.read('manager-review.json')
         if not result or not review:
@@ -118,8 +128,8 @@ def versions(workflow,project,*,through=None):
 def review(workflow,project,body):
     exact(body,('action','version','sha256','feedback'))
     require(eligible(workflow,project),'research_scope_invalid')
-    _,store,history=versions(workflow,project)
-    require(history and history[-1]['decision'] is None,'general_report_changed')
+    base,store,history=versions(workflow,project)
+    require(history and history[-1]['report']['version']==base['version'] and history[-1]['decision'] is None,'general_report_changed')
     current=history[-1]['report']
     require(current['version']==body['version'] and current['sha256']==body['sha256']
             and body['action'] in ('approve','revise','reject'),'general_report_changed')

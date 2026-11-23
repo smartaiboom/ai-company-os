@@ -103,6 +103,107 @@ class GeneralResearchTests(TestCase):
                 self.assertEqual(yt.call_count,2)
                 self.assertEqual(ai.call_count,5)
 
+    def test_provider_failure_continuation_uses_only_new_work(self):
+        from urllib.error import HTTPError
+        from general_research_report import versions
+        from research_workflow import execute_research
+
+        key='fake-gemini-credential-123456789'
+        env=dict(GEMINI_API_KEY=key,GEMINI_PRODUCTION_PROJECT_API_KEY=key,GEMINI35_MODEL=MODEL,
+                 GEMINI35_ENDPOINT=ENDPOINT,GEMINI35_AUTONOMOUS_FREE_ENABLED='1',
+                 TAVILY_RESEARCHER_FREE_ONLY='1',TAVILY_API_KEY='fake-tavily-credential-12345',
+                 YOUTUBE_DATA_API_KEY='fake-youtube-credential-12345')
+        for http in (400,401,403,429,503,None):
+            with self.subTest(http=http), TemporaryDirectory() as temp, patch.dict('os.environ',env):
+                studio=Studio(Path(temp)/'studio')
+                pid=studio.create(dict(goal='모바일 게임 조사',audience='입문자',language='한국어',platform='YouTube Shorts',
+                    duration=None,notes='조사만',key='00000000-0000-4000-8000-000000000047'))['id']
+                studio.workflow.stage_mission_one(pid)
+
+                def action(name,**body):
+                    return studio.action('workspace',pid,name,body)['research']
+
+                def status():
+                    return studio.detail('workspace',pid)['research']
+
+                payloads=[]
+                def model(request,timeout):
+                    payloads.append(request.data)
+                    context=json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
+                    if len(payloads)==1:
+                        value=dict(decision=dict(tool='web_search',option='topic',claims=[],feasibility=''))
+                    elif len(payloads)==2:
+                        if http is None:
+                            raise TimeoutError
+                        body=dict(error=dict(status='INVALID_ARGUMENT',message='private provider text'))
+                        raise HTTPError('https://example.com',http,'fixture',{},Reply(body))
+                    elif context['goal']=='Review video research':
+                        value=dict(action='hold',note='표본 부족',topics=[
+                            dict(title=f'가설 {i}',rationale='추가 확인 필요',length='20초 제안',
+                                 visuals='미확인',rights='unverified',source_ids=[]) for i in range(3)])
+                    else:
+                        self.assertEqual([row['tool'] for row in context['observations']],
+                                         ['web_search','youtube_sample'])
+                        self.assertNotIn('continuation',context)
+                        value=dict(decision=dict(tool='finish',option='',feasibility='권리 미확인',
+                            claims=[dict(statement='확인할 자료가 부족합니다.',assessment='unverified',citations=[])]))
+                    return Reply(dict(candidates=[dict(finishReason='STOP',content=dict(role='model',
+                        parts=[dict(text=json.dumps(value))]))],
+                        usageMetadata=dict(promptTokenCount=20,candidatesTokenCount=20,totalTokenCount=40)))
+
+                from web_research import evidence
+                lead=evidence('https://example.com/guide','Guide','Generic advice','search_lead')
+                with patch('socket.socket.connect',side_effect=AssertionError('no network')), patch(
+                    'socket.getaddrinfo',side_effect=AssertionError('no DNS')), patch(
+                    'goal_dialogue_live.send_once',side_effect=model), patch(
+                    'research_workflow.tavily_search',return_value=[lead]) as tavily, patch(
+                    'employee_web_research.send_once',return_value=Reply(dict(items=[]))) as youtube, patch(
+                    'research_workflow.execute_research',
+                    side_effect=lambda *a,**kw:execute_research(*a,**kw,provenance='offline_fixture')):
+                    initial=status()
+                    action('research-approve',confirmed=True,review_hash=initial['review_hash'])
+                    with self.assertRaisesRegex(CompanyError,'transport_or_response_failed'):
+                        action('research-run')
+                    project=studio.project('workspace',pid)
+                    _,source,_=versions(studio.workflow,project)
+                    before={path:path.read_bytes() for path in source.root.iterdir() if path.is_file()}
+                    stopped=status()
+                    checkpoint=stopped['continuation_state']
+                    self.assertEqual(stopped['status'],'stopped')
+                    self.assertEqual(checkpoint['sources'],1)
+                    self.assertEqual(set(checkpoint['completed']),{'research-0','general-web'})
+                    self.assertEqual(checkpoint['response'].get('http_status'),http)
+                    self.assertNotIn('private provider text',json.dumps(stopped))
+                    self.assertEqual(checkpoint['can_collect'],http==400)
+                    with self.assertRaises(CompanyError):
+                        action('research-run')
+                    if http==400:
+                        ready=action('research-checkpoint',route='collect')
+                        self.assertEqual(ready['status'],'available')
+                        self.assertEqual(ready['work_scope']['limits'],dict(gemini=2,youtube=2))
+                        self.assertEqual(len(payloads),2)
+                        with self.assertRaisesRegex(CompanyError,'owner_policy_required'):
+                            action('research-run')
+                        with self.assertRaisesRegex(CompanyError,'owner_policy_scope_changed'):
+                            action('research-approve',confirmed=True,review_hash=initial['review_hash'])
+                        action('research-approve',confirmed=True,review_hash=ready['review_hash'])
+                        final=action('research-run')
+                        self.assertEqual(final['status'],'review')
+                        report=final['reports'][0]['report']
+                        self.assertEqual(report['staff']['observations'][0]['sources'],[lead])
+                        self.assertEqual(report['manager']['action'],'hold')
+                        self.assertEqual(report['provenance'],'offline_fixture')
+                        self.assertEqual(len(set(payloads)),4)
+                        youtube.assert_called_once()
+                    else:
+                        with self.assertRaisesRegex(CompanyError,'research_continuation_blocked'):
+                            action('research-checkpoint',route='collect')
+                        self.assertEqual(action('research-checkpoint',route='hold')['continuation_state']['route'],'hold')
+                        self.assertEqual(len(payloads),2)
+                        youtube.assert_not_called()
+                    tavily.assert_called_once()
+                    self.assertTrue(all(path.read_bytes()==raw for path,raw in before.items()))
+
     def test_branch_distinguishes_missing_evidence_from_rewording(self):
         from general_research_report import evidence_branch, manager_schema
         from web_research import evidence

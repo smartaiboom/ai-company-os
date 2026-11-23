@@ -20,7 +20,7 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
-RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke', 'research-report-review',
+RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
                     'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke',
                     'research-replan-approve', 'research-replan-run', 'research-replan-revoke',
                     'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke',
@@ -60,6 +60,7 @@ RESEARCH_ERRORS = {
 }
 ERRORS = {
     'research_new_evidence_required': '신규 관측이 필요한 조사입니다. 수집 도구를 호출하기 전 보고서를 종료해 보류했습니다.',
+    'research_continuation_blocked': '새 조사 범위를 안전하게 이어갈 수 없습니다. 저장된 관측과 중단 기록을 확인하세요.',
     'research_collection_unavailable': '사용 가능한 신규 수집 도구가 없어 보류했습니다. 필요한 영상 표본과 원문은 미확인입니다.',
     'employee_web_failed_no_retry': 'YouTube 공개 조회가 실패하거나 미확정입니다. 새 영상 표본을 확보하지 못해 보류했습니다.',
     'general_report_only':'이 프로젝트는 조사·기획 보고서 검토만 지원합니다.',

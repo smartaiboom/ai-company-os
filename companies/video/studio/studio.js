@@ -566,7 +566,7 @@ function budgetPanel(p) {
     ${!p.readonly&&b.consent_state==='valid'?'<button class="button secondary" data-action="budget-run">승인된 예산으로 작업 시작·계속</button><button class="button ghost" data-action="budget-revoke">공급자 동의 철회</button>':''}
     <p class="muted">${h(b.provider_status)} · ${h(b.reason||'')}</p></section>`;
 }
-function researchErrorText(code,stage,diagnostics) {
+function researchErrorText(code,stage,diagnostics,general=false) {
   const labels={step_validation:'조사 도구 선택 검증',evidence_validation:'조사 근거 검증',
     model_response:'Gemini 호출·응답',search_response:'Tavily 호출·응답',preflight:'승인·실행 조건 확인'};
   const info=diagnostics?.providers;
@@ -584,7 +584,7 @@ function researchErrorText(code,stage,diagnostics) {
     else if (failure?.category==='outcome_uncertain' || (failure && !failure.category))
       parts.push('실패한 요청의 전송·응답은 기록만으로 확정할 수 없습니다.');
   }
-  parts.push(failure?'현재 조사 상태에서 복구 가능 여부를 확인하세요.':'현재 조사 상태와 서버 설정을 확인하세요.');
+  if (!general) parts.push(failure?'현재 조사 상태에서 복구 가능 여부를 확인하세요.':'현재 조사 상태와 서버 설정을 확인하세요.');
   return parts.join(' · ');
 }
 function researchRecoveryPanel(recovery, readonly) {
@@ -784,6 +784,7 @@ function researchPanel(p) {
   const actions={available:['research-approve',r.revision_branch?.route==='collect'?'추가 조사 범위 검토·승인':'조사 범위 검토·승인'],active:['research-run',r.general?(r.revision_branch?.route==='collect'?'승인된 추가 조사 시작':r.version>1?'보고서 재작성 시작':'실제 조사 시작'):'웹·전문 자료 조사 실행']};
   const action=actions[r.status];
   const exported=p.review_export;
+  const checkpoint=r.continuation_state;
   const labels={setup_required:'무료 Tavily Researcher 계정과 서버 설정이 필요합니다.',
     available:'업무에 필요한 검색 또는 보존된 전문 자료를 직원이 선택합니다.',active:'승인한 범위 내에서 조사와 관리자 검토를 진행합니다.',
     approved_report:'대표 승인 완료 · 조사·기획만 완료',rejected_report:'대표 반려 완료',
@@ -791,11 +792,16 @@ function researchPanel(p) {
     expired:'조사 승인 유효 시간이 지났습니다.',contract_changed:'조사 계약이 바뀌었습니다. 기존 승인으로 실행할 수 없습니다.',stopped:'실패 또는 미확정 요청에서 조사를 중단했습니다.'};
   return `<section class="panel" id="cross-research"><h2>${r.general?'조사·기획 보고서':'웹·전문 자료 교차 조사'}</h2><p>${h(labels[r.status])}</p>
     ${r.diagnostics?.failure?.code==='research_new_evidence_required'?'<p>직원이 신규 수집 전에 종료를 요청해 보고서 제출을 차단했습니다.</p>':''}
-    ${r.general&&r.revision_branch?.route==='collect'&&r.status==='stopped'?
-      '<p>추가 조사 보류 · 신규 영상 조회수·길이·출처가 확인되지 않았습니다. 실패한 범위는 자동으로 다시 호출하지 않습니다.</p>':''}
+    ${checkpoint?`<p>완료 단계 ${h(checkpoint.completed.join(', ')||'없음')} · 중단 단계 ${h(checkpoint.failed.join(', '))} · 보존 출처 ${h(checkpoint.sources)}건</p>
+      ${checkpoint.response.http_status?`<p>HTTP ${h(checkpoint.response.http_status)} ${h(checkpoint.response.status||'')} · 모델 출력·청구 미확인</p>`:''}
+      <p>${checkpoint.route==='hold'?'보류 기록을 저장했습니다.':checkpoint.can_collect?'미사용 조사 범위를 별도로 검토할 수 있습니다.':'현재 단계에서 외부 호출을 이어갈 수 없습니다.'} 기존 예약은 보존됩니다.</p>
+      ${checkpoint.observations.flatMap(o=>o.sources).map(ref=>`<p>${h(ref.title)} · ${sourceLink(ref.url)}</p>`).join('')}
+      ${!p.readonly&&!checkpoint.route?`${checkpoint.can_collect?'<button class="button secondary" data-action="research-checkpoint-collect">보존 자료로 후속 조사 범위 준비</button>':''}
+        <button class="button ghost" data-action="research-checkpoint-hold">보류 기록 저장</button>`:''}`:''}
+    ${r.continued_from_checkpoint&&['available','active'].includes(r.status)?'<p>저장된 관측을 이어받고 미사용 공개 질의만 수집합니다. 이전 요청은 재전송하지 않습니다.</p>':''}
     ${r.general&&r.observations?.some(o=>o.tool.startsWith('youtube_sample')&&o.status==='empty')?
       '<p>일부 공개 질의에서 적격 표본을 얻지 못했습니다. 후보별 확인 여부는 관측 기록을 확인하세요.</p>':''}
-    ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
+    ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics,r.general))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
     ${exported?`<section class="subpanel"><h3>GitHub 검토용 요약</h3>
@@ -804,6 +810,8 @@ function researchPanel(p) {
       ${exported.local?`<details><summary>공개 내용 미리보기</summary><pre>${h(exported.preview)}</pre></details>`:''}
       ${exported.shared?`<p>${sourceLink('https://github.com/smartaiboom/ai-company-os/blob/main/'+exported.public_path)}</p>`:''}
     </section>`:''}
+    ${checkpoint&&r.limits?`<p>기존 업무 총한도 · Gemini ${h(r.limits.gemini||0)}회 ·
+      Tavily ${h(r.limits.tavily||0)}회 · YouTube GET ${h(r.limits.youtube||0)}회 · 승인 만료 ${h(time(r.expires_at))}</p>`:''}
     ${r.remaining?`<p>업무 승인 유효 · ${h(time(r.expires_at))}까지 · 남은 Gemini ${h(r.remaining.gemini||0)}회
       · Tavily ${h(r.remaining.tavily||0)}회 · YouTube GET ${h(r.remaining.youtube||0)}회</p>`:''}
     ${r.scope_blocker?`<p>승인 상태 · ${h(({owner_policy_exhausted:'총 호출 한도 부족',
@@ -854,6 +862,14 @@ function researchPanel(p) {
 }
 function researchCommand(action) {
   const p=detail, r=p.research;
+  if (action.startsWith('research-checkpoint-')) {
+    const route=action.endsWith('-collect')?'collect':'hold';
+    const title=route==='collect'?'후속 조사 범위 준비':'보류 기록 저장';
+    return modal(title,'<p>완료된 자료와 중단 상태를 로컬에 저장합니다. 외부 호출은 발생하지 않습니다.</p>',title,async ()=>{
+      await api(detailApi(p)+'/research-checkpoint',{route});
+      return {message:'조사 상태를 갱신했습니다.'};
+    });
+  }
   if (action==='research-report-review') {
     const report=r.reports.at(-1).report;
     const previousFeedback=report.manager.action==='hold'?report.revision?.feedback||'':'';

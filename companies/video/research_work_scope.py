@@ -37,7 +37,8 @@ def proposal(work,stage):
         if choice not in allowed.setdefault(kind,[]):
             allowed[kind].append(choice)
     # Up to one additional staff report and manager review. No additional searches are implied.
-    limits['gemini']+=2
+    if not stage.get('continuation_sha256'):
+        limits['gemini']+=2
     for kind,count in limits.items():
         units.extend(dict(id=f'{kind}-{i}',provider=kind,max_cost_usd=0) for i in range(count))
     return {**work.proposal(units),'limits':limits,'allowed':allowed,'provider_project':MISSION_ACCOUNT,

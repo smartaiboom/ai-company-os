@@ -50,12 +50,14 @@ def error_category(exc, stage):
 
 
 def http_error_metadata(error):
-    """Keep only fixed provider error codes and a flag for a rejected response schema."""
+    """Keep bounded body metadata and fixed labels, never provider text."""
     metadata = {'http_status':error.code}
     try:
         raw = error.read(16385)
         if len(raw) > 16384:
+            metadata['error_body_truncated'] = True
             return metadata
+        metadata['error_body_bytes'] = len(raw)
         envelope = json.loads(raw)
         data = envelope['error']
         if not isinstance(data, dict):
@@ -64,6 +66,11 @@ def http_error_metadata(error):
         if status in ('INVALID_ARGUMENT','FAILED_PRECONDITION','PERMISSION_DENIED','RESOURCE_EXHAUSTED',
                       'UNAUTHENTICATED','NOT_FOUND','INTERNAL','UNAVAILABLE'):
             metadata['status'] = status
+        message = data.get('message')
+        if error.code == 400 and isinstance(message, str) and re.search(
+                r'constraint[s]?.{0,40}too many states|schema.{0,50}too complex', message, re.IGNORECASE):
+            metadata['response_schema_complexity_hint'] = True
+        fields=set()
         details = data.get('details')
         if isinstance(details, list):
             for item in details:
@@ -73,11 +80,25 @@ def http_error_metadata(error):
                                          'QUOTA_EXCEEDED','RATE_LIMIT_EXCEEDED'):
                     metadata['reason'] = item['reason']
                 violations = item.get('fieldViolations')
-                if isinstance(violations, list) and any(isinstance(v, dict)
-                    and isinstance(v.get('field'), str)
-                    and re.search(r'response_?(?:json_?)?schema',v['field'],re.IGNORECASE)
-                    for v in violations):
-                    metadata['response_schema_rejected'] = True
+                if not isinstance(violations, list):
+                    continue
+                for violation in violations:
+                    field = violation.get('field') if isinstance(violation, dict) else None
+                    if not isinstance(field, str):
+                        continue
+                    compact = field.replace('_','').lower()
+                    for prefix, family in (
+                            (r'(?:generationconfig\.)?response(?:json)?schema', 'response_schema'),
+                            (r'(?:generationconfig\.)?responsemimetype', 'response_mime_type'),
+                            (r'(?:generationconfig\.)?maxoutputtokens', 'max_output_tokens'),
+                            (r'contents', 'contents'), (r'systeminstruction', 'system_instruction')):
+                        if re.match(prefix+r'(?:$|[.\[])', compact):
+                            fields.add(family)
+                            break
+        if fields:
+            metadata['field_groups'] = sorted(fields)
+        if 'response_schema' in fields:
+            metadata['response_schema_rejected'] = True
     except (OSError, ValueError, TypeError, KeyError, AttributeError, RecursionError, HTTPException):
         pass
     finally:

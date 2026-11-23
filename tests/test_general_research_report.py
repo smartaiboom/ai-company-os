@@ -129,13 +129,24 @@ class GeneralResearchTests(TestCase):
                 payloads=[]
                 def model(request,timeout):
                     payloads.append(request.data)
-                    context=json.loads(json.loads(request.data)['contents'][0]['parts'][0]['text'])
+                    wire=json.loads(request.data)
+                    context=json.loads(wire['contents'][0]['parts'][0]['text'])
+                    self.assertEqual(request.get_method(),'POST')
+                    self.assertEqual(request.full_url,ENDPOINT)
+                    self.assertEqual(request.get_header('Content-type'),'application/json')
+                    self.assertEqual(request.get_header('X-goog-api-key'),key)
+                    self.assertEqual(wire['generationConfig']['maxOutputTokens'],4096)
+                    self.assertNotIn('anyOf',json.dumps(wire['generationConfig']['responseJsonSchema']))
                     if len(payloads)==1:
                         value=dict(decision=dict(tool='web_search',option='topic',claims=[],feasibility=''))
                     elif len(payloads)==2:
                         if http is None:
                             raise TimeoutError
-                        body=dict(error=dict(status='INVALID_ARGUMENT',message='private provider text'))
+                        body=dict(error=dict(status='INVALID_ARGUMENT',
+                            message='Schema is too complex. private provider text',
+                            details=[dict(fieldViolations=[
+                                dict(field='generation_config.response_json_schema.properties.private-field'),
+                                dict(field='secret-field')])]))
                         raise HTTPError('https://example.com',http,'fixture',{},Reply(body))
                     elif context['goal']=='Review video research':
                         value=dict(action='hold',note='표본 부족',topics=[
@@ -173,7 +184,12 @@ class GeneralResearchTests(TestCase):
                     self.assertEqual(checkpoint['sources'],1)
                     self.assertEqual(set(checkpoint['completed']),{'research-0','general-web'})
                     self.assertEqual(checkpoint['response'].get('http_status'),http)
-                    self.assertNotIn('private provider text',json.dumps(stopped))
+                    for secret in ('private provider text','private-field','secret-field'):
+                        self.assertNotIn(secret,json.dumps(stopped))
+                    if http==400:
+                        self.assertEqual(checkpoint['response']['field_groups'],['response_schema'])
+                        self.assertTrue(checkpoint['response']['response_schema_complexity_hint'])
+                        self.assertGreater(checkpoint['response']['error_body_bytes'],0)
                     self.assertEqual(checkpoint['can_collect'],http==400)
                     with self.assertRaises(CompanyError):
                         action('research-run')
@@ -203,6 +219,28 @@ class GeneralResearchTests(TestCase):
                         youtube.assert_not_called()
                     tavily.assert_called_once()
                     self.assertTrue(all(path.read_bytes()==raw for path,raw in before.items()))
+
+    def test_general_wire_schema_keeps_citation_rules_in_local_validation(self):
+        from types import SimpleNamespace
+        from research_workflow import step_worker
+        from web_research import evidence
+
+        rows=[evidence(f'https://example.com/video/{i}',f'Video {i}',f'Sample {i}','api_metric')
+              for i in range(34)]
+        observations=[dict(tool='previous_report',option='saved',status='preserved',sources=rows)]
+        store=SimpleNamespace(root=Path('/tmp/offline-report-wire'))
+        base=dict(mode='general_research_report_v1',target='Research')
+        worker=step_worker(store,base,{},10,observations,rounds=11)
+        wire=worker._payload(None)['generationConfig']['responseJsonSchema']
+        citations=wire['properties']['decision']['properties']['claims']['items']['properties']['citations']
+        self.assertEqual(citations['items'],{'type':'string'})
+        value=dict(decision=dict(tool='finish',option='',feasibility='권리 확인 필요',
+                                 claims=[dict(statement='검증 전',assessment='unverified',
+                                              citations=[rows[-1]['id']])]))
+        worker.validate_response(value)
+        value['decision']['claims'][0]['citations']=['unknown']
+        with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
+            worker.validate_response(value)
 
     def test_branch_distinguishes_missing_evidence_from_rewording(self):
         from general_research_report import evidence_branch, manager_schema

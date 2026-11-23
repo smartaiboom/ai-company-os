@@ -574,6 +574,9 @@ function researchErrorText(code,stage,diagnostics,general=false) {
   const categories={decision_invalid:'판단 규칙 위반',policy_blocked:'정책·권한 차단',internal_error:'검증 코드 오류',
     provider_failure:'공급자 오류 응답',provider_response_invalid:'공급자 응답 형식 오류',outcome_uncertain:'결과 미확정'};
   const parts=[code,labels[stage],categories[failure?.category],failure?.rule].filter(Boolean);
+  const response=failure?.provider_response;
+  if (response?.response_schema_complexity_hint) parts.push('공급자가 응답 스키마 복잡도를 언급했습니다.');
+  else if (response?.response_schema_rejected) parts.push('공급자가 응답 스키마 필드를 표시했습니다.');
   if (info) {
     parts.push(`Gemini 예약 ${info.gemini.reserved}회·완료 ${info.gemini.completed}회, Tavily 예약 ${info.tavily.reserved}회·완료 ${info.tavily.completed}회`);
     if (failure?.response_received) {

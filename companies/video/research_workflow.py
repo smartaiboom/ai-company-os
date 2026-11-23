@@ -461,6 +461,38 @@ def general_ready():
             and re.fullmatch(r'[A-Za-z0-9_-]{16,200}',os.getenv('YOUTUBE_DATA_API_KEY','')) is not None)
 
 
+def research_credentials():
+    gemini,_=production_keys()
+    search=os.getenv('TAVILY_API_KEY','')
+    require(re.fullmatch(r'[A-Za-z0-9_-]{16,200}',search) is not None,'research_search_disabled')
+    return gemini,search
+
+
+def work_status(store,base,scope):
+    from research_work_scope import envelope, inherited, proposal, check_stage
+    work=envelope(store,base)
+    current=work.read('policy.json')
+    parent=inherited(store,base)
+    candidate=work if current else parent
+    blocked=None
+    if candidate:
+        try:
+            gemini,search=research_credentials()
+            key=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
+            grant,left=check_stage(candidate,key,scope)
+            if current:
+                require(grant['proposal']['initial_stage_sha256']==digest(scope),'owner_policy_scope_changed')
+            return dict(status='active',work_scope=grant['proposal'],remaining=left,
+                        expires_at=grant['expires_at'],work_anchor=candidate.binding['anchor'])
+        except CompanyError as exc:
+            blocked=exc.code
+            if current or blocked=='owner_policy_unresolved_attempt':
+                return dict(status='stopped',scope_blocker=blocked)
+    offer=proposal(work,scope)
+    return dict(status='available',work_scope=offer,scope_blocker=blocked,
+                review_hash=digest(dict(stage=scope,work=offer)))
+
+
 def status(workflow,project):
     inputs=context(workflow,project)
     if inputs is None:
@@ -487,11 +519,25 @@ def status(workflow,project):
         if not (general_ready() if general else ready()):
             return dict(**general,status='setup_required')
         _,_,_,scope=available(workflow,project,inputs)
-        return dict(**general,status='available',proposal=scope,review_hash=digest(scope))
+        if general:
+            return dict(**general,proposal=scope,**work_status(store,base,scope))
+        return dict(status='available',proposal=scope,review_hash=digest(scope))
     result=store.read('research-result.json')
     review=store.read('manager-review.json')
     ledger=store.attempts()
     observations=[store.read(path.name) for path in sorted(store.root.glob('observation-*.json'))]
+    if general:
+        from research_work_scope import envelope, inherited, remaining
+        own=envelope(store,base)
+        work=own if own.read('policy.json') else inherited(store,base)
+        if work:
+            try:
+                gemini,search=research_credentials()
+                key=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
+                approved_work=work.active(key)
+                general.update(remaining=remaining(work,approved_work),expires_at=approved_work['expires_at'])
+            except CompanyError as exc:
+                general['scope_blocker']=exc.code
     recovery = replan = supervision = None
     if ledger and not review and not base.get('mode'):
         _, tools, model, scope = available(workflow, project, inputs)
@@ -520,15 +566,22 @@ def status(workflow,project):
 
 
 def execute_research(store, credential, gemini, base, tools, model, *, history=(), proposal=None, preflight=None,
-                     provenance='provider_model_claim'):
+                     provenance='provider_model_claim',work=None):
     def check_before_send(check):
         check()
         if preflight:
             preflight()
 
-    def invoke(operation, payload, work):
-        delegated_call(store, credential, operation, payload,
-                       lambda proof, check: work(lambda: check_before_send(check)))
+    def accounted(operation,payload,execute):
+        if work is None:
+            return delegated_call(store,credential,operation,payload,execute)
+        from research_work_scope import charge
+        return charge(work,credential,operation,payload,lambda cap:
+            delegated_call(store,credential,operation,payload,
+                lambda proof,check:execute(proof,lambda:(cap(),check()))))
+
+    def invoke(operation, payload, collect):
+        accounted(operation, payload, lambda proof, check: collect(lambda: check_before_send(check)))
 
     def decide(index, context):
         feedback = proposal['feedback'] if proposal and index == len(history) else None
@@ -541,7 +594,7 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
         if feedback:
             correction_call(store, credential, proposal['units'][0], payload, feedback, execute)
         else:
-            delegated_call(store, credential, model[index], payload, execute)
+            accounted(model[index],payload,execute)
         return approved_manager_result(worker)['decision']
 
     if base.get('revision_plan'):
@@ -569,12 +622,14 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
         'Use use_with_limits only if relevant evidence warrants a limited handoff. '
         'Explain measurement scope, feasibility and missing rights. Never approve a download or publish.'+instructions))
     wire = digest(reviewer._payload(None))
-    delegated_call(store, credential, model[-1], wire, lambda proof, check:run_worker(
+    accounted(model[-1], wire, lambda proof, check:run_worker(
         reviewer, gemini, proof, wire, lambda: check_before_send(check)))
     reviewed = approved_manager_result(reviewer)
     review=dict(decision=reviewed,result_sha256=digest(result),at=now())
     if base.get('mode'):
         review['provenance']=provenance
+    if work:
+        review['work_anchor']=work.binding['anchor']
     store.write('manager-review.json',review)
     return result
 
@@ -604,6 +659,13 @@ def action(workflow,pid,name,body):
         if name in ('research-revoke', 'research-recovery-revoke'):
             exact(body, ())
             source = research_store(workflow.store.root, project, base)
+            if base.get('mode'):
+                from research_work_scope import envelope, inherited
+                work=envelope(source,base)
+                if work.read('policy.json'):
+                    return work.revoke()
+                if inherited(source,base):
+                    return inherited(source,base).revoke()
             return (recovery_store(source) if name == 'research-recovery-revoke' else source).revoke()
         require(general_ready() if base.get('mode') else ready(),'research_search_disabled')
         gemini,_=production_keys()
@@ -619,6 +681,13 @@ def action(workflow,pid,name,body):
         if name=='research-approve':
             exact(body,('confirmed','review_hash'))
             require(body['confirmed'] is True,'owner_policy_required')
+            if base.get('mode'):
+                from research_work_scope import envelope
+                offered=work_status(store,base,scope)
+                require(offered['status']=='available' and offered['review_hash']==body['review_hash'],
+                        'owner_policy_scope_changed')
+                work=envelope(store,base)
+                return work.approve(offered['work_scope'],digest(offered['work_scope']),credential)
             return store.approve(scope,body['review_hash'],credential)
         if name in ('research-recovery-approve', 'research-recovery-run'):
             require(not recovery_store(store).attempts(), 'owner_policy_exhausted')
@@ -646,6 +715,18 @@ def action(workflow,pid,name,body):
 
         exact(body, ())
         require(name == 'research-run', 'research_scope_invalid')
+        work=None
+        if base.get('mode'):
+            from research_work_scope import envelope, inherited, check_stage
+            own=envelope(store,base)
+            work=own if own.read('policy.json') else inherited(store,base)
+            if work:
+                approved_work,_=check_stage(work,credential,scope)
+                if work is own:
+                    require(approved_work['proposal']['initial_stage_sha256']==digest(scope),
+                            'owner_policy_scope_changed')
+                if not store.read('policy.json'):
+                    store.approve(scope,digest(scope),credential)
         grant = store.active(credential)
         require(not store.attempts() and not store.read('research-result.json'), 'owner_policy_exhausted')
         require(grant['proposal'] == scope, 'owner_policy_scope_changed')
@@ -656,7 +737,7 @@ def action(workflow,pid,name,body):
             previous=reports[-1]['report']['staff']['observations']
             sources=list(evidence_catalog(previous).values())
             history=(dict(tool='previous_report',option='saved',status='preserved',at=reports[-1]['report']['at'],sources=sources),)
-        return execute_research(store, credential, gemini, base, tools, model, history=history)
+        return execute_research(store, credential, gemini, base, tools, model, history=history,work=work)
 
 
 def reviewed_handoff(store,*,fresh=True):

@@ -41,7 +41,7 @@ def evidence_branch(feedback, observations, at):
              and timedelta(0)<=when-datetime.fromisoformat(row['observed_at'])<timedelta(days=30)]
     pages=[row for row in rows if row['scope']=='public_page']
     rules={
-        'video_metrics':r'조회수|영상.{0,4}길이|관측\s*(시점|날짜)|view count|duration',
+        'video_metrics':r'조회수|(?:영상|쇼츠).{0,6}(?:길이|링크|출처)|관측\s*(시점|날짜)|view count|video links?|duration',
         'recent_examples':r'최근|인기|순위|새.{0,4}(사례|게임|영상)|게임명|실제.{0,5}(영상|쇼츠)|recent|trending',
         'rights_conditions':r'라이선스|사용\s*조건|편집\s*권|사용\s*권|license|licen[cs]ing',
     }
@@ -91,6 +91,8 @@ def versions(workflow,project):
             return base,store,history
         base={**base_for(workflow,project),'previous':dict(version=version,report_sha256=report['sha256'],
             feedback=decision['feedback'],manager=report['manager'],staff_claims=result['claims'])}
+        if review.get('work_anchor'):
+            base['work_anchor']=review['work_anchor']
 
 
 def review(workflow,project,body):

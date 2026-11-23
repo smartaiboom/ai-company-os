@@ -89,7 +89,9 @@ class GeneralResearchTests(TestCase):
                                     feedback='길이 선정 근거를 명확히 해 주세요.')
                 self.assertEqual(next_version['version'],2)
                 self.assertEqual(next_version['proposal']['max_search_credits'],0)
-                action('research-approve',confirmed=True,review_hash=next_version['review_hash'])
+                self.assertEqual(next_version['status'],'active')
+                self.assertEqual(next_version['remaining']['gemini'],4)
+                self.assertNotIn('review_hash',next_version)
                 v2=action('research-run')
                 self.assertEqual(v2['reports'][0]['report'],report)
                 revised=v2['reports'][-1]['report']
@@ -133,3 +135,41 @@ class GeneralResearchTests(TestCase):
         after=prior+[dict(tool=tool.name,option='sample',status='empty',sources=[])]
         step_worker(store,base,{tool.name:tool},2,after).validate_response(finish)
         step_worker(store,{k:v for k,v in base.items() if k!='revision_plan'},{},1,prior).validate_response(finish)
+
+    def test_work_scope_checks_total_expiry_key_and_changed_tools(self):
+        from autonomous_company import digest
+        from owner_operating_policy import OwnerOperatingPolicy
+        from research_work_scope import proposal, check_stage, charge
+
+        with TemporaryDirectory() as tmp:
+            work=OwnerOperatingPolicy(Path(tmp)/'work',{'project':'fixture'})
+            gemini=dict(id='research-1',model=MODEL,endpoint=ENDPOINT,
+                        data_types=['approved_report'],max_cost_usd=0)
+            stage=dict(units=[gemini])
+            offer=proposal(work,stage)
+            work.approve(offer,digest(offer),'fixture')
+            with self.assertRaisesRegex(CompanyError,'owner_policy_key_changed'):
+                check_stage(work,'other-key',stage)
+            changed=dict(units=[{**gemini,'data_types':['private_media']}])
+            with self.assertRaisesRegex(CompanyError,'owner_policy_scope_changed'):
+                check_stage(work,'fixture',changed)
+            with patch('owner_operating_policy.now',return_value='2099-01-01T00:00:00+09:00'):
+                with self.assertRaisesRegex(CompanyError,'owner_policy_expired'):
+                    check_stage(work,'fixture',stage)
+            charge(work,'fixture',gemini,digest('a'),lambda check:check())
+            self.assertEqual(check_stage(work,'fixture',stage)[1]['gemini'],2)
+            def failed(_check):
+                raise TimeoutError
+            with self.assertRaises(TimeoutError):
+                charge(work,'fixture',gemini,digest('b'),failed)
+            with self.assertRaisesRegex(CompanyError,'owner_policy_unresolved_attempt'):
+                check_stage(work,'fixture',stage)
+
+        with TemporaryDirectory() as tmp:
+            work=OwnerOperatingPolicy(Path(tmp)/'work',{'project':'fixture'})
+            offer=proposal(work,stage)
+            work.approve(offer,digest(offer),'fixture')
+            for i in range(3):
+                charge(work,'fixture',gemini,digest(i),lambda check:check())
+            with self.assertRaisesRegex(CompanyError,'owner_policy_exhausted'):
+                check_stage(work,'fixture',stage)

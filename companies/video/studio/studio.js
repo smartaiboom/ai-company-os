@@ -797,6 +797,11 @@ function researchPanel(p) {
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
+    ${r.remaining?`<p>업무 승인 유효 · ${h(time(r.expires_at))}까지 · 남은 Gemini ${h(r.remaining.gemini||0)}회
+      · Tavily ${h(r.remaining.tavily||0)}회 · YouTube GET ${h(r.remaining.youtube||0)}회</p>`:''}
+    ${r.scope_blocker?`<p>승인 상태 · ${h(({owner_policy_exhausted:'총 호출 한도 부족',
+      owner_policy_scope_changed:'기존 승인에 없는 제공처·도구 또는 전송 범위',owner_policy_key_changed:'서명과 현재 키 불일치',
+      owner_policy_expired:'승인 만료',owner_policy_revoked:'승인 철회',owner_policy_unresolved_attempt:'실패·미확정 요청 보존'})[r.scope_blocker]||r.scope_blocker)}</p>`:''}
     ${r.revision_branch?`<p><strong>수정 요청 분기 · 규칙 기반</strong> ·
       ${r.revision_branch.route==='collect'?(r.revision_branch.uncertain?'새 자료 필요 여부 미확정 · 추가 조사 범위 선택 가능':'새 근거 수집 필요'):'기존 자료로 재작성'}
       · 기존 API 표본 ${h(r.revision_branch.available.metrics)}건 · 직접 확인 페이지 ${h(r.revision_branch.available.direct_pages)}건
@@ -858,7 +863,14 @@ function researchCommand(action) {
   const offer=recovery?r.recovery:r;
   const proposal=offer.proposal;
   const feedback=proposal?.feedback;
-  const fields=approve?`<p>Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
+  const fields=approve?`<p>${r.work_scope?'현재 단계 · ':''}Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
+    ${r.work_scope?`<p><strong>업무 총한도</strong> · Gemini ${h(r.work_scope.limits.gemini)}회 · Tavily ${h(r.work_scope.limits.tavily||0)}회
+      · YouTube GET ${h(r.work_scope.limits.youtube||0)}회 · 24시간 · 무료 전용 $0</p>
+      <p>현재 단계와 후속 피드백 재작성 범위를 함께 승인합니다. 공급자 잔량과 실제 청구는 미확인입니다.</p>
+      <details><summary>공급자·모델·전송 자료와 프로젝트</summary><pre>${h(JSON.stringify({
+        project:r.work_scope.provider_project,providers:r.work_scope.allowed,gemini_inputs:r.work_scope.gemini_inputs,
+        phases:r.work_scope.phases
+      },null,2))}</pre></details>`:''}
     ${proposal.revision_plan?`<p>신규 직원 작업 · 보존 자료와 수정 지시를 대조하고 공개 영상의 조회수·길이·시점·출처를 확인합니다.
       Tavily 자료는 단서로 취급하며 관리자 검토에서 게임별 신규 표본의 적합성과 미확인 항목을 표시합니다.</p>
       <p>계정 청구·실시간 잔량 미확인 · 무료 전용 $0 · 다운로드, 실제 화면 열람 및 편집 권리 인증 없음.</p>

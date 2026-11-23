@@ -119,6 +119,9 @@ def view(manager):
              response_received=attempt.get('response_received',attempt['status']=='completed'),
              total_tokens=(attempt.get('usage') or {}).get('total_tokens'))
     if attempt['status']!='completed':
+        from decision_recovery import failure_kind
+        run.update(failure_category=failure_kind(attempt),diagnostic=attempt.get('diagnostic'),
+                   provider_http_status=attempt.get('http_status'),request_id=attempt['id'])
         return dict(status='stopped',reason=attempt.get('reason'),run=run)
     decision=approved_manager_result(manager)
     store=records(manager)
@@ -168,6 +171,31 @@ def fixture_media(project_id,fixture_id):
     return path
 
 
+FIXTURE_REVIEW_FIELDS=('visual','audio','captions','interest','improvement')
+
+
+def fixture_reviews(path, data):
+    return OwnerOperatingPolicy(path.parent/'review',dict(scope='alternative_fixture_owner_review',
+                                id=data['id'],video_sha256=data['sha256']))
+
+
+def evaluate_fixture(pid,body):
+    exact(body,('id','sha256',*FIXTURE_REVIEW_FIELDS))
+    found=fixture(pid)
+    require(found and (body['id'],body['sha256'])==(found[0]['id'],found[0]['sha256']),
+            'strategy_approval_required')
+    data,path=found
+    fixture_media(pid,data['id'])
+    notes={field:body[field] for field in FIXTURE_REVIEW_FIELDS}
+    for note in notes.values():
+        safe_text(note,400)
+        require(bool(note.strip()),'invalid_text')
+    store=fixture_reviews(path,data)
+    store.root.mkdir(mode=0o700,exist_ok=True)
+    store.write('evaluation.json',dict(at=now(),fixture_id=data['id'],video_sha256=data['sha256'],
+                source='owner',provenance=data['provenance'],notes=notes,publish_allowed=False))
+
+
 def status(workflow,project):
     if project['representative']['stage']!='video_revision':
         return None
@@ -178,7 +206,7 @@ def status(workflow,project):
             result['url']=f"/media/workspace/{project['id']}/alternative/{result['receipt']['id']}"
         sample=fixture(project['id'])
         if sample:
-            result['fixture']=dict(**sample[0],url=f"/media/workspace/{project['id']}/alternative-fixture/{sample[0]['id']}")
+            result['fixture']=dict(**sample[0],evaluation=fixture_reviews(sample[1],sample[0]).read('evaluation.json'),url=f"/media/workspace/{project['id']}/alternative-fixture/{sample[0]['id']}")
         return result
     except (CompanyError,FileNotFoundError) as exc:
         return dict(status='unavailable',reason=getattr(exc,'code','strategy_inputs_missing'))
@@ -187,6 +215,8 @@ def status(workflow,project):
 def action(workflow,pid,name,body):
     with workflow.store.lock(pid):
         project=workflow.store.load(pid)
+        if name=='alternative-fixture-evaluate':
+            return evaluate_fixture(pid,body)
         manager,spec,speech=setup(workflow,project)
         jid=draft_id(manager)
         if name=='alternative-prepare':

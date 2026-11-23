@@ -27,7 +27,7 @@ RESEARCH_ACTIONS = ('research-approve', 'research-run', 'research-revoke',
                     'research-supervision-approve', 'research-supervision-run', 'research-supervision-revoke')
 
 ALTERNATIVE_ACTIONS = ('alternative-prepare', 'alternative-consent', 'alternative-decide',
-                       'alternative-approve', 'alternative-render', 'alternative-evaluate')
+                       'alternative-approve', 'alternative-render', 'alternative-evaluate', 'alternative-fixture-evaluate')
 
 PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','production-plan-run',
                       'production-publisher-approve','production-publisher-run','production-publisher-rights','production-publisher-revoke',

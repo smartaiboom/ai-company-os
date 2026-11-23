@@ -8,9 +8,11 @@ from datetime import datetime, timedelta
 import hmac
 import json
 import os
+import socket
+import ssl
 import uuid
 from urllib.request import build_opener, HTTPRedirectHandler
-from urllib.error import HTTPError
+from urllib.error import HTTPError, URLError
 
 from decision_recovery import DecisionViolation, failure_kind
 from autonomous_company import CompanyError, require, exact, digest, now, parse, fcntl
@@ -75,6 +77,32 @@ def send_once(request, timeout):
     """No redirect, proxy environment, or retry can send credentials to another endpoint."""
     from urllib.request import ProxyHandler
     return build_opener(ProxyHandler({}), NoRedirect()).open(request, timeout=timeout)
+
+
+def failure_diagnostic(exc, stage):
+    """Return fixed vocabulary only. Opening a request is not evidence of delivery."""
+    cause=exc.reason if isinstance(exc,URLError) and not isinstance(exc,HTTPError) else exc
+    if isinstance(exc,HTTPError):
+        category='provider_http'
+    elif isinstance(cause,TimeoutError):
+        category='timeout'
+    elif isinstance(cause,ConnectionResetError):
+        category='connection_reset'
+    elif isinstance(cause,socket.gaierror):
+        category='dns'
+    elif isinstance(cause,ssl.SSLError):
+        category='tls'
+    elif isinstance(cause,ConnectionError):
+        category='connection'
+    elif stage=='decision_validation' and isinstance(exc,CompanyError):
+        category='internal_error' if exc.code=='decision_internal_error' else 'local_contract'
+    elif stage=='response_parse':
+        category='response_invalid'
+    elif stage=='reserved':
+        category='local_guard'
+    else:
+        category='unknown'
+    return dict(stage=stage,category=category)
 
 
 class LiveDialogueStore(DialogueStore):
@@ -198,11 +226,15 @@ class LiveDialogueStore(DialogueStore):
             p['real_ai']['attempts'].append(attempt)
             p['rounds'] += 1; p['status'] = 'awaiting_proposal'
             self._event(p, 'gemini_request_reserved', attempt_id=attempt['id'])
+            stage='reserved'
             try:
                 # Reservation reached disk before entering transport. Lock is held through response validation.
                 require(self.load(draft_id)['storage_hash'] == p['storage_hash'], 'state_changed')
+                stage='request_open'
                 with send_once(request, timeout=90) as response:
+                    stage='response_read'
                     raw = response.read(131073)
+                stage='response_parse'
                 attempt['response_received'] = True
                 require(len(raw) <= 131072, 'response_too_large')
                 envelope = parse(raw.decode('utf-8'))
@@ -215,6 +247,7 @@ class LiveDialogueStore(DialogueStore):
                 # Keep validation atomic with successful attempt status; do not store raw model replies on failure.
                 candidate = deepcopy(p)
                 candidate['real_ai']['attempts'][-1].update(status='completed', finished_at=now(), response_hash=digest(value))
+                stage='decision_validation'
                 try:
                     return self._accept_proposal(candidate, value, 'gemini35_live_manager')
                 except DecisionViolation as exc:
@@ -227,6 +260,7 @@ class LiveDialogueStore(DialogueStore):
                 except Exception as exc:
                     raise CompanyError('decision_internal_error') from exc
             except Exception as exc:
+                attempt['diagnostic']=failure_diagnostic(exc,stage)
                 if isinstance(exc, HTTPError) and type(exc.code) is int:
                     attempt['http_status'] = exc.code
                     attempt['provider_response'] = http_error_metadata(exc)

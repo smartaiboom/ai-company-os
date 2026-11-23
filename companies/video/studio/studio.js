@@ -292,6 +292,7 @@ function commonsTrace(label,rows) {
 const alternativeLabels={unprepared:'전략 요청 준비',prepared:'무료 관리자 요청 승인',approved:'관리자 전략 실행',
   review:'대표 시범 제작 승인',assigned:'로컬 시범 영상 제작'};
 const alternativeActions={unprepared:'prepare',prepared:'consent',approved:'decide',review:'approve',assigned:'render'};
+const fixtureReviewLabels={visual:'화면',audio:'음성',captions:'자막',interest:'흥미도',improvement:'개선 희망'};
 function alternativePanel(p) {
   const a=p.alternative;
   if (!a) return '';
@@ -307,23 +308,28 @@ function alternativePanel(p) {
     ${a.status==='hold'?'<p>추가 권리, 기획 검토 또는 대표 답변이 필요합니다.</p>':''}
     ${a.status==='stopped'?'<p>실패 또는 미확정 실행 기록을 확인하세요. 기존 요청은 다시 실행할 수 없습니다.</p>':''}
     ${a.run?`<p>Gemini 시도 ${h(a.run.attempts)}회 · 완료 ${h(a.run.completed)}회 ·
-      응답 ${a.run.response_received?'수신 확인':'미확정'} · 토큰 ${h(a.run.total_tokens??'미확인')}
+      응답 ${a.run.response_received?'모델 응답 수신':a.run.provider_http_status?'공급자 오류 확인':'미확정'} · 토큰 ${h(a.run.total_tokens??'미확인')}
       ${a.reason?` · ${h(a.reason)}`:''}</p>`:''}
+    ${a.run?.request_id?`<p>진단 · ${h(a.run.diagnostic?.stage||'세부 단계 기록 없음')} · ${h(a.run.diagnostic?.category||a.run.failure_category)}
+      ${a.run.provider_http_status?` · 공급자 HTTP ${h(a.run.provider_http_status)}`:''} · 요청 ID ${h(a.run.request_id)}</p>`:''}
     ${a.status==='unavailable'?`<p>제작 준비 요건 확인 · ${h(a.reason)}</p>`:''}
     ${action?`<button class="button secondary" data-action="alternative-${action}">${alternativeLabels[a.status]}</button>`:''}
     ${a.receipt?`<p>로컬 렌더 및 디코딩 완료 · ${h(a.receipt.seconds)}초 · ${a.evaluation?'대표 시청 의견 기록됨':'영상 시청 품질 대표 평가 대기'}</p>
       <video controls preload="metadata" src="${h(a.url)}"></video>
       ${a.evaluation?`<p>대표 시청 의견 · ${h(a.evaluation.feedback)}</p>`:
         '<button class="button secondary" data-action="alternative-evaluate">시청 의견 저장</button>'}`:''}
-    ${a.fixture?`<details><summary>검증용 시범 영상 · 모의 관리자 및 모의 대표 승인</summary>
+    ${a.fixture?`<details open><summary>검증용 시범 영상 · 모의 관리자 및 모의 대표 승인</summary>
       <p>실제 FFmpeg로 제작한 파일입니다. 운영 전략 결과와 별도로 보관합니다.</p>
       <video controls preload="metadata" src="${h(a.fixture.url)}"></video>
+      ${a.fixture.evaluation?`<p>대표 평가 기록됨</p>
+        ${Object.entries(fixtureReviewLabels).map(([key,label])=>`<p><strong>${label}</strong> ${h(a.fixture.evaluation.notes[key])}</p>`).join('')}`:
+        '<p>대표 평가 대기 · 35초 시범 영상</p><button class="button secondary" data-action="alternative-fixture-evaluate">시범 영상 평가 남기기</button>'}
     </details>`:''}
     </section>`;
 }
 function alternativeCommand(action) {
   const p=detail, a=p.alternative;
-  const title=action==='alternative-evaluate'?'시청 의견 저장':alternativeLabels[a.status];
+  const title=action==='alternative-fixture-evaluate'?'시범 영상 평가':action==='alternative-evaluate'?'시청 의견 저장':alternativeLabels[a.status];
   const fields={
     'alternative-prepare':'<p>기존 무료 Gemini 프로젝트의 관리자 전략 요청 1회를 검토할 수 있게 준비합니다.</p>'+
       ['free','quota','docs'].map((name,i)=>`<label class="check"><input type="checkbox" name="${name}" required>${['무료 프로젝트 및 결제 미연결','충분한 무료 한도','현재 제공자 문서 및 적용 조건'][i]} 확인</label>`).join(''),
@@ -333,12 +339,16 @@ function alternativeCommand(action) {
     'alternative-decide':'<p>서명한 관리자 요청 1회를 실행합니다.</p>',
     'alternative-approve':'<label class="check"><input type="checkbox" name="confirmed" required>표시된 설명 그래픽과 기존 음성으로 별도 로컬 시범 제작을 승인합니다.</label>',
     'alternative-evaluate':'<label>시범 영상 시청 의견<textarea name="feedback" required maxlength="1000"></textarea></label>',
+    'alternative-fixture-evaluate':Object.entries(fixtureReviewLabels).map(([key,label])=>
+      `<label>${label}<textarea name="${key}" required maxlength="400"></textarea></label>`).join(''),
     'alternative-render':'<p>승인한 장면을 로컬에서 합성합니다. 실제 게임 화면 및 외부 요청은 포함되지 않습니다.</p>'
   };
   modal(title,fields[action],title,async data=>{
     let body={};
     if (action==='alternative-prepare') body={free:data.has('free'),quota:data.has('quota'),docs:data.has('docs')};
     if (action==='alternative-consent') body={review_hash:a.review_hash,confirmed:data.has('confirmed')};
+    if (action==='alternative-fixture-evaluate') body={id:a.fixture.id,sha256:a.fixture.sha256,
+      ...Object.fromEntries(Object.keys(fixtureReviewLabels).map(key=>[key,data.get(key)]))};
     if (action==='alternative-evaluate') body={sha256:a.receipt.sha256,feedback:data.get('feedback')};
     if (action==='alternative-approve') body={proposal_sha256:a.proposal_sha256,confirmed:data.has('confirmed')};
     try { await api(detailApi(p)+'/'+action,body); }

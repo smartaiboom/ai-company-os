@@ -104,6 +104,44 @@ class ManagerPlanOnceTests(unittest.TestCase):
             path=Path(target);self.assertTrue(path.is_absolute() and path.is_relative_to('/tmp'))
             path.write_text(json.dumps(dict(provenance='mock HTTP; no real AI inference',result=result),ensure_ascii=False,indent=2))
 
+    def test_safe_transport_diagnostics_preserve_uncertain_and_reject_repeat(self):
+        from urllib.error import HTTPError, URLError
+        from decision_recovery import failure_kind
+
+        class BrokenRead(BytesIO):
+            def read(self, *args):
+                raise ConnectionResetError('private exception detail')
+
+        cases=(
+            ('timeout', TimeoutError('private exception detail'), 'request_open', 'timeout', 'outcome_uncertain'),
+            ('dns', URLError(__import__('socket').gaierror('private exception detail')),
+             'request_open','dns','outcome_uncertain'),
+            ('read', BrokenRead(), 'response_read','connection_reset','outcome_uncertain'),
+            ('503', HTTPError('https://example.invalid',503,'private detail',None,
+                              BytesIO(b'{"error":{"status":"UNAVAILABLE","message":"private detail"}}')),
+             'request_open','provider_http','provider_failure'),
+            ('contract', envelope(dict(action='wrong')), 'decision_validation','local_contract','provider_response_invalid'),
+        )
+        for name, error, stage, category, expected_kind in cases:
+            with self.subTest(name=name):
+                self.fresh(name)
+                self.http.reset_mock(return_value=True,side_effect=True)
+                self.approve()
+                if isinstance(error,Exception):
+                    self.http.side_effect=error
+                else:
+                    self.http.return_value=error
+                with self.assertRaises(CompanyError):
+                    self.ask()
+                attempt,=self.store.load(self.pid)['real_ai']['attempts']
+                self.assertEqual(attempt['diagnostic'],dict(stage=stage,category=category))
+                self.assertEqual(attempt['status'],'uncertain')
+                self.assertEqual(failure_kind(attempt),expected_kind)
+                self.assertNotIn('private',json.dumps(attempt))
+                with self.assertRaises(CompanyError):
+                    self.ask()
+                self.http.assert_called_once()
+
     def test_necessary_clarification_consumes_only_request(self):
         self.approve()
         value=dict(action='needs_clarification',audience='초보자',questions=[dict(question='필수 시연 환경은 무엇인가요?',reason='실제 시연 가능 여부 판단')],

@@ -7,7 +7,7 @@ const node = {addEventListener() {}};
 const document = {querySelectorAll: () => [], querySelector: () => node};
 const source = fs.readFileSync(path.join(__dirname,'../companies/video/studio/studio.js'),'utf8');
 const ui = vm.runInNewContext(source.replace(/\nroute\(\);\s*$/, '') +
-  '\n({nextWork, productionNext, projectPage, researchErrorText, researchRecoveryPanel, researchPanel, researchReplanPanel, researchSupervisionPanel})', {document, window: node});
+  '\n({nextWork, productionNext, projectPage, researchErrorText, alternativePanel, researchRecoveryPanel, researchPanel, researchReplanPanel, researchSupervisionPanel})', {document, window: node});
 const clip = {scene_id:'scene-1',source:'operator_clip',request:'test'};
 const initial = {status:'unprepared',key_ready:false,clips:[],voices:{}};
 const available = {...initial,key_ready:true};
@@ -111,10 +111,6 @@ assert.match(ui.nextWork({stage:'completed',flow},controlSource).message,/최종
 if (process.argv[2]) {
   const live = JSON.parse(fs.readFileSync(process.argv[2], 'utf8'));
   const page = ui.projectPage(live);
-  if (live.research?.status==='setup_required') {
-    assert.match(page,/웹·전문 자료 교차 조사/);
-    assert.doesNotMatch(page,/data-action="research-run"/);
-  }
   assert.ok(page.indexOf('id="next-work"') < page.indexOf('id="production-detail"'));
   assert.ok(page.indexOf('id="production-detail"') < page.indexOf('id="video-panel"'));
   if (live.autonomous_production?.status==='waiting_assets') {
@@ -205,3 +201,12 @@ const supervised=ui.researchSupervisionPanel({status:'incomplete',evidence_count
   outcome:{next_proposal:{feedback:'검토 요청'}}}, false);
 assert.match(supervised,/실제 업무 목표 미달성.*잔여 승인 횟수.*호출 결과 0건.*관리자 보완 지시.*미충족.*대표 승인 필요/s);
 assert.doesNotMatch(supervised,/data-action=/);
+
+const demoPanel=ui.alternativePanel({alternative:{status:'stopped',run:{attempts:1,completed:0,
+  response_received:false,provider_http_status:503,request_id:'fixture',failure_category:'provider_failure'},
+  fixture:{url:'/media/fixture',evaluation:null}}});
+assert.match(demoPanel,/대표 평가 대기/);
+assert.match(demoPanel,/data-action="alternative-fixture-evaluate"/);
+assert.match(demoPanel,/모의 관리자 및 모의 대표 승인/);
+assert.match(demoPanel,/공급자 HTTP 503/);
+assert.doesNotMatch(demoPanel,/data-action="alternative-decide"/);

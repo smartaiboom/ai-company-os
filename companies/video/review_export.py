@@ -1,0 +1,199 @@
+"""Generate a public-safe snapshot of the latest signed Cutroom research report."""
+from datetime import datetime, timedelta, timezone
+import argparse
+from pathlib import Path
+import re
+import subprocess
+from tempfile import NamedTemporaryFile
+
+from autonomous_company import require
+from general_research_report import eligible, versions
+
+REPO=Path(__file__).resolve().parents[2]
+LOCAL_ROOT=REPO/'artifacts'/'review_exports'
+PUBLIC_PATHS={'company-062d79eeabeb4e5baab3d60ec462db5f':'reports/review_exports/mobile_game_latest.md'}
+VIDEO=r'https://youtu\.be/[A-Za-z0-9_-]{11}'
+METRIC=r'YouTube Data API views=(\d{1,18}); duration_seconds=(\d{1,5})\. A top search sample, Shorts format and rights unverified\.'
+SENSITIVE=re.compile(
+    r'AIza[\w-]{12,}|(?:tvly-|sk-|gh[pousr]_|github_pat_)[\w-]+|[A-Fa-f0-9]{24,}|'
+    r'\b(?:token|password|secret|authorization|api[ _-]?key|bearer)\b|'
+    r'\b[\w.+-]+@[\w.-]+\.[A-Za-z]{2,}\b|\b(?:\+?82[- .]?)?01[016789][- .]?\d{3,4}[- .]?\d{4}\b|'
+    r'https?://|(?:^|\W)[A-Za-z]:[\\/]|[\\/]|(?:^|\W)(?:localhost|127\.0\.0\.1)\b',re.I)
+DECISIONS={None:'대표 검토 대기','approve':'대표 승인','reject':'대표 반려','revise':'대표 수정 요청'}
+
+
+def timestamp(value):
+    try:
+        result=datetime.fromisoformat(value)
+        if result.utcoffset() is None:
+            return '미확인'
+        return result.astimezone(timezone(timedelta(hours=9))).strftime('%Y-%m-%d %H:%M:%S KST')
+    except (ValueError,TypeError):
+        return '미확인'
+
+
+def clean_title(value, private):
+    # Public video titles are the only free text passed through. Markdown syntax is stripped.
+    if not isinstance(value,str) or SENSITIVE.search(value):
+        return '제목 비공개'
+    if any(fragment and fragment in value.casefold() for fragment in private):
+        return '제목 비공개'
+    title=re.sub(r'[^\w\s!?.,:()\-–가-힣]', ' ', value)
+    return ' '.join(title.split())[:110] or '제목 비공개'
+
+
+def public_sources(report,private):
+    result={}
+    for group in report['staff']['observations']:
+        if group['status']!='observed':
+            continue
+        for row in group['sources']:
+            if row['scope']!='api_metric' or row['origin']!='youtube_data_api':
+                continue
+            metric=re.fullmatch(METRIC,row['excerpt'])
+            if not metric or not re.fullmatch(VIDEO,row['url']):
+                continue
+            result[row['id']]=dict(url=row['url'],title=clean_title(row['title'],private),
+                views=int(metric[1]),seconds=int(metric[2]),observed=timestamp(row['observed_at']),
+                published=timestamp(row['source_date']))
+    return result
+
+
+def decision(record):
+    return DECISIONS.get((record['decision'] or {}).get('action'),'검토 상태 미확인')
+
+
+def assemble(project,history,store):
+    latest=history[-1]
+    report=latest['report']
+    feedback=[(item['decision'] or {}).get('feedback','') for item in history]
+    fields=[project['goal'],project['representative']['audience'],*feedback,
+            *project['representative']['constraints'].values()]
+    private={line.strip().casefold() for value in fields if isinstance(value,str)
+             for line in value.splitlines() if len(line.strip())>=8}
+    sources=public_sources(report,private)
+    # Ordinals are local to the export. Internal source IDs never leave the repository.
+    labels={key:f'S{index}' for index,key in enumerate(sources,1)}
+    topic_rows=[]
+    games=set()
+    for index,topic in enumerate(report['manager']['topics'],1):
+        refs=[ref for ref in topic['source_ids'] if ref in sources]
+        name=topic.get('game','')
+        supported_name=(isinstance(name,str) and 2<=len(name)<=30
+                        and any(name.casefold() in sources[ref]['title'].casefold() for ref in refs)
+                        and re.fullmatch(r'[\w -]+',name) and clean_title(name,private)==name)
+        if supported_name:
+            games.add(name.casefold())
+        sample=sources.get(refs[0]) if refs else None
+        length=re.fullmatch(r'(\d{1,3})\s*초',topic['length'])
+        topic_rows.append(f"| {index} | {name if supported_name else '미확인'} | "
+                          f"{sample['title'] if sample else '공개 표본 미확인'} | "
+                          f"{length[1]+'초' if length else '미확인'} | "
+                          f"{', '.join(labels[ref] for ref in refs) or '없음'} | 미확인 |")
+    hold=report['manager']['action']=='hold'
+    summary=(f'직원 관측에서 공개 영상 메타데이터 {len(sources)}건을 검토용으로 추출했다. '
+             f'후보와 연결된 공개 제목에서 확인한 게임명은 {len(games)}종이다.')
+    comparison=''
+    if len(history)>1:
+        previous=history[-2]['report']
+        previous_count=len(public_sources(previous,private))
+        comparison=f"직전 v{previous['version']} 대비 공개 메타데이터 {previous_count} → {len(sources)}건."
+    lines=['# 컷룸 최신 조사 검토 요약','',
+           '- 프로젝트 표시명 · 게임 쇼츠 조사 / 분야 · 영상 기획',
+           f"- 보고서 v{report['version']} · {timestamp(report['at'])} · {decision(latest)}",
+           f"- 근거 유형 · {'공급자 모델 결과' if report['provenance']=='provider_model_claim' else '오프라인 모의 결과'}",
+           '', '## 요약과 관리자 판단','', summary,
+           f"관리자 판단 · {'보류' if hold else '제한적 활용 의견'}. "
+           +('세 게임 비교 및 영상 사용 조건의 근거가 부족하다.' if hold and len(games)<3
+             else '확인한 메타데이터의 범위와 별도 권리 검토 조건을 유지한다.'),
+           comparison,'','## 후보 비교','',
+           '| 후보 | 공개 제목에 근거한 게임명 | 참고 영상 제목 | 제안 길이 | 출처 | 사용권 |',
+           '| --- | --- | --- | --- | --- | --- |',*topic_rows,'','## 공개 관측','',
+           '| 출처 | 공개 제목 | 조회수 | 영상 길이 | 관측 시각 | 게시 시각 |',
+           '| --- | --- | ---: | ---: | --- | --- |']
+    for key,row in sources.items():
+        lines.append(f"| [{labels[key]}]({row['url']}) | {row['title']} | {row['views']:,} | "
+                     f"{row['seconds']}초 | {row['observed']} | {row['published']} |")
+    lines+=['','## 미확인 사항과 실행 요약','',
+            '- 공개 메타데이터는 실제 시청, Shorts 분류, 편집·게시 권리, 전체 인기 순위를 확인하지 않는다.']
+    counts={}
+    for unit,item in store.attempts().items():
+        vendor='YouTube' if unit.startswith('youtube-') else 'Tavily' if unit=='general-web' else 'Gemini'
+        counts.setdefault(vendor,[0,0])
+        counts[vendor][0]+=1
+        counts[vendor][1]+=int((item['result'] or {}).get('status')=='completed')
+    for name in ('Gemini','Tavily','YouTube'):
+        reserved,completed=counts.get(name,(0,0))
+        lines.append(f'- {name} · 예약 {reserved}회 / 완료 {completed}회')
+    if len(history)>1:
+        lines+=['','## 이전 검토 이력','']
+        for item in history[:-1]:
+            old=item['report']
+            lines.append(f"- v{old['version']} · {decision(item)} · 공개 메타데이터 {len(public_sources(old,private))}건")
+    return ('\n'.join(lines)+'\n').encode()
+
+
+def write_latest(path,data):
+    require(not any(p.is_symlink() for p in (path,*path.parents)),'review_export_path_blocked')
+    path.parent.mkdir(parents=True,exist_ok=True)
+    if path.is_file() and path.read_bytes()==data:
+        return
+    with NamedTemporaryFile(dir=path.parent,delete=False) as temp:
+        temp.write(data)
+        temporary=Path(temp.name)
+    try:
+        temporary.replace(path)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def synced(path,data):
+    if not path:
+        return False
+    try:
+        result=subprocess.run(['git','show','refs/remotes/origin/main:'+path],cwd=REPO,
+                              capture_output=True,timeout=3,check=False)
+    except (OSError,subprocess.TimeoutExpired):
+        return False
+    return result.returncode==0 and result.stdout==data
+
+
+def generate(workflow,project):
+    if not eligible(workflow,project):
+        return None
+    _,store,history=versions(workflow,project)
+    if not history:
+        return None
+    # Pending revision stores have no result. Resolve the latest completed report's signed ledger.
+    from research_workflow import research_store
+    completed=history[-1]['report']
+    if not store.read('manager-review.json'):
+        base,_,_=versions(workflow,project,through=completed['version'])
+        store=research_store(workflow.store.root,project,base)
+    data=assemble(project,history,store)
+    write_latest(LOCAL_ROOT/project['id']/'latest.md',data)
+    destination=PUBLIC_PATHS.get(project['id'])
+    return dict(version=completed['version'],local=True,shared=synced(destination,data),
+                preview=data.decode(),public_path=destination)
+
+
+def main():
+    from studio_server import Studio,ROOT
+    parser=argparse.ArgumentParser()
+    parser.add_argument('--project',required=True)
+    parser.add_argument('--root',type=Path,default=ROOT/'studio')
+    parser.add_argument('--confirmed-public-version',type=int)
+    args=parser.parse_args()
+    studio=Studio(args.root)
+    result=generate(studio.workflow,studio.project('workspace',args.project))
+    require(result is not None,'review_export_missing')
+    if args.confirmed_public_version is None:
+        print(result['preview'],end='')
+        return
+    require(result['version']==args.confirmed_public_version and result['public_path'],'review_export_version_changed')
+    write_latest(REPO/result['public_path'],result['preview'].encode())
+    print(result['public_path'])
+
+
+if __name__=='__main__':
+    main()

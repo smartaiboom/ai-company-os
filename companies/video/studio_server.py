@@ -261,7 +261,14 @@ class Studio:
         research=research_status(self.workflow,p) if key=='workspace' and mission else None
         from alternative_production import status as alternative_status
         alternative=alternative_status(self.workflow,p) if key=='workspace' else None
-        return {**self.card(key, p), 'alternative':alternative, 'research':research, 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
+        review_export=None
+        if key=='workspace' and research and research.get('general') and research.get('reports'):
+            from review_export import generate
+            try:
+                review_export=generate(self.workflow,p)
+            except (CompanyError,OSError,ValueError):
+                review_export=dict(local=False,shared=False)
+        return {**self.card(key, p), 'review_export':review_export, 'alternative':alternative, 'research':research, 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
                 'autonomous_production': autonomous_production,
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))

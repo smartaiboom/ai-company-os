@@ -783,6 +783,7 @@ function researchPanel(p) {
   if (!r) return '';
   const actions={available:['research-approve',r.revision_branch?.route==='collect'?'추가 조사 범위 검토·승인':'조사 범위 검토·승인'],active:['research-run',r.general?(r.revision_branch?.route==='collect'?'승인된 추가 조사 시작':r.version>1?'보고서 재작성 시작':'실제 조사 시작'):'웹·전문 자료 조사 실행']};
   const action=actions[r.status];
+  const exported=p.review_export;
   const labels={setup_required:'무료 Tavily Researcher 계정과 서버 설정이 필요합니다.',
     available:'업무에 필요한 검색 또는 보존된 전문 자료를 직원이 선택합니다.',active:'승인한 범위 내에서 조사와 관리자 검토를 진행합니다.',
     approved_report:'대표 승인 완료 · 조사·기획만 완료',rejected_report:'대표 반려 완료',
@@ -797,6 +798,12 @@ function researchPanel(p) {
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
+    ${exported?`<section class="subpanel"><h3>GitHub 검토용 요약</h3>
+      <p>${exported.local?`v${h(exported.version)} · 로컬 검토용 요약 생성됨`:'로컬 검토용 요약 생성 실패'}</p>
+      <p>${exported.shared?'마지막으로 동기화한 GitHub main과 일치':'현재 요약의 GitHub 공유 미확인 · 로컬 파일만 확인'}</p>
+      ${exported.local?`<details><summary>공개 내용 미리보기</summary><pre>${h(exported.preview)}</pre></details>`:''}
+      ${exported.shared?`<p>${sourceLink('https://github.com/smartaiboom/ai-company-os/blob/main/'+exported.public_path)}</p>`:''}
+    </section>`:''}
     ${r.remaining?`<p>업무 승인 유효 · ${h(time(r.expires_at))}까지 · 남은 Gemini ${h(r.remaining.gemini||0)}회
       · Tavily ${h(r.remaining.tavily||0)}회 · YouTube GET ${h(r.remaining.youtube||0)}회</p>`:''}
     ${r.scope_blocker?`<p>승인 상태 · ${h(({owner_policy_exhausted:'총 호출 한도 부족',

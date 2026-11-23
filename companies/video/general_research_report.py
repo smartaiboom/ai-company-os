@@ -64,7 +64,7 @@ def reviewed_search(report):
     return any(row['tool'].startswith('youtube_sample') for row in report['staff']['observations'])
 
 
-def versions(workflow,project):
+def versions(workflow,project,*,through=None):
     from research_workflow import research_store
     base=base_for(workflow,project)
     history=[]
@@ -95,7 +95,7 @@ def versions(workflow,project):
         decision=store.read('owner-review.json')
         require(not decision or decision['report_sha256']==report['sha256'],'general_report_changed')
         history.append(dict(report=report,decision=decision))
-        if not decision or decision['action']!='revise':
+        if version==through or not decision or decision['action']!='revise':
             return base,store,history
         base={**base_for(workflow,project),'previous':dict(version=version,report_sha256=report['sha256'],
             feedback=decision['feedback'],manager=report['manager'],staff_claims=result['claims'])}

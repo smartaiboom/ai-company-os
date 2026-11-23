@@ -59,6 +59,9 @@ RESEARCH_ERRORS = {
     'transport_or_response_failed': 'Gemini 호출 또는 응답 확인 중 중단됐습니다.',
 }
 ERRORS = {
+    'research_new_evidence_required': '신규 관측이 필요한 조사입니다. 수집 도구를 호출하기 전 보고서를 종료해 보류했습니다.',
+    'research_collection_unavailable': '사용 가능한 신규 수집 도구가 없어 보류했습니다. 필요한 영상 표본과 원문은 미확인입니다.',
+    'employee_web_failed_no_retry': 'YouTube 공개 조회가 실패하거나 미확정입니다. 새 영상 표본을 확보하지 못해 보류했습니다.',
     'general_report_only':'이 프로젝트는 조사·기획 보고서 검토만 지원합니다.',
     'general_report_changed':'최신 조사 보고서와 검토 상태를 확인하세요.',
     'strategy_approval_required':'이 시범 제작 제안의 대표 승인과 실행 상태를 확인하세요.',

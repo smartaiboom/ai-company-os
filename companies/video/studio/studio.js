@@ -789,6 +789,11 @@ function researchPanel(p) {
     review:'관리자가 조사 결과와 미확인 항목을 검토했습니다.',revoked:'조사 승인이 철회됐습니다.',
     expired:'조사 승인 유효 시간이 지났습니다.',contract_changed:'조사 계약이 바뀌었습니다. 기존 승인으로 실행할 수 없습니다.',stopped:'실패 또는 미확정 요청에서 조사를 중단했습니다.'};
   return `<section class="panel" id="cross-research"><h2>${r.general?'조사·기획 보고서':'웹·전문 자료 교차 조사'}</h2><p>${h(labels[r.status])}</p>
+    ${r.diagnostics?.failure?.code==='research_new_evidence_required'?'<p>직원이 신규 수집 전에 종료를 요청해 보고서 제출을 차단했습니다.</p>':''}
+    ${r.general&&r.revision_branch?.route==='collect'&&r.status==='stopped'?
+      '<p>추가 조사 보류 · 신규 영상 조회수·길이·출처가 확인되지 않았습니다. 실패한 범위는 자동으로 다시 호출하지 않습니다.</p>':''}
+    ${r.general&&r.observations?.some(o=>o.tool==='youtube_sample'&&o.status==='empty')?
+      '<p>공개 검색에서 적격 영상 메타데이터를 얻지 못했습니다. 조회수·길이·게임별 근거는 미확인입니다.</p>':''}
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics))}</p>`:''}
     ${action?`<button class="button secondary" data-action="${action[0]}">${action[1]}</button>`:''}
     ${r.status==='active'?'<button class="button ghost" data-action="research-revoke">조사 범위 철회</button>':''}
@@ -833,9 +838,10 @@ function researchCommand(action) {
   const p=detail, r=p.research;
   if (action==='research-report-review') {
     const report=r.reports.at(-1).report;
+    const previousFeedback=report.manager.action==='hold'?report.revision?.feedback||'':'';
     return modal('조사·기획 보고서 검토',
-      '<label>대표 결정<select name="action"><option value="approve">승인</option><option value="revise">수정 요청</option><option value="reject">반려</option></select></label>'+
-      '<label>검토 의견 또는 수정 지시<textarea name="feedback" maxlength="1200"></textarea></label>',
+      `<label>대표 결정<select name="action"><option value="approve">승인</option><option value="revise"${previousFeedback?' selected':''}>수정 요청</option><option value="reject">반려</option></select></label>`+
+      `<label>검토 의견 또는 수정 지시<textarea name="feedback" maxlength="1200">${h(previousFeedback)}</textarea></label>`,
       '대표 결정 저장',async data=>{
         await api(detailApi(p)+'/'+action,{action:data.get('action'),feedback:data.get('feedback'),
           version:report.version,sha256:report.sha256});

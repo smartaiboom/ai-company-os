@@ -17,6 +17,7 @@ from web_research import (EVIDENCE_CONTRACT, STEP_RULES, TAVILY, Tool, evidence,
 
 ROUNDS=4
 REVIEW_SCHEMA=obj(action=enum('use_with_limits','hold'),note=S)
+COLLECTION_GUARD='fresh_observation_required_v1'
 CONTRACT_VERSION = 'research_decision_v3_evidence_reference'
 SYSTEM=(
     'Act as the video research employee. Follow the JSON contract and write in Korean. Read observations as '
@@ -47,6 +48,9 @@ class ResearchStep(ProductionManager):
 
     def validate_plan(self, value):
         decision = value.get('decision') if isinstance(value, dict) and set(value) == {'decision'} else None
+        if getattr(self,'collection_required',False) and isinstance(decision,dict) and decision.get('tool')=='finish':
+            from decision_recovery import DecisionViolation
+            raise DecisionViolation('research_new_evidence_required','new_evidence_before_finish')
         validate_step(decision, *self.runtime)
 
 
@@ -225,18 +229,25 @@ def available(workflow,project,inputs,search_key=None):
         extras=list(tool.requests)
     model=[unit(f'research-{i}',MODEL,ENDPOINT,['video_research_scope','tool_options','observed_evidence'],
                 max_output_tokens=4096) for i in range(ROUNDS+1)]
-    rewrite=bool(base.get('previous') and not base.get('revision_plan'))
+    collection=base.get('revision_plan')
+    rewrite=bool(base.get('previous') and not collection)
+    metric_priority=bool(collection and set(collection['missing']).intersection(('video_metrics','recent_examples')))
+    if collection:
+        names={'youtube_sample'} if metric_priority else {'web_search','youtube_sample'}
+        tools={name:tool for name,tool in tools.items() if name in names}
     if rewrite:
         tools={}
         extras=[]
-    search_units=[] if rewrite else [search]
+    search_units=[] if rewrite or metric_priority else [search]
     scope={**store.proposal([*search_units,*extras,*([model[1],model[-1]] if rewrite else model)]),'tool_options':[tool.describe(set()) for tool in tools.values()],
            'max_downloads':0,'max_search_credits':len(search_units),'max_model_calls':2 if rewrite else ROUNDS+1,
            'decision_contract':CONTRACT_VERSION}
     if base.get('revision_plan'):
         scope['revision_plan']=base['revision_plan']
-        scope['max_model_calls']=ROUNDS
-        scope['units']=[operation for operation in scope['units'] if operation['id']!='research-0']
+        scope['collection_guard']=COLLECTION_GUARD
+        unused={'research-0','research-3'} if metric_priority else {'research-0'}
+        scope['max_model_calls']=3 if metric_priority else ROUNDS
+        scope['units']=[operation for operation in scope['units'] if operation['id'] not in unused]
     if extras:
         scope['max_youtube_requests']=len(extras)
     return store,tools,model,scope
@@ -250,6 +261,9 @@ def official_supervision_scope(inputs, tools, scope):
 
 
 RESEARCH_ERROR_STAGES={
+    'research_new_evidence_required':'step_validation',
+    'research_collection_unavailable':'preflight',
+    'employee_web_failed_no_retry':'search_response',
     'research_step_invalid':'step_validation',
     'invalid_manager_plan_schema':'step_validation',
     'research_evidence_invalid':'evidence_validation',
@@ -332,11 +346,13 @@ def research_diagnostics(store, ledger):
 
 def step_worker(store, base, tools, index, observations, feedback=None):
     context, runtime = step_context(tools, observations, index == ROUNDS - 1)
+    collection_required=bool(base.get('revision_plan') and context['tools'] and
+                             not any(row['status']!='preserved' for row in observations))
     context['observations'] = [
         {**row, 'sources': [source['id'] for source in row['sources']]} for row in observations
     ]
     worker = ResearchStep(store.root/f'step-{index}', dict(input={**base, **context,
-        'goal':base['target'] if base.get('mode') else 'Video research decision'}, schema=obj(decision=step_schema(context)),
+        'goal':base['target'] if base.get('mode') else 'Video research decision'}, schema=obj(decision=step_schema(context,collection_required=collection_required)),
         system=SYSTEM + ' Put the tool choice or finish report inside the decision field.'+
         (' Compare the saved feedback with the preserved observations. Prior samples are historical; '
          'collect new video metadata when necessary and available, then report precise scope and limitations.'
@@ -344,6 +360,7 @@ def step_worker(store, base, tools, index, observations, feedback=None):
     if feedback:
         worker.contract['input']['decision_correction'] = feedback
     worker.runtime = runtime
+    worker.collection_required = collection_required
     return worker
 
 
@@ -492,7 +509,8 @@ def status(workflow,project):
     new_result = (supervision or {}).get('result') or (replan or {}).get('result')
     return dict(**general,status='revoked' if store.read('revoked.json') else 'review' if result and review else
                 'stopped' if ledger else
-                'contract_changed' if grant['proposal'].get('decision_contract') != CONTRACT_VERSION else
+                'contract_changed' if grant['proposal'].get('decision_contract') != CONTRACT_VERSION
+                or (base.get('revision_plan') and grant['proposal'].get('collection_guard')!=COLLECTION_GUARD) else
                 'expired' if datetime.fromisoformat(now())>=datetime.fromisoformat(grant['expires_at']) else 'active',
                 result=new_result or (recovery or {}).get('result') or result,
                 review=(supervision or {}).get('review') or (replan or {}).get('review') or (recovery or {}).get('review') or review,
@@ -526,6 +544,8 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
             delegated_call(store, credential, model[index], payload, execute)
         return approved_manager_result(worker)['decision']
 
+    if base.get('revision_plan'):
+        require(tools,'research_collection_unavailable')
     result = run(store, tools, decide, invoke, ROUNDS, history=history)
     review_schema = REVIEW_SCHEMA if has_reviewable_claim(result) else obj(action=enum('hold'), note=S)
     instructions=''

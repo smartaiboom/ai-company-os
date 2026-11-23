@@ -171,7 +171,7 @@ STEP_RULES = {
 }
 
 
-def step_schema(context, *, supervised=False):
+def step_schema(context, *, supervised=False, collection_required=False):
     catalog = context['evidence_catalog']
     assessments = ('supported', 'conflicting', 'unverified') if independent_sources(list(catalog.values())) else ('unverified',)
     references = {**arr(enum(*catalog) if catalog else S), 'maxItems': min(4, len(catalog))}
@@ -183,6 +183,9 @@ def step_schema(context, *, supervised=False):
             claims={**claims, 'maxItems': 0}, feasibility=enum(''))
         for tool in context['tools']
     ]
+    if collection_required:
+        require(bool(selections),'research_collection_unavailable')
+        return selections[0] if len(selections)==1 else {'anyOf':selections}
     if supervised:
         hold = obj(tool=enum('hold'), option=enum(''), claims={**arr(obj(
             statement=S, assessment=enum('unverified'), citations=references)), 'minItems':1, 'maxItems':5},

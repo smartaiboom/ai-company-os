@@ -113,3 +113,23 @@ class GeneralResearchTests(TestCase):
         self.assertTrue(evidence_branch('조금 더 보완해 주세요.',[],now())['uncertain'])
         result=dict(observations=[dict(status='preserved',sources=[lead])])
         self.assertEqual(manager_schema(result,collection=True)['properties']['action']['enum'],['hold'])
+
+    def test_new_evidence_step_schema_and_validation_reject_early_finish(self):
+        from general_research_report import youtube_tool
+        from research_workflow import step_worker
+        from types import SimpleNamespace
+        from web_research import evidence
+        row=evidence('https://example.com/guide','Guide','Generic advice','search_lead')
+        prior=[dict(tool='previous_report',option='saved',status='preserved',sources=[row])]
+        tool=youtube_tool('mobile games','fixture-key-123456789')
+        store=SimpleNamespace(root=Path('/tmp/offline-guard-schema'))
+        base=dict(mode='general_research_report_v1',target='Research',revision_plan={'route':'collect'})
+        worker=step_worker(store,base,{tool.name:tool},1,prior)
+        self.assertEqual(worker.contract['schema']['properties']['decision']['properties']['tool']['enum'],['youtube_sample'])
+        finish=dict(decision=dict(tool='finish',option='',claims=[
+            dict(statement='New evidence missing',assessment='unverified',citations=[])],feasibility='Rights unknown'))
+        with self.assertRaisesRegex(CompanyError,'research_new_evidence_required'):
+            worker.validate_response(finish)
+        after=prior+[dict(tool=tool.name,option='sample',status='empty',sources=[])]
+        step_worker(store,base,{tool.name:tool},2,after).validate_response(finish)
+        step_worker(store,{k:v for k,v in base.items() if k!='revision_plan'},{},1,prior).validate_response(finish)

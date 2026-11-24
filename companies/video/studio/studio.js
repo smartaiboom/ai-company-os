@@ -815,6 +815,13 @@ function researchPanel(p) {
       ${!p.readonly&&!checkpoint.route?`${checkpoint.can_collect?'<button class="button secondary" data-action="research-checkpoint-collect">보존 자료로 후속 조사 범위 준비</button>':''}
         ${checkpoint.can_report?'<button class="button secondary" data-action="research-checkpoint-report">보존 자료로 보고서 작성 범위 준비</button>':''}
         <button class="button ghost" data-action="research-checkpoint-hold">보류 기록 저장</button>`:''}`:''}
+    ${r.provider_recovery_offer?`<div class="subpanel"><h3>공급자 장애 재개 검토</h3>
+      <p>정책 판정 · ${h(r.provider_recovery_offer.receipt.model)} · HTTP 503 UNAVAILABLE · 관측 ${h(time(r.provider_recovery_offer.receipt.observed_at))}</p>
+      <p>출처 · 서명된 공급자 오류 응답 · 모델·계정 가용성, 잔량, 청구 미확인</p>
+      <p>OpenRouter · 검토 후보 · 고정 무료 모델과 연결 승인 미확인</p>
+      ${p.readonly?'':'<button class="button secondary" data-action="research-provider-recovery">독립 검토 기록 및 신규 범위 준비</button>'}</div>`:''}
+    ${r.provider_recovery_blocked?'<p>정책 판정 · 추가 실행은 보류 상태입니다.</p>':''}
+    ${r.provider_recovery_phase&&['available','active'].includes(r.status)?`<p>새 무료 범위 · ${r.provider_recovery_phase==='manager'?'보존 직원 보고서 관리자 검토 1회':'직원 보고 1회 · 검증 통과 후 관리자 검토 1회'} · 새 검색 0회</p>`:''}
     ${r.continued_from_checkpoint&&['available','active'].includes(r.status)?r.checkpoint_report_only?'<p>보존 자료로 직원 보고와 관리자 검토를 진행합니다. 새 검색은 포함되지 않습니다.</p>':'<p>저장된 관측을 이어받고 미사용 공개 질의만 수집합니다. 이전 요청은 재전송하지 않습니다.</p>':''}
     ${r.general&&r.observations?.some(o=>o.tool.startsWith('youtube_sample')&&o.status==='empty')?
       '<p>일부 공개 질의에서 적격 표본을 얻지 못했습니다. 후보별 확인 여부는 관측 기록을 확인하세요.</p>':''}
@@ -879,6 +886,22 @@ function researchPanel(p) {
 }
 function researchCommand(action) {
   const p=detail, r=p.research;
+  if (action==='research-provider-recovery') {
+    const offer=r.provider_recovery_offer;
+    const title='독립 검토 기록 및 신규 범위 준비';
+    return modal(title,`<p>직접 확인한 근거를 기록합니다. 공개 상태 정보만으로 모델·계정 가용성을 확인할 수 없습니다.</p>
+      <p>이전 실패 요청과 같은 본문을 새 서명으로 한 번 검증할 범위를 준비합니다. 이전 예약은 보존됩니다.</p>
+      <p>외부 호출은 별도 승인과 실행이 필요합니다.</p>
+      <label>근거 출처<select name="source" required><option value="">선택</option>
+        <option value="official_status">공식 공개 상태 페이지</option>
+        <option value="independent_review">독립 검토 기록</option></select></label>
+      <label>출처 링크 또는 검토 기록과 판단 근거<textarea name="reference" maxlength="480" required></textarea></label>
+      <label class="check"><input type="checkbox" name="confirmed" required>근거를 직접 검토했으며, 새 범위의 검토를 요청합니다.</label>`,title,async data=>{
+      await api(detailApi(p)+'/research-checkpoint',{route:'provider_recovery',review_hash:offer.review_hash,
+        source:data.get('source'),reference:data.get('reference'),confirmed:data.has('confirmed')});
+      return {message:'새 무료 승인 범위를 준비했습니다.'};
+    });
+  }
   if (action.startsWith('research-checkpoint-')) {
     const route=action.slice('research-checkpoint-'.length);
     const title={collect:'후속 조사 범위 준비',report:'보존 자료 보고서 작성 범위 준비',hold:'보류 기록 저장'}[route];
@@ -912,7 +935,7 @@ function researchCommand(action) {
   const fields=approve?`<p>${r.work_scope?'현재 단계 · ':''}Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
     ${r.work_scope?`<p><strong>업무 총한도</strong> · Gemini ${h(r.work_scope.limits.gemini)}회 · Tavily ${h(r.work_scope.limits.tavily||0)}회
       · YouTube GET ${h(r.work_scope.limits.youtube||0)}회 · 24시간 · 무료 전용 $0</p>
-      <p>${r.checkpoint_report_only?'직원 보고와 관리자 검토를 승인합니다.':'현재 단계와 후속 피드백 재작성 범위를 함께 승인합니다.'} 공급자 잔량과 실제 청구는 미확인입니다.</p>
+      <p>${r.provider_recovery_phase==='manager'?'저장된 직원 보고서의 관리자 검토를 승인합니다.':r.checkpoint_report_only?'직원 보고와 관리자 검토를 승인합니다.':'현재 단계와 후속 피드백 재작성 범위를 함께 승인합니다.'} 공급자 잔량과 실제 청구는 미확인입니다.</p>
       <details><summary>공급자·모델·전송 자료와 프로젝트</summary><pre>${h(JSON.stringify({
         project:r.work_scope.provider_project,providers:r.work_scope.allowed,gemini_inputs:r.work_scope.gemini_inputs,
         phases:r.work_scope.phases
@@ -1169,7 +1192,7 @@ function nextWork(p,controlSource,selected) {
   if (p.readonly) return {message:'기존 검증 사례 · 읽기 전용'};
   if (p.research?.general) {
     const item=p.research;
-    const buttons=select('research-report-review','research-approve','research-run');
+    const buttons=select('research-report-review','research-approve','research-run','research-provider-recovery');
     const message={setup_required:'Gemini·Tavily 무료 설정과 YouTube 키를 확인하세요.',
       available:item.revision_branch?.route==='collect'?'저장된 수정 요청으로 추가 조사 범위를 검토하세요.':item.version>1?'수정 지시를 보존했습니다. 재작성 전송 범위를 승인하세요.':'조사 범위를 확인하고 승인하세요.',
       active:'승인된 조사·기획 작업을 실행할 수 있습니다.',review:'대표가 최신 조사·기획 보고서를 검토할 차례입니다.',

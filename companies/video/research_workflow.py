@@ -288,6 +288,10 @@ def available(workflow,project,inputs,search_key=None,*,history=()):
         scope.pop('youtube_quota',None)
         if continuation.get('report_only'):
             scope['checkpoint_report_only']=True
+        if recovery := continuation.get('provider_recovery'):
+            scope['provider_recovery']=recovery
+            if recovery['phase']=='manager':
+                scope.update(units=[model[-1]],max_model_calls=1)
     return store,tools,model,scope
 
 
@@ -589,11 +593,15 @@ def can_resume_report(base,grant,state):
             and not base.get('continuation',{}).get('report_only'))
 
 
-def continuation_source(store,continuation):
+def parent_store(store,continuation):
     source_hash=continuation['source_sha256']
-    source=OwnerOperatingPolicy(
+    return OwnerOperatingPolicy(
         store.root.parent/('research-'+store.binding['project']+'-'+source_hash[:20]),
         {**store.binding,'input_sha256':source_hash})
+
+
+def continuation_source(store,continuation):
+    source=parent_store(store,continuation)
     transition=source.read('continuation.json')
     route='report' if continuation.get('report_only') else 'collect'
     require(transition and transition['route']==route and not source.read('revoked.json')
@@ -610,6 +618,77 @@ def report_checkpoint(store,base,state):
     observations=[*prior['observations'],*state['observations']]
     return {**state,'observations':observations,'sources':len(evidence_catalog(observations)),
             'excluded_payloads':sorted(set(prior['excluded_payloads']+state['excluded_payloads']))}
+
+
+def provider_recovery_offer(store,base,grant,state,ledger):
+    from provider_recovery import service_unavailable_receipt
+    from research_work_scope import envelope
+
+    continuation=base.get('continuation',{})
+    if (not continuation.get('report_only') or continuation.get('provider_recovery')
+            or grant['proposal'].get('decision_contract')!=GENERAL_CONTRACT_VERSION
+            or not state or len(state['failed'])!=1 or store.read('revoked.json')):
+        return None
+    work=envelope(store,base)
+    policy=work.read('policy.json')
+    if not policy or work.read('revoked.json'):
+        return None
+    operation=state['failed'][0]
+    row=ledger[operation]
+    receipt=service_unavailable_receipt(row,linked_attempt(store,operation,row))
+    if not receipt or (receipt['model'],receipt['endpoint'])!=(MODEL,ENDPOINT):
+        return None
+    units=grant['proposal']['units']
+    if len(units)!=2 or any((unit['model'],unit['endpoint'])!=(MODEL,ENDPOINT) for unit in units):
+        return None
+    result=store.read('research-result.json')
+    if operation==units[-1]['id'] and result and state['completed']==[units[0]['id']]:
+        phase='manager'
+        snapshot=state
+    elif operation==units[0]['id'] and not result and not state['completed']:
+        phase='staff'
+        snapshot=report_checkpoint(store,base,state)
+    else:
+        return None
+    work_ledger=work.attempts()
+    linked_charge=digest(dict(operation=row['reservation']['unit'],payload_hash=receipt['failed_payload_sha256']))
+    failed_charges=[item for item in work_ledger.values() if (item['result'] or {}).get('status')!='completed']
+    if (len(work_ledger)!=len(ledger) or len(failed_charges)!=1
+            or failed_charges[0]['reservation']['payload_sha256']!=linked_charge):
+        return None
+    return dict(phase=phase,operation=operation,receipt=receipt,ledger_sha256=digest(ledger),
+                work_ledger_sha256=digest(work_ledger),work_policy_sha256=digest(policy),
+                stage_policy_sha256=digest(grant),source_continuation=continuation,snapshot_sha256=digest(snapshot),
+                staff_result_sha256=digest(result) if result else None),snapshot
+
+
+def checked_provider_recovery(store,continuation,credential):
+    from general_research_continuation import checkpoint
+    from provider_recovery import check_recovery_transition
+    from research_work_scope import envelope
+
+    source=parent_store(store,continuation)
+    transition=source.read('provider-recovery.json')
+    approved=continuation['provider_recovery']
+    ledger=source.attempts()
+    state=checkpoint(source,ledger)
+    work=envelope(source,approved['goal_binding'])
+    policy=work.read('policy.json')
+    require(transition and transition['recovery']==approved and policy and state
+            and not source.read('revoked.json') and not work.read('revoked.json')
+            and digest(source.read('policy.json'))==approved['stage_policy_sha256']
+            and digest(transition['checkpoint'])==continuation['checkpoint_sha256'],
+            'research_continuation_blocked')
+    snapshot=state
+    if approved['phase']=='staff':
+        snapshot=report_checkpoint(source,{'continuation':approved['source_continuation']},state)
+    else:
+        continuation_source(source,approved['source_continuation'])
+    check_recovery_transition(approved,ledger,work.attempts(),policy,snapshot)
+    result=source.read('research-result.json')
+    require((digest(result) if result else None)==approved['staff_result_sha256'],'research_continuation_blocked')
+    work.check_credential(policy,credential)
+    return snapshot['observations'],result
 
 
 def status(workflow,project):
@@ -638,6 +717,8 @@ def status(workflow,project):
         general['continued_from_checkpoint']=True
         if base['continuation'].get('report_only'):
             general['checkpoint_report_only']=True
+        if recovery_record:=base['continuation'].get('provider_recovery'):
+            general['provider_recovery_phase']=recovery_record['phase']
     if not grant:
         if not (general_ready() if general else ready()):
             return dict(**general,status='setup_required')
@@ -675,6 +756,29 @@ def status(workflow,project):
                 'can_collect':not saved and state['eligible'] and not base.get('continuation')
                     and not store.read('revoked.json')
                     and can_continue(workflow,project,inputs,state)}
+            offer=None
+            if state['response'].get('http_status')==503:
+                try:
+                    offer=provider_recovery_offer(store,base,grant,checkpoint(store,ledger) if saved else state,ledger)
+                except CompanyError as exc:
+                    if exc.code!='research_continuation_blocked':
+                        raise
+            if offer:
+                recovery_record,snapshot=offer
+                general['continuation_state']['observations']=snapshot['observations']
+                general['continuation_state']['sources']=snapshot['sources']
+                general['provider_recovery_offer']=dict(
+                    phase=recovery_record['phase'],receipt=recovery_record['receipt'],
+                    review_hash=digest(recovery_record),
+                    alternative=dict(provider='OpenRouter',status='candidate_only'))
+            elif state['response'].get('http_status')==503:
+                general['provider_recovery_blocked']=True
+            continuation=base.get('continuation',{})
+            if continuation.get('provider_recovery') and not state['observations']:
+                archived=parent_store(store,continuation).read('provider-recovery.json')
+                if archived and digest(archived['checkpoint'])==continuation['checkpoint_sha256']:
+                    for field in ('sources','observations'):
+                        general['continuation_state'][field]=archived['checkpoint'][field]
     recovery = replan = supervision = None
     if ledger and not review and not base.get('mode'):
         _, tools, model, scope = available(workflow, project, inputs)
@@ -703,7 +807,7 @@ def status(workflow,project):
 
 
 def execute_research(store, credential, gemini, base, tools, model, *, history=(), proposal=None, preflight=None,
-                     provenance='provider_model_claim',work=None):
+                     provenance='provider_model_claim',work=None, preserved_result=None):
     rounds=len(model)-1 if base.get('adaptive_sample') else ROUNDS
     def check_before_send(check):
         check()
@@ -712,7 +816,12 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
 
     def accounted(operation,payload,execute):
         if continuation := base.get('continuation'):
-            require(payload not in continuation['excluded_payloads'],'research_continuation_blocked')
+            recovery=continuation.get('provider_recovery')
+            verified_replay=bool(recovery and operation['id']==recovery['operation'])
+            if verified_replay:
+                require(payload==recovery['receipt']['failed_payload_sha256'],'owner_policy_scope_changed')
+            require(payload not in continuation['excluded_payloads'] or verified_replay,
+                    'research_continuation_blocked')
         if work is None:
             return delegated_call(store,credential,operation,payload,execute)
         from research_work_scope import charge
@@ -739,7 +848,10 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
 
     if base.get('revision_plan') and not base.get('continuation',{}).get('report_only'):
         require(tools,'research_collection_unavailable')
-    if base.get('continuation'):
+    if preserved_result is not None:
+        result=preserved_result
+        store.write('research-result.json',result)
+    elif base.get('continuation'):
         # Collect only approved unused options. Report-only scopes have no collection tools.
         observations=list(history)
         if base.get('diverse_games') or base.get('verified_mobile_report'):
@@ -819,12 +931,30 @@ def action(workflow,pid,name,body):
             from general_research_report import review as owner_review
             if name=='research-checkpoint':
                 from general_research_continuation import checkpoint, choose
-                exact(body,('route',))
+                route=body.get('route')
+                exact(body,('route','review_hash','source','reference','confirmed') if route=='provider_recovery' else ('route',))
                 source=research_store(workflow.store.root,project,base)
                 require(source.read('policy.json') and not source.read('manager-review.json'),
                         'research_continuation_blocked')
-                state=checkpoint(source,source.attempts())
-                if body['route']=='collect':
+                ledger=source.attempts()
+                state=checkpoint(source,ledger)
+                if route=='provider_recovery':
+                    from goal_dialogue import safe_text
+                    offer=provider_recovery_offer(source,base,source.read('policy.json'),state,ledger) if state else None
+                    require(offer and not source.read('provider-recovery.json') and body['confirmed'] is True
+                            and body['source'] in ('official_status','independent_review'),
+                            'research_continuation_blocked')
+                    record,snapshot=offer
+                    require(body['review_hash']==digest(record),'owner_policy_scope_changed')
+                    safe_text(body['reference'],480)
+                    require(body['reference'].strip(),'research_continuation_blocked')
+                    record['review']=dict(source=body['source'],reference=body['reference'],at=now(),
+                                          model_account_availability='unknown',attestation='owner_reported')
+                    record['goal_binding']={field:base[field] for field in ('mission','target','audience','constraints','output')}
+                    source.write('provider-recovery.json',dict(route=route,checkpoint=snapshot,
+                        checkpoint_sha256=digest(snapshot),recovery=record))
+                    return
+                if route=='collect':
                     require(not base.get('continuation') and not source.read('revoked.json')
                             and state and state['eligible']
                             and can_continue(workflow,project,inputs,state),
@@ -871,7 +1001,10 @@ def action(workflow,pid,name,body):
             return supervise(store, base, new_tools, new_scope, name, body, credential, gemini)
         if name in ACTIONS:
             return replan_action(store, base, tools, model, scope, name, body, credential, gemini)
+        provider_recovery=base.get('continuation',{}).get('provider_recovery')
         if name=='research-approve':
+            if provider_recovery:
+                checked_provider_recovery(store,base['continuation'],credential)
             exact(body,('confirmed','review_hash'))
             require(body['confirmed'] is True,'owner_policy_required')
             if base.get('mode'):
@@ -908,6 +1041,11 @@ def action(workflow,pid,name,body):
 
         exact(body, ())
         require(name == 'research-run', 'research_scope_invalid')
+        preflight=None
+        recovery_inputs=None
+        if provider_recovery:
+            preflight=lambda:checked_provider_recovery(store,base['continuation'],credential)
+            recovery_inputs=preflight()
         work=None
         if base.get('mode'):
             from research_work_scope import envelope, inherited, check_stage
@@ -924,9 +1062,13 @@ def action(workflow,pid,name,body):
         require(not store.attempts() and not store.read('research-result.json'), 'owner_policy_exhausted')
         require(grant['proposal'] == scope, 'owner_policy_scope_changed')
         history=()
+        preserved_result=None
         if continuation := base.get('continuation'):
-            history=continuation_source(store,continuation)['observations']
-            if base.get('previous'):
+            if recovery_inputs:
+                history,preserved_result=recovery_inputs
+            else:
+                history=continuation_source(store,continuation)['observations']
+            if base.get('previous') and preserved_result is None:
                 from general_research_report import versions
                 _,_,reports=versions(workflow,project)
                 prior=reports[-1]['report']
@@ -939,7 +1081,8 @@ def action(workflow,pid,name,body):
             previous=reports[-1]['report']['staff']['observations']
             sources=list(evidence_catalog(previous).values())
             history=(dict(tool='previous_report',option='saved',status='preserved',at=reports[-1]['report']['at'],sources=sources),)
-        return execute_research(store, credential, gemini, base, tools, model, history=history,work=work)
+        return execute_research(store, credential, gemini, base, tools, model, history=history,work=work,
+                                preflight=preflight,preserved_result=preserved_result)
 
 
 def reviewed_handoff(store,*,fresh=True):

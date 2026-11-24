@@ -43,7 +43,7 @@ def proposal(work,stage):
         units.extend(dict(id=f'{kind}-{i}',provider=kind,max_cost_usd=0) for i in range(count))
     phases=['approved_collection','staff_report','manager_review','owner_feedback_rewrite']
     if stage.get('checkpoint_report_only'):
-        phases=['staff_report','manager_review']
+        phases=['staff_report','manager_review'] if stage['max_model_calls']==2 else ['manager_review']
     return {**work.proposal(units),'limits':limits,'allowed':allowed,'provider_project':MISSION_ACCOUNT,
             'phases':phases,
             'gemini_inputs':['project_goal','constraints','approved_public_queries','observed_evidence',

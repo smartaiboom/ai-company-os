@@ -310,6 +310,8 @@ def official_supervision_scope(inputs, tools, scope):
 
 
 RESEARCH_ERROR_STAGES={
+    'supplement_response_shape':'step_validation',
+    'supplement_response_semantics':'step_validation',
     'gemini_request_contract_invalid':'preflight',
     'prepared_payload_changed':'preflight',
     'research_new_evidence_required':'step_validation',
@@ -325,7 +327,11 @@ RESEARCH_ERROR_STAGES={
 
 
 def linked_attempt(store, name, row):
-    if name == 'manager-replan':
+    supplement_step=re.fullmatch(r'research-(\d+)',name)
+    if supplement_step and (store.root/('supplement-step-'+supplement_step[1])).is_dir():
+        from research_supplement import SupplementWorker
+        worker=SupplementWorker(store.root/('supplement-step-'+supplement_step[1]),{})
+    elif name == 'manager-replan':
         from research_replanning import ReplanManager
         worker = ReplanManager(store.root/'manager', {})
     elif name.startswith('research-') and (store.root/'manager-review').is_dir() and name==max(
@@ -714,7 +720,12 @@ def status(workflow,project):
                 if configured:
                     gemini,search=research_credentials()
                     credential=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
-                supplement=supplement_status(followup[1],prior['report'],credential,configured)
+                repair=bool(followup[0].get('supplement_repair'))
+                supplement=supplement_status(followup[1],prior['report'],credential,configured,repair=repair)
+                if not repair and supplement['state']=='stopped':
+                    corrected=candidate(workflow,project,prior['report'],repair=True)
+                    if corrected:
+                        supplement['repair']=supplement_status(corrected[1],prior['report'],credential,configured,repair=True)
                 general['supplement']=supplement
                 if base.get('supplement_of') and history[-1]['report']['version']<base['version']:
                     return dict(**general,status=supplement['state'],diagnostics=supplement.get('diagnostics'))
@@ -945,13 +956,13 @@ def action(workflow,pid,name,body):
         base=inputs[0]
         if base.get('mode'):
             from general_research_report import review as owner_review
-            if name in ('research-supplement-approve','research-supplement-run','research-supplement-revoke','research-supplement-close'):
+            if name in ('research-supplement-approve','research-supplement-repair-approve','research-supplement-run','research-supplement-revoke','research-supplement-close'):
                 from general_research_report import versions
                 from research_supplement import candidate, dispatch
                 _,_,reports=versions(workflow,project)
                 require(reports and reports[-1]['decision'] is None,'general_report_changed')
                 prior=reports[-1]['report']
-                followup=candidate(workflow,project,prior)
+                followup=candidate(workflow,project,prior,repair=name=='research-supplement-repair-approve')
                 require(followup,'research_scope_invalid')
                 configured=general_ready()
                 require(configured or name in ('research-supplement-close','research-supplement-revoke'),

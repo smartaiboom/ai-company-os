@@ -20,7 +20,7 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
-RESEARCH_ACTIONS = ('research-supplement-approve', 'research-supplement-run', 'research-supplement-revoke', 'research-supplement-close', 'research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
+RESEARCH_ACTIONS = ('research-supplement-approve', 'research-supplement-repair-approve', 'research-supplement-run', 'research-supplement-revoke', 'research-supplement-close', 'research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
                     'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke',
                     'research-replan-approve', 'research-replan-run', 'research-replan-revoke',
                     'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke',
@@ -47,6 +47,8 @@ PRODUCTION_ACTIONS = ('production-plan-prepare','production-plan-consent','produ
                       'production-voice-prepare','production-voice-consent','production-voice-run',
                       'production-clip-import','production-render')
 RESEARCH_ERRORS = {
+    'supplement_response_shape': 'Gemini 보완 응답의 필드 또는 구조가 계약과 일치하지 않습니다.',
+    'supplement_response_semantics': '관리자 지시와 도구 또는 완료 기준이 일치하지 않습니다.',
     'supervision_previous_scope': '이전 감독 승인 또는 예약이 남아 있어 새 계약으로 실행할 수 없습니다.',
     'supervision_blocked': '기존 보류와 서명된 검토 기록을 확인할 수 없어 새 보완 업무가 차단됐습니다.',
     'replan_blocked': '중단 기록이나 승인 조건을 확인할 수 없어 새 업무를 시작할 수 없습니다.',

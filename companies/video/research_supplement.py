@@ -1,4 +1,5 @@
 """One approved manager–employee improvement pass over a completed research report."""
+from datetime import datetime
 from functools import partial
 import os
 import re
@@ -19,6 +20,7 @@ from web_research import TAVILY, evidence_catalog, research_report, tavily_searc
 TOOLS=('youtube','web','official_listing')
 CONTRACT='manager_staff_recheck_v2'
 CONTINUATION_CONTRACT='manager_staff_recheck_v3_scope_continuation'
+CORRECTED_CONTRACT='manager_staff_recheck_v4_blocker_contract'
 PLAN_SCHEMA=obj(decision=obj(action=enum(*ACTIONS),tools=arr(enum(*TOOLS)),reason=S,next_step=S,success_criteria=S))
 
 
@@ -93,7 +95,7 @@ class SupplementWorker(ProductionManager):
             self.validate(value)
 
 
-def candidate(workflow,project,report,*,repair=False,continuation=False):
+def candidate(workflow,project,report,*,repair=False,continuation=False,correction=False):
     if (report['manager']['action']!='hold' or 'game_evidence' not in report or 'supplement_of' in report
             or len({row['game'] for row in report['game_evidence'].values()})>=TARGET):
         return None
@@ -114,8 +116,15 @@ def candidate(workflow,project,report,*,repair=False,continuation=False):
         continued={**base,'supplement_continuation':held}
         successor=research_store(workflow.store.root,project,continued)
         if continuation or successor.read('policy.json'):
-            return continued,successor
-    if not continuation:
+            failed=blocker_contract_failure(successor)
+            if failed:
+                corrected={**continued,'supplement_blocker_correction':failed}
+                child=research_store(workflow.store.root,project,corrected)
+                if correction or child.read('policy.json'):
+                    return corrected,child
+            if not correction:
+                return continued,successor
+    if not continuation and not correction:
         return base,source
 
 
@@ -172,10 +181,44 @@ def legacy_contract_failure(store):
                 ledger_sha256=digest(ledger),failed_payload_sha256=row['reservation']['payload_sha256'])
 
 
-def offer(store,prior,*,repair=False,continuation=False):
+
+def blocker_contract_failure(store):
+    from research_workflow import linked_attempt
+
+    grant=store.read('policy.json')
+    if (not grant or grant['proposal'].get('supplement_contract')!=CONTINUATION_CONTRACT
+            or store.read('revoked.json') or store.read('supplement-closed.json')):
+        return None
+    ledger=store.attempts()
+    row=ledger.get('research-0')
+    if (len(ledger)!=1 or not row or (row['result'] or {}).get('status')!='failed_or_uncertain'
+            or row['reservation']['policy_hash']!=digest(grant)):
+        return None
+    attempt=linked_attempt(store,'research-0',row)
+    rejection=(attempt or {}).get('decision_rejection') or {}
+    receipt=((row['result'] or {}).get('diagnostics') or {}).get('decision_receipt')
+    if (not attempt or not receipt or attempt.get('reason')!='supplement_response_semantics'
+            or rejection.get('rule')!='supplement_blocker_mismatch' or attempt.get('response_received') is not True
+            or attempt.get('http_status') is not None or attempt.get('provider_response')
+            or type((attempt.get('usage') or {}).get('total_tokens')) is not int
+            or (attempt['model'],attempt['endpoint'])!=(MODEL,ENDPOINT)
+            or receipt!=dict(attempt_id=attempt['id'],total_tokens=attempt['usage']['total_tokens'],**rejection)):
+        return None
+    return dict(source_input_sha256=store.binding['input_sha256'],policy_sha256=digest(grant),
+                ledger_sha256=digest(ledger),failed_payload_sha256=row['reservation']['payload_sha256'])
+
+
+def correction_parent(store,receipt,credential):
+    from research_workflow import parent_store
+
+    parent=parent_store(store,{'source_sha256':receipt['source_input_sha256']})
+    require(blocker_contract_failure(parent)==receipt,'owner_policy_scope_changed')
+    return parent.active(credential)
+
+def offer(store,prior,*,repair=False,continuation=False,correction=False):
     missing=TARGET-len({row['game'] for row in prior['game_evidence'].values()})
     steps=missing*ACTIONS_PER_MISSING_GAME
-    reconsiderations=int(continuation)
+    reconsiderations=int(continuation and not correction)
     model_inputs=['project_goal','constraints','staff_and_manager_outputs','observed_evidence','research_instructions']
     if continuation:
         model_inputs+=['prior_manager_scope_judgment','approved_scope_and_remaining_budget']
@@ -188,7 +231,7 @@ def offer(store,prior,*,repair=False,continuation=False):
             unit(f'youtube-videos-{i}','youtube_data_api_v3',YOUTUBE+'videos',['public_video_ids']),
             unit(f'supplement-web-{i}','tavily_researcher_basic',TAVILY,['public_game_keywords']),
             unit(f'listing-page-{i}',HOST,'https://'+HOST,['public_app_listing_path'])))
-    return {**store.proposal(units),'supplement_contract':CONTINUATION_CONTRACT if continuation else CONTRACT,
+    return {**store.proposal(units),'supplement_contract':(CORRECTED_CONTRACT if correction else CONTINUATION_CONTRACT if continuation else CONTRACT),
             'purpose':('development_scope_continuation' if continuation
                        else 'development_live_revalidation' if repair else 'research_improvement'),
             'prior_report_sha256':prior['sha256'],'provider_project':MISSION_ACCOUNT,
@@ -199,8 +242,8 @@ def offer(store,prior,*,repair=False,continuation=False):
                     'No downloads, scripts, production, publication or paid fallback.'}
 
 
-def status(store,prior,credential,configured,*,repair=False,continuation=False):
-    proposal=offer(store,prior,repair=repair,continuation=continuation)
+def status(store,prior,credential,configured,*,repair=False,continuation=False,correction=False):
+    proposal=offer(store,prior,repair=repair,continuation=continuation,correction=correction)
     grant=store.read('policy.json')
     view=dict(proposal=proposal,initial_plan=store.read('supplement-initial-plan.json'),
               scope_comparison=store.read('supplement-scope-comparison.json'),plan=store.read('supplement-plan.json'),outcome=store.read('supplement-outcome.json'),
@@ -217,7 +260,8 @@ def status(store,prior,credential,configured,*,repair=False,continuation=False):
     if view['outcome'] or ledger:
         return dict(view,state='complete' if store.read('manager-review.json') else 'stopped')
     try:
-        require(grant['proposal']==proposal,'owner_policy_scope_changed')
+        require(grant['proposal']==proposal or correction and grant['proposal']['supplement_contract']==CORRECTED_CONTRACT,
+                'owner_policy_scope_changed')
         store.active(credential)
     except CompanyError as exc:
         return dict(view,state='blocked',reason=exc.code)
@@ -234,7 +278,8 @@ def dispatch(store,base,prior,credential,gemini,search,body,name):
         require(check(source)==receipt,'owner_policy_scope_changed')
         if name not in ('research-supplement-close','research-supplement-revoke'):
             source.check_credential(source.read('policy.json'),credential)
-    options=dict(repair=bool(receipt and not continuation),continuation=bool(continuation))
+    correction=base.get('supplement_blocker_correction')
+    options=dict(repair=bool(receipt and not continuation),continuation=bool(continuation),correction=bool(correction))
     proposal=offer(store,prior,**options)
     if name=='research-supplement-close':
         exact(body,())
@@ -247,6 +292,7 @@ def dispatch(store,base,prior,credential,gemini,search,body,name):
         exact(body,())
         return store.revoke()
     if name.endswith('-approve'):
+        require(not correction,'research_scope_invalid')
         expected=('research-supplement-continuation-approve' if continuation
                   else 'research-supplement-repair-approve' if receipt else 'research-supplement-approve')
         require(name==expected,'research_scope_invalid')
@@ -254,6 +300,21 @@ def dispatch(store,base,prior,credential,gemini,search,body,name):
         require(body['confirmed'] is True,'owner_policy_required')
         return store.approve(proposal,body['review_hash'],credential)
     exact(body,())
+    if correction:
+        require(name=='research-supplement-contract-run','research_scope_invalid')
+        parent=correction_parent(store,correction,credential)
+        remaining=(datetime.fromisoformat(parent['expires_at'])-datetime.fromisoformat(now())).total_seconds()
+        require(remaining>2,'owner_policy_expired')
+        expected=parent['proposal']
+        require(all(operation in expected['units'] for operation in proposal['units'])
+                and proposal['limits']['gemini']==expected['limits']['gemini']-1,
+                'owner_policy_scope_changed')
+        proposal.update(valid_hours=(remaining-1)/3600,correction_source_sha256=digest(correction))
+        store.approve(proposal,digest(proposal),credential)
+        require(datetime.fromisoformat(store.read('policy.json')['expires_at'])<=datetime.fromisoformat(parent['expires_at']),
+                'owner_policy_scope_changed')
+    else:
+        require(name=='research-supplement-run','research_scope_invalid')
     grant=store.active(credential)
     require(grant['proposal']==proposal,'owner_policy_scope_changed')
     require(not store.attempts() and not store.read('supplement-outcome.json'),'owner_policy_exhausted')
@@ -268,13 +329,20 @@ def evidence_input(observations):
 def action_option(value,leads):
     kind,option=value['tool'],value['option']
     if kind=='finish':
-        require(option=='','research_step_invalid')
+        if option!='':
+            raise DecisionViolation('research_step_invalid','supplement_finish_option_not_empty')
     elif kind=='official_listing':
-        require(option in leads,'research_evidence_invalid')
+        if option not in leads:
+            raise DecisionViolation('research_evidence_invalid','supplement_listing_not_observed')
     else:
-        safe_text(option,120)
-        require(option==option.strip() and not re.search(r'https?://|[@/\\<>]|tvly-|sk-',option,re.I),
-                'research_step_invalid')
+        try:
+            safe_text(option,120)
+        except CompanyError:
+            raise DecisionViolation('research_step_invalid','supplement_query_invalid_text') from None
+        if option!=option.strip():
+            raise DecisionViolation('research_step_invalid','supplement_query_whitespace')
+        if re.search(r'https?://|[@/\\<>]|tvly-|sk-',option,re.I):
+            raise DecisionViolation('research_step_invalid','supplement_query_not_public_keywords')
 
 
 
@@ -330,7 +398,11 @@ def execute(store,base,prior,credential,gemini,search,proposal,*,provenance='pro
               'Metadata does not establish actual platform, Shorts classification, viewed opening, causality, popularity rank '
               'or editing rights. Keep those facts unverified. Research only.')
 
+    correction=base.get('supplement_blocker_correction')
+
     def send(operation,payload,call):
+        if correction:
+            correction_parent(store,correction,credential)
         delegated_call(store,credential,units[operation],payload,call)
 
     def model(index,context,schema,system,validate=None,wire=None,normalize=None):
@@ -339,8 +411,9 @@ def execute(store,base,prior,credential,gemini,search,proposal,*,provenance='pro
             contract['wire_schema']=wire
         worker=SupplementWorker(store.root/f'supplement-step-{index}',contract,validate,normalize)
         payload=digest(worker._payload(None))
-        if index==0 and base.get('supplement_repair'):
-            require(payload!=base['supplement_repair']['failed_payload_sha256'],'owner_policy_scope_changed')
+        previous=correction or base.get('supplement_repair')
+        if index==0 and previous:
+            require(payload!=previous['failed_payload_sha256'],'owner_policy_scope_changed')
         send(f'research-{index}',payload,lambda proof,check:run_worker(worker,gemini,proof,payload,check))
         return approved_manager_result(worker)
 
@@ -375,16 +448,23 @@ def execute(store,base,prior,credential,gemini,search,proposal,*,provenance='pro
             ' Set blocker to approval_only only if the sole obstacle is missing approval for the exact requested research tools. '
             'List those tools in requested_tools. Otherwise use [] for requested_tools and identify the true blocker. '
             'Do not report provider availability or quota as verified.')
+    if correction:
+        # The correction uses the reserved reconsideration allowance. The existing action
+        # contract already conveys the executable decision without redundant blocker fields.
+        schema=PLAN_SCHEMA
+        plan_context['contract_correction']='Use only action and its tools. Do not return blocker or requested_tools.'
+        plan_context['current_scope']['reconsideration_remaining']=False
+        instructions=instructions.split(' Set blocker',1)[0]+' Do not include blocker or requested_tools.'
     normalize=partial(normalize_plan,schema=schema)
     plan=model(0,plan_context,schema,instructions,validate_plan_assignment,normalize=normalize)['decision']
-    if continuation and plan['action'] in ('hold','ask_owner'):
+    if continuation and not correction and plan['action'] in ('hold','ask_owner'):
         current=approved_scope_state(store,credential,observations)
-        correction=scope_correction(plan,current)
-        store.write('supplement-scope-comparison.json',dict(at=now(),decision_sha256=digest(plan),**correction))
-        if correction['eligible']:
+        comparison=scope_correction(plan,current)
+        store.write('supplement-scope-comparison.json',dict(at=now(),decision_sha256=digest(plan),**comparison))
+        if comparison['eligible']:
             store.write('supplement-initial-plan.json',dict(decision=plan,at=now(),provenance=provenance))
             corrected={**plan_context,'goal':'Reconsider the manager approval premise','preceding_judgment':plan,
-                       'current_scope':current,'scope_comparison':correction}
+                       'current_scope':current,'scope_comparison':comparison}
             plan=model(steps+3,corrected,schema,instructions+
                 ' Reconsider only the approval premise using the signed scope and updated remaining budget. '
                 'Keep any genuine blocker. Make a fresh judgment.',

@@ -40,3 +40,14 @@ class SupplementResponseContractTests(TestCase):
             self.assertFalse(scope_correction(plan,{**scope,**changes})['eligible'])
         self.assertFalse(scope_correction({**plan,'blocker':'owner_judgment'},scope)['eligible'])
         self.assertFalse(scope_correction({**plan,'requested_tools':['official_listing']},scope)['eligible'])
+
+    def test_staff_action_rejection_records_only_a_fixed_rule(self):
+        from research_supplement import action_option
+        for kind,option,rule in (
+                ('finish','details','supplement_finish_option_not_empty'),
+                ('official_listing','invented','supplement_listing_not_observed'),
+                ('youtube',' a game','supplement_query_whitespace'),
+                ('web','https://example.invalid','supplement_query_not_public_keywords')):
+            with self.subTest(kind=kind), self.assertRaises(DecisionViolation) as exc:
+                action_option(dict(tool=kind,option=option),{})
+            self.assertEqual(exc.exception.rule,rule)

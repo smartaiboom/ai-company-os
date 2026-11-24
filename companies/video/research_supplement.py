@@ -255,12 +255,17 @@ def execute(store,base,prior,credential,gemini,search,proposal,*,provenance='pro
 
     plan=model(0,dict(goal='Plan research improvements',project=goal,criteria=criteria,
         staff_claims=prior['staff']['claims'],manager=prior['manager'],evidence=evidence_input(observations),
-        verified=verified_at(),tools=list(TOOLS),limits=proposal['limits']),
+        verified=verified_at(),tools=list(TOOLS),limits=proposal['limits'],
+        approval=dict(status='owner_approved',purpose=proposal['purpose'],scope=proposal['scope'],
+                      free_only=proposal['free_only'],max_cost_usd=proposal['max_cost_usd'])),
         PLAN_SCHEMA,
         'Return one decision object with action, tools, reason, next_step and success_criteria. '
         'For reinvestigate, tools must contain at least one listed tool. For hold, alternative or ask_owner, tools must be []. '
         'Keep all three explanation fields nonempty and concise. Describe the gap, its impact, an assignment and measurable criteria. '
-        'Actions other than reinvestigate require owner review and never dispatch staff. Keep the approved goal.',
+        'The owner has already approved the listed evidence collection scope and limits. '
+        'When a gap can be investigated within that scope, decide whether to assign the work without asking for the same approval. '
+        'Choose hold or ask_owner if a real blocker remains or the work requires authorization beyond this scope. '
+        'Actions other than reinvestigate never dispatch staff. Keep the approved goal.',
         validate_plan_assignment,normalize=normalize_plan)['decision']
     store.write('supplement-plan.json',dict(decision=plan,at=now(),provenance=provenance))
     if plan['action']!='reinvestigate':

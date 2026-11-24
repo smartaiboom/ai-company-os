@@ -191,6 +191,10 @@ class GeneralResearchTests(TestCase):
                         self.assertTrue(checkpoint['response']['response_schema_complexity_hint'])
                         self.assertGreater(checkpoint['response']['error_body_bytes'],0)
                     self.assertEqual(checkpoint['can_collect'],http==400)
+                    failure_types={400:'request_rejected',401:'authentication_or_permission',
+                                   403:'authentication_or_permission',429:'quota_or_billing',
+                                   503:'provider_unavailable',None:'transmission_uncertain'}
+                    self.assertEqual(stopped['diagnostics']['failure']['failure_type'],failure_types[http])
                     with self.assertRaises(CompanyError):
                         action('research-run')
                     if http==400:

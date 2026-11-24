@@ -79,6 +79,24 @@ class ManagerPlanOnceTests(unittest.TestCase):
             with self.assertRaisesRegex(CompanyError,'manager_plan_execution_disabled'):self.store.ask_ai(self.pid,api_key=self.key)
         self.http.assert_not_called();self.assertFalse(self.store.load(self.pid)['real_ai']['attempts'])
 
+    def test_unsupported_text_request_is_blocked_during_preparation(self):
+        payload=self.store._payload(None)
+        payload['generationConfig']['responseSchema']=payload['generationConfig']['responseJsonSchema']
+        with patch.object(self.store,'_payload',return_value=payload):
+            with self.assertRaisesRegex(CompanyError,'gemini_request_contract_invalid'):
+                self.store.prepare_consent(self.pid)
+        self.http.assert_not_called()
+        self.assertFalse(self.store.load(self.pid)['real_ai']['attempts'])
+
+    def test_changed_prepared_wire_is_blocked_before_transport(self):
+        self.approve()
+        path=self.store.path(self.pid).with_suffix('.payload.json')
+        path.write_bytes(path.read_bytes()+b' ')
+        with self.assertRaisesRegex(CompanyError,'prepared_payload_changed'):
+            self.ask()
+        self.http.assert_not_called()
+        self.assertFalse(self.store.load(self.pid)['real_ai']['attempts'])
+
     def test_one_plan_native_transport_and_all_followups_blocked(self):
         review=self.approve()
         def response(request,timeout):
@@ -120,6 +138,8 @@ class ManagerPlanOnceTests(unittest.TestCase):
             ('503', HTTPError('https://example.invalid',503,'private detail',None,
                               BytesIO(b'{"error":{"status":"UNAVAILABLE","message":"private detail"}}')),
              'request_open','provider_http','provider_failure'),
+            ('malformed', BytesIO(b'not JSON'), 'response_parse','response_invalid','provider_response_invalid'),
+            ('envelope', BytesIO(b'{}'), 'response_validate','unknown','provider_response_invalid'),
             ('contract', envelope(dict(action='wrong')), 'decision_validation','local_contract','provider_response_invalid'),
         )
         for name, error, stage, category, expected_kind in cases:
@@ -137,6 +157,12 @@ class ManagerPlanOnceTests(unittest.TestCase):
                 self.assertEqual(attempt['diagnostic'],dict(stage=stage,category=category))
                 self.assertEqual(attempt['status'],'uncertain')
                 self.assertEqual(failure_kind(attempt),expected_kind)
+                failure_types={'503':'provider_unavailable','contract':'local_validation_failed',
+                               'malformed':'response_parse_failed','envelope':'response_validation_failed'}
+                self.assertEqual(attempt['failure_type'],failure_types.get(name,'transmission_uncertain'))
+                raw=self.store.path(self.pid).with_suffix('.payload.json').read_bytes()
+                self.assertEqual(attempt['request_bytes'],len(raw))
+                self.assertEqual(attempt['wire_sha256'],hashlib.sha256(raw).hexdigest())
                 self.assertNotIn('private',json.dumps(attempt))
                 with self.assertRaises(CompanyError):
                     self.ask()

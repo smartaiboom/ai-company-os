@@ -25,6 +25,35 @@ class GeminiFreeAdapter:
         return Request(self.spec.base_url,data=body,method='POST',
                        headers={'Content-Type':'application/json','x-goog-api-key':api_key})
 
+    def validate_text_request(self, payload):
+        """Validate the text-only request shape used by signed live dialogue and workers."""
+        require(isinstance(payload,dict) and set(payload)=={'systemInstruction','contents','generationConfig'},
+                'gemini_request_contract_invalid')
+        contents=payload['contents']
+        require(isinstance(contents,list) and len(contents)==1 and isinstance(contents[0],dict)
+                and set(contents[0])=={'role','parts'} and contents[0]['role']=='user',
+                'gemini_request_contract_invalid')
+        system=payload['systemInstruction']
+        require(isinstance(system,dict) and set(system)=={'parts'},'gemini_request_contract_invalid')
+        for parts in (system['parts'],contents[0]['parts']):
+            require(isinstance(parts,list) and len(parts)==1 and isinstance(parts[0],dict)
+                    and set(parts[0])=={'text'} and isinstance(parts[0]['text'],str) and bool(parts[0]['text'].strip()),
+                    'gemini_request_contract_invalid')
+        config=payload['generationConfig']
+        require(isinstance(config,dict) and set(config)=={
+                    'maxOutputTokens','temperature','responseMimeType','responseJsonSchema'},
+                'gemini_request_contract_invalid')
+        maximum=config['maxOutputTokens']
+        temperature=config['temperature']
+        schema=config['responseJsonSchema']
+        require(type(maximum) is int and 1<=maximum<=self.spec.max_output_tokens
+                and type(temperature) in (int,float) and 0<=temperature<=2
+                and config['responseMimeType']=='application/json'
+                and isinstance(schema,dict)
+                and (schema.get('type')=='object' and isinstance(schema.get('properties'),dict)
+                     or isinstance(schema.get('anyOf'),list) and bool(schema['anyOf'])),
+                'gemini_request_contract_invalid')
+
     def response_metadata(self,response):return response_metadata(self.normalize(response))
 
     def prepare_payload(self,payload):

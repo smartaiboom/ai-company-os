@@ -25,7 +25,8 @@ def failure_kind(attempt):
         return 'provider_failure'
     if attempt.get('decision_rejection'):
         return 'decision_invalid'
-    if (reason.startswith(('owner_policy_', 'secret_', 'fixed_', 'invalid_acceptance_', 'invalid_account_'))
+    if (reason in ('gemini_request_contract_invalid','prepared_payload_changed')
+            or reason.startswith(('owner_policy_', 'secret_', 'fixed_', 'invalid_acceptance_', 'invalid_account_'))
             or reason in ('state_changed', 'production_project_key_unverified', 'production_manager_execution_disabled',
                           'gemini_unexpected_cost')):
         return 'policy_blocked'
@@ -34,6 +35,33 @@ def failure_kind(attempt):
     if attempt.get('response_received') or 'usage' in attempt or reason == 'invalid_manager_plan_schema':
         return 'provider_response_invalid'
     return 'outcome_uncertain'
+
+
+def gemini_failure_type(attempt):
+    """Detailed fixed labels alongside existing recovery categories."""
+    metadata=attempt.get('provider_response') or {}
+    status=metadata.get('status')
+    reason=metadata.get('reason')
+    http=metadata.get('http_status',attempt.get('http_status'))
+    if type(http) is int:
+        if 500<=http<=599:
+            return 'provider_unavailable'
+        if (http in (402,429) or status=='RESOURCE_EXHAUSTED'
+                or reason in ('BILLING_DISABLED','QUOTA_EXCEEDED','RATE_LIMIT_EXCEEDED')):
+            return 'quota_or_billing'
+        if http in (401,403) or reason in ('API_KEY_INVALID','API_KEY_SERVICE_BLOCKED'):
+            return 'authentication_or_permission'
+        return 'request_rejected' if 400<=http<=499 and http!=408 else 'transmission_uncertain'
+    if attempt.get('reason') in ('gemini_request_contract_invalid','prepared_payload_changed'):
+        return 'request_contract_invalid'
+    stage=(attempt.get('diagnostic') or {}).get('stage')
+    if stage=='response_parse':
+        return 'response_parse_failed'
+    if stage=='response_validate':
+        return 'response_validation_failed'
+    if stage=='decision_validation':
+        return 'local_validation_failed'
+    return 'transmission_uncertain' if failure_kind(attempt)=='outcome_uncertain' else None
 
 
 def correction_feedback(attempt, reservation, rules, choices, *, legacy=None):
@@ -70,6 +98,12 @@ def delegated_call(store, key, operation, payload_hash, execute):
             category = failure_kind({'reason': exc.code}) if isinstance(exc, CompanyError) else 'internal_error'
         details = getattr(exc, 'decision_receipt', None)
         diagnostics = dict(category=category)
+        failure_type=getattr(exc,'failure_type',None)
+        if failure_type is None and isinstance(exc,CompanyError) and exc.code in (
+                'gemini_request_contract_invalid','prepared_payload_changed'):
+            failure_type=gemini_failure_type({'reason':exc.code})
+        if failure_type:
+            diagnostics['failure_type']=failure_type
         if details:
             diagnostics['decision_receipt'] = details
         provider_response = getattr(exc, 'provider_response', None)

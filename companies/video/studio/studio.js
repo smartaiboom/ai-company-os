@@ -573,8 +573,21 @@ function researchErrorText(code,stage,diagnostics,general=false) {
   const failure=diagnostics?.failure;
   const categories={decision_invalid:'판단 규칙 위반',policy_blocked:'정책·권한 차단',internal_error:'검증 코드 오류',
     provider_failure:'공급자 오류 응답',provider_response_invalid:'공급자 응답 형식 오류',outcome_uncertain:'결과 미확정'};
-  const parts=[code,labels[stage],categories[failure?.category],failure?.rule].filter(Boolean);
+  const failureTypes={
+    request_rejected:'요청 거절 · 전송 계약과 공급자 오류를 검토하세요.',
+    request_contract_invalid:'로컬 요청 계약 차단 · 검토한 요청과 전송 본문을 대조하세요.',
+    authentication_or_permission:'인증·권한 오류 · 승인한 프로젝트와 키 권한을 확인하세요.',
+    quota_or_billing:'쿼터·청구 오류 · 무료 범위와 공급자 상태를 확인하세요.',
+    provider_unavailable:'공급자 서비스 오류 · 실행을 중단했습니다. 공급자 상태를 확인하세요.',
+    transmission_uncertain:'전송·결과 미확정 · 기존 예약을 보존하고 실행 상태를 검토하세요.',
+    response_parse_failed:'응답 JSON 파싱 실패 · 모델 응답 형식을 검토하세요.',
+    response_validation_failed:'공급자 응답 검증 실패 · 종료 상태와 사용량 계약을 검토하세요.',
+    local_validation_failed:'로컬 결과 검증 실패 · 응답 계약과 근거를 검토하세요.'
+  };
+  const parts=[code,labels[stage],failureTypes[failure?.failure_type]||categories[failure?.category],
+    failure?.rule].filter(Boolean);
   const response=failure?.provider_response;
+  if (Number.isInteger(response?.http_status)&&failure?.failure_type) parts.push(`HTTP ${response.http_status}${response.status?' '+response.status:''}`);
   if (response?.response_schema_complexity_hint) parts.push('공급자가 응답 스키마 복잡도를 언급했습니다.');
   else if (response?.response_schema_rejected) parts.push('공급자가 응답 스키마 필드를 표시했습니다.');
   if (info) {

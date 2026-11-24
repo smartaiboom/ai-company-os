@@ -6,7 +6,7 @@ import re
 
 from autonomous_company import CompanyError, digest, exact, now, parse, require
 from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config
-from decision_recovery import correction_call, correction_feedback, failure_kind
+from decision_recovery import correction_call, correction_feedback, failure_kind, gemini_failure_type
 from mission_production import ProductionManager, approved_manager_result, canonical_bytes, draft_id, production_keys
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import delegated_call, run_worker, unit
@@ -306,6 +306,8 @@ def official_supervision_scope(inputs, tools, scope):
 
 
 RESEARCH_ERROR_STAGES={
+    'gemini_request_contract_invalid':'preflight',
+    'prepared_payload_changed':'preflight',
     'research_new_evidence_required':'step_validation',
     'research_collection_unavailable':'preflight',
     'employee_web_failed_no_retry':'search_response',
@@ -373,7 +375,14 @@ def research_diagnostics(store, ledger):
                        response_received=None, operation=name,
                        category=((row['result'] or {}).get('diagnostics') or {}).get('category', 'outcome_uncertain'))
         attempt = linked_attempt(store, name, row) or {}
-        provider_response = attempt.get('provider_response') or ((row['result'] or {}).get('diagnostics') or {}).get('provider_response')
+        diagnostics=(row['result'] or {}).get('diagnostics') or {}
+        provider_response=attempt.get('provider_response') or diagnostics.get('provider_response')
+        if provider=='gemini':
+            failure_type=diagnostics.get('failure_type')
+            if not failure_type and (attempt or provider_response):
+                failure_type=gemini_failure_type(attempt or {'provider_response':provider_response})
+            if failure_type:
+                failure['failure_type']=failure_type
         if provider_response:
             failure['provider_response'] = provider_response
         if not attempt:

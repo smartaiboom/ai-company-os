@@ -4,6 +4,7 @@ Production transport stays disabled until account/key free-tier verification exi
 OneCallAcceptanceStore provides an isolated, signed, credential-bound exception; a key or env flag alone never enables it.
 """
 from copy import deepcopy
+from hashlib import sha256
 from datetime import datetime, timedelta
 import hmac
 import json
@@ -14,7 +15,7 @@ import uuid
 from urllib.request import build_opener, HTTPRedirectHandler
 from urllib.error import HTTPError, URLError
 
-from decision_recovery import DecisionViolation, failure_kind
+from decision_recovery import DecisionViolation, failure_kind, gemini_failure_type
 from autonomous_company import CompanyError, require, exact, digest, now, parse, fcntl
 from autonomous_live import LiveStore
 from autonomous_gemini35 import Gemini35Adapter, MODEL, ENDPOINT
@@ -145,6 +146,9 @@ class LiveDialogueStore(DialogueStore):
 
     def _wire_bytes(self, payload):return json.dumps(payload, ensure_ascii=False).encode()
 
+    def _verify_prepared_wire(self, p, raw_body, grant):
+        """Stores with a persisted reviewed wire body can enforce byte equality here."""
+
     def _proposal_path(self, draft_id):
         path = self.path(draft_id).with_suffix('.proposal.json')
         require(not path.is_symlink(), 'invalid_consent_path')
@@ -154,7 +158,9 @@ class LiveDialogueStore(DialogueStore):
         with self.lock(draft_id):
             p = self.load(draft_id); self._ready(p)
             payload = self._payload(p)
-            require(len(self._wire_bytes(payload)) <= 65536, 'dialogue_input_too_large')
+            Gemini35Adapter().validate_text_request(payload)
+            wire_bytes=self._wire_bytes(payload)
+            require(len(wire_bytes) <= 65536, 'dialogue_input_too_large')
             body = dict(id=uuid.uuid4().hex, draft_id=draft_id, store_root=str(self.root),
                         initial_state_hash=p['storage_hash'], input_hash=digest(self._context(p)),
                         payload_hash=digest(payload), policy=self._policy(p), calls=1,
@@ -162,7 +168,7 @@ class LiveDialogueStore(DialogueStore):
                         expires_at=(datetime.fromisoformat(now())+timedelta(hours=1)).isoformat())
             self.atomic(self._proposal_path(draft_id), body)
             result = dict(body=body, review_hash=digest(body), transmission=self._context(p),
-                          wire_payload=payload, request_bytes=len(self._wire_bytes(payload)))
+                          wire_payload=payload, request_bytes=len(wire_bytes))
             if isinstance(self, OneCallAcceptanceStore):
                 self.atomic(self.path(draft_id).with_suffix('.review.json'), result)
             return result
@@ -218,11 +224,14 @@ class LiveDialogueStore(DialogueStore):
             self._authorize_transport(p, api_key)
             adapter = Gemini35Adapter()
             payload = self._payload(p)
+            adapter.validate_text_request(payload)
             raw_body = self._wire_bytes(payload)
+            self._verify_prepared_wire(p, raw_body, grant)
             request = adapter.build_request(raw_body, api_key)
             require(api_key not in json.dumps(p, ensure_ascii=False) and api_key.encode() not in raw_body, 'secret_in_input')
             attempt = dict(id=uuid.uuid4().hex, grant_id=grant['id'], status='reserved', reserved_at=now(),
-                           input_hash=grant['input_hash'], payload_hash=grant['payload_hash'], model=MODEL, endpoint=ENDPOINT)
+                           input_hash=grant['input_hash'], payload_hash=grant['payload_hash'], model=MODEL, endpoint=ENDPOINT,
+                           request_bytes=len(raw_body), wire_sha256=sha256(raw_body).hexdigest())
             p['real_ai']['attempts'].append(attempt)
             p['rounds'] += 1; p['status'] = 'awaiting_proposal'
             self._event(p, 'gemini_request_reserved', attempt_id=attempt['id'])
@@ -238,11 +247,13 @@ class LiveDialogueStore(DialogueStore):
                 attempt['response_received'] = True
                 require(len(raw) <= 131072, 'response_too_large')
                 envelope = parse(raw.decode('utf-8'))
+                stage='response_validate'
                 normalized = adapter.normalize(envelope)
                 attempt['usage'] = normalized['usage']
                 self.save(p)
                 content = normalized['choices'][0]['message']['content']
                 require(api_key not in content, 'secret_in_response')
+                stage='response_parse'
                 value = parse(content)
                 # Keep validation atomic with successful attempt status; do not store raw model replies on failure.
                 candidate = deepcopy(p)
@@ -266,9 +277,11 @@ class LiveDialogueStore(DialogueStore):
                     attempt['provider_response'] = http_error_metadata(exc)
                 attempt.update(status='uncertain', finished_at=now(),
                                reason=exc.code if isinstance(exc, CompanyError) else 'transport_or_response_failed')
+                attempt['failure_type']=gemini_failure_type(attempt)
                 self._event(p, 'gemini_request_unresolved', attempt_id=attempt['id'])
                 error = CompanyError(attempt['reason'])
                 error.failure_category = failure_kind(attempt)
+                error.failure_type = attempt['failure_type']
                 if 'provider_response' in attempt:
                     error.provider_response = attempt['provider_response']
                 if isinstance(exc, DecisionViolation) and attempt.get('decision_rejection'):

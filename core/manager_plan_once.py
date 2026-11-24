@@ -92,6 +92,12 @@ class ManagerPlanAcceptanceStore(OneCallAcceptanceStore):
         require(hashlib.sha256(raw).hexdigest()==result['body']['payload_hash'],'wire_hash_mismatch')
         return result
 
+    def _verify_prepared_wire(self, p, raw_body, grant):
+        path=self.path(p['id']).with_suffix('.payload.json')
+        require(not path.is_symlink() and path.is_file() and path.stat().st_size==len(raw_body)
+                and path.read_bytes()==raw_body and hashlib.sha256(raw_body).hexdigest()==grant['payload_hash'],
+                'prepared_payload_changed')
+
     def verify_project_key(self,project_id,*,api_key,project_api_key,project,free_tier_confirmed=False,
                            billing_disabled=False,quota_available=False,official_docs_reviewed=False,operating_policy_hash=None):
         require(quota_available is True and official_docs_reviewed is True,'current_docs_and_quota_confirmation_required')

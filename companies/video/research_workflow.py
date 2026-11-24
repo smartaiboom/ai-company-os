@@ -366,7 +366,9 @@ def research_diagnostics(store, ledger):
     providers = {name: dict(reserved=0, completed=0, unresolved=0) for name in ('gemini', 'tavily')}
     failure = None
     for name, row in ledger.items():
-        provider = 'tavily' if name == 'general-web' else 'youtube' if name.startswith('youtube-') else 'gemini'
+        provider = ('tavily' if name=='general-web' or name.startswith('supplement-web-')
+                    else 'youtube' if name.startswith('youtube-')
+                    else 'public_listing' if name.startswith('listing-') else 'gemini')
         providers.setdefault(provider,dict(reserved=0,completed=0,unresolved=0))
         counts = providers[provider]
         counts['reserved'] += 1
@@ -375,7 +377,7 @@ def research_diagnostics(store, ledger):
             counts['completed'] += 1
             continue
         counts['unresolved'] += 1
-        failure = dict(stage='search_response' if provider in ('tavily','youtube') else 'model_response',
+        failure = dict(stage='search_response' if provider!='gemini' else 'model_response',
                        response_received=None, operation=name,
                        category=((row['result'] or {}).get('diagnostics') or {}).get('category', 'outcome_uncertain'))
         attempt = linked_attempt(store, name, row) or {}
@@ -702,6 +704,20 @@ def status(workflow,project):
         from general_research_report import versions
         _,_,history=versions(workflow,project)
         general=dict(general=True,reports=history,version=base['version'])
+        if history and (base.get('supplement_of') or history[-1]['decision'] is None):
+            from research_supplement import candidate, status as supplement_status
+            prior=history[-2] if base.get('supplement_of') and history[-1]['report']['version']==base['version'] else history[-1]
+            followup=candidate(workflow,project,prior['report'])
+            if followup:
+                configured=general_ready()
+                credential=None
+                if configured:
+                    gemini,search=research_credentials()
+                    credential=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
+                supplement=supplement_status(followup[1],prior['report'],credential,configured)
+                general['supplement']=supplement
+                if base.get('supplement_of') and history[-1]['report']['version']<base['version']:
+                    return dict(**general,status=supplement['state'],diagnostics=supplement.get('diagnostics'))
         if base.get('previous'):
             from general_research_report import evidence_branch
             prior=history[-1] if history[-1]['report']['version']<base['version'] else history[-2]
@@ -929,6 +945,22 @@ def action(workflow,pid,name,body):
         base=inputs[0]
         if base.get('mode'):
             from general_research_report import review as owner_review
+            if name in ('research-supplement-approve','research-supplement-run','research-supplement-revoke','research-supplement-close'):
+                from general_research_report import versions
+                from research_supplement import candidate, dispatch
+                _,_,reports=versions(workflow,project)
+                require(reports and reports[-1]['decision'] is None,'general_report_changed')
+                prior=reports[-1]['report']
+                followup=candidate(workflow,project,prior)
+                require(followup,'research_scope_invalid')
+                configured=general_ready()
+                require(configured or name in ('research-supplement-close','research-supplement-revoke'),
+                        'research_search_disabled')
+                gemini,search=research_credentials() if configured else (None,None)
+                credential=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')]) if configured else None
+                return dispatch(followup[1],followup[0],prior,credential,gemini,search,body,name)
+            if base.get('supplement_of'):
+                require(name=='research-report-review','research_scope_invalid')
             if name=='research-checkpoint':
                 from general_research_continuation import checkpoint, choose
                 route=body.get('route')

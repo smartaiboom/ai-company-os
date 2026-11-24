@@ -568,7 +568,7 @@ function budgetPanel(p) {
 }
 function researchErrorText(code,stage,diagnostics,general=false) {
   const labels={step_validation:'조사 도구 선택 검증',evidence_validation:'조사 근거 검증',
-    model_response:'Gemini 호출·응답',search_response:'Tavily 호출·응답',preflight:'승인·실행 조건 확인'};
+    model_response:'Gemini 호출·응답',search_response:'검색·공개 조회 응답',preflight:'승인·실행 조건 확인'};
   const info=diagnostics?.providers;
   const failure=diagnostics?.failure;
   const categories={decision_invalid:'판단 규칙 위반',policy_blocked:'정책·권한 차단',internal_error:'검증 코드 오류',
@@ -592,6 +592,8 @@ function researchErrorText(code,stage,diagnostics,general=false) {
   else if (response?.response_schema_rejected) parts.push('공급자가 응답 스키마 필드를 표시했습니다.');
   if (info) {
     parts.push(`Gemini 예약 ${info.gemini.reserved}회·완료 ${info.gemini.completed}회, Tavily 예약 ${info.tavily.reserved}회·완료 ${info.tavily.completed}회`);
+    if (info.youtube) parts.push(`YouTube 예약 ${info.youtube.reserved}회·완료 ${info.youtube.completed}회`);
+    if (info.public_listing) parts.push(`공개 페이지 예약 ${info.public_listing.reserved}회·완료 ${info.public_listing.completed}회`);
     if (failure?.response_received) {
       parts.push('Gemini 응답 수신 확인');
       if (Number.isInteger(failure.total_tokens)) parts.push(`기록 ${failure.total_tokens}토큰`);
@@ -845,7 +847,9 @@ function researchPanel(p) {
       ${r.revision_branch.route==='collect'?(r.revision_branch.uncertain?'새 자료 필요 여부 미확정 · 추가 조사 범위 선택 가능':'새 근거 수집 필요'):'기존 자료로 재작성'}
       · 기존 API 표본 ${h(r.revision_branch.available.metrics)}건 · 직접 확인 페이지 ${h(r.revision_branch.available.direct_pages)}건
       · 검색 단서 ${h(r.revision_branch.available.search_leads)}건</p>`:''}
+    ${researchSupplementPanel(r.supplement,p.readonly)}
     ${r.general?(r.reports||[]).map(({report,decision})=>`<details ${report.version===r.reports.at(-1).report.version?'open':''}><summary>보고서 v${h(report.version)} · ${decision?'대표 결정 기록':'대표 검토 대기'}</summary>
+      ${report.supplement_of?'<p>이전 보고서를 이어받아 관리자 지시로 보완한 버전입니다.</p>':''}
       ${report.revision?`<p>이전 v${h(report.revision.version)} 수정 요청 · ${h(report.revision.feedback)}</p>`:''}
       <p>${report.provenance==='offline_fixture'?'오프라인 모의 결과':'공급자 모델 결과'} ·
         공개 영상 길이 표본 ${h(report.duration_sample.join(', ')||'미확인')}${report.duration_sample.length?'초 · Shorts 여부 미확인':''}</p>
@@ -869,7 +873,7 @@ function researchPanel(p) {
       <p>영상 표본의 Shorts 분류·도입부 실제 화면·편집 권리는 공개 메타데이터로 확인할 수 없습니다.</p>
       ${report.manager.action==='hold'?'<p>미확인 사항 · 근거 부족으로 후보를 검증하지 못했습니다. 제안 길이와 화면 가능성은 가설입니다.</p>':''}
       ${decision?`<p>대표 결정 · ${h(({approve:'승인',revise:'수정 요청',reject:'반려'})[decision.action])} · ${h(decision.feedback)}</p>`:
-        `<button class="button" data-action="research-report-review">보고서 승인·수정·반려</button>`}
+        report.version===r.version&&r.status==='review'?'<button class="button" data-action="research-report-review">보고서 승인·수정·반려</button>':''}
       </details>`).join(''):''}
     ${researchRecoveryPanel(r.recovery,p.readonly)}
     ${researchReplanPanel(r.replan,p.readonly)}
@@ -884,8 +888,52 @@ function researchPanel(p) {
           · ${h(ref.origin || '원출처 미확인')} · ${h(ref.title)} · ${h(ref.excerpt)} · ${sourceLink(ref.url)}</p>`).join('')}`).join('')}</details>`:''}
     </section>`;
 }
+function researchSupplementPanel(s, readonly) {
+  if (!s) return '';
+  const limits=s.proposal.limits;
+  const plan=s.plan?.decision;
+  const status={available:'보완 업무 범위 검토 가능',setup_required:'무료 공급자 설정이 필요합니다.',
+    active:'승인 완료 · 시작 대기',blocked:'승인 조건 확인 필요',revoked:'승인 철회',
+    stopped:'보완 중단 · 대표 판단 필요',closed:'보완 종료 · 이전 보고서 검토',complete:'관리자 재검토 완료'};
+  const reasons={target_met:'3종의 근거 연결',budget_exhausted:'승인된 조사 상한 도달',
+    no_progress:'새 근거 없이 반복',duplicate_instruction:'같은 조사 요청 반복',
+    access_blocked:'공개 페이지 접근 정책 차단',staff_finished:'직원이 추가 조사 종료',
+    hold:'관리자 보류',ask_owner:'대표 판단 요청',alternative:'관리자 대안 제안'};
+  const actions={available:['approve','관리자 보완 범위 검토·승인'],active:['run','승인된 관리자 보완 시작']};
+  const action=actions[s.state];
+  return `<section class="subpanel"><h3>관리자 자율 보완</h3><p>${h(status[s.state])}</p>
+    <p>Gemini 최대 ${h(limits.gemini)}회 · 조사 선택 ${h(limits.collection_actions)}회 공동 한도 · 무료 전용 $0</p>
+    ${plan?`<p>${s.plan.provenance==='offline_fixture'?'모의 관리자 지시':'AI 관리자 지시'} · ${h(plan.next_step)}</p>
+      <p>판단 이유 · ${h(plan.reason)} · 완료 기준 · ${h(plan.success_criteria)}</p>`:''}
+    ${s.observations.length?`<details><summary>신규 관측 ${h(s.observations.length)}묶음</summary>
+      ${s.observations.map(row=>`<p>${h(row.query||row.tool)} · ${h(row.status)} · ${h(row.sources.length)}건
+        ${row.sources.map(ref=>sourceLink(ref.url)).join(' ')}</p>`).join('')}</details>`:''}
+    ${s.outcome?`<p>정책 판정 · ${h(reasons[s.outcome.reason]||s.outcome.reason)} · 근거 연결 ${h(s.outcome.game_count)}종</p>`:''}
+    ${s.diagnostics?.failure?`<p>${h(researchErrorText(s.diagnostics.failure.code,s.diagnostics.failure.stage,s.diagnostics,true))}</p>`:''}
+    ${!readonly&&action?`<button class="button secondary" data-action="research-supplement-${action[0]}">${action[1]}</button>`:''}
+    ${!readonly&&s.state==='active'?'<button class="button ghost" data-action="research-supplement-revoke">보완 승인 철회</button>':''}
+    ${!readonly&&['stopped','blocked','revoked'].includes(s.state)?'<button class="button ghost" data-action="research-supplement-close">보완 종료 및 이전 보고서 검토</button>':''}</section>`;
+}
 function researchCommand(action) {
   const p=detail, r=p.research;
+  if (action.startsWith('research-supplement-')) {
+    const s=r.supplement, limits=s.proposal.limits;
+    const approve=action.endsWith('-approve');
+    const title=approve?'관리자 보완 범위 검토·승인':action.endsWith('-run')?'승인된 관리자 보완 시작':action.endsWith('-close')?'보완 종료 및 이전 보고서 검토':'보완 승인 철회';
+    const fields=approve?`<p>Gemini 3.5 Flash-Lite · 프로젝트 ${h(s.proposal.provider_project)} · 최대 ${h(limits.gemini)}회
+      · 최초 관리자 지시, 직원 도구 선택·보고, 최종 관리자 검토 · 24시간 · 무료 전용 $0</p>
+      <p>직원 조사 선택은 도구 전체에서 최대 ${h(limits.collection_actions)}회입니다. 선택에 따라
+      YouTube 검색·상세 GET 각 최대 ${h(limits.youtube_search)}회, Tavily 최대 ${h(limits.tavily)}회,
+      App Store 공개 목록 최대 ${h(limits.official_listing)}회와 robots 조회 최대 1회가 가능합니다.</p>
+      <p>Gemini에 목표·제약·이전 보고와 관측 근거를, 검색 공급자에 직원이 고른 공개 게임 검색어와 영상 ID를 보냅니다.
+      App Store는 검색 결과에서 확인된 공개 앱 경로만 조회합니다. 공급자 잔량·청구는 미확인입니다.</p>
+      <label class="check"><input type="checkbox" name="confirmed" required>승인 범위, 무료 계정·한도 및 데이터 처리를 확인했습니다.</label>`:
+      '<p>승인한 보완 범위에 적용됩니다.</p>';
+    return modal(title,fields,title,async data=>{
+      await api(detailApi(p)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:s.review_hash}:{});
+      return {message:'보완 업무 상태를 갱신했습니다.'};
+    });
+  }
   if (action==='research-provider-recovery') {
     const offer=r.provider_recovery_offer;
     const title='독립 검토 기록 및 신규 범위 준비';
@@ -1192,7 +1240,7 @@ function nextWork(p,controlSource,selected) {
   if (p.readonly) return {message:'기존 검증 사례 · 읽기 전용'};
   if (p.research?.general) {
     const item=p.research;
-    const buttons=select('research-report-review','research-approve','research-run','research-provider-recovery');
+    const buttons=select('research-report-review','research-approve','research-run','research-provider-recovery','research-supplement-approve','research-supplement-run');
     const message={setup_required:'Gemini·Tavily 무료 설정과 YouTube 키를 확인하세요.',
       available:item.revision_branch?.route==='collect'?'저장된 수정 요청으로 추가 조사 범위를 검토하세요.':item.version>1?'수정 지시를 보존했습니다. 재작성 전송 범위를 승인하세요.':'조사 범위를 확인하고 승인하세요.',
       active:'승인된 조사·기획 작업을 실행할 수 있습니다.',review:'대표가 최신 조사·기획 보고서를 검토할 차례입니다.',

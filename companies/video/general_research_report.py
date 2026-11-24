@@ -118,11 +118,22 @@ def versions(workflow,project,*,through=None):
                     duration_sample=duration_sample(result['observations'],fresh_only=bool(base.get('adaptive_sample'))))
         if 'game_evidence' in review:
             report['game_evidence']=review['game_evidence']
+        if 'supplement_of' in base:
+            report['supplement_of']=base['supplement_of']
         report['sha256']=digest(report)
         decision=store.read('owner-review.json')
         require(not decision or decision['report_sha256']==report['sha256'],'general_report_changed')
         history.append(dict(report=report,decision=decision))
-        if version==through or not decision or decision['action']!='revise':
+        if version==through:
+            return base,store,history
+        if not decision:
+            from research_supplement import candidate
+            followup=candidate(workflow,project,report)
+            if followup and followup[1].read('policy.json') and not followup[1].read('supplement-closed.json'):
+                base=followup[0]
+                continue
+            return base,store,history
+        if decision['action']!='revise':
             return base,store,history
         base={**base_for(workflow,project),'previous':dict(version=version,report_sha256=report['sha256'],
             feedback=decision['feedback'],manager=report['manager'],staff_claims=result['claims'])}
@@ -166,7 +177,7 @@ def observed_metrics(result,*,fresh_only=False):
             for row in group['sources'] if row['scope']=='api_metric' and row['origin']=='youtube_data_api'}
 
 
-def manager_schema(result,*,collection=False,diverse=False):
+def manager_schema(result,*,collection=False,diverse=False,verified=None):
     catalog=evidence_catalog(result['observations'])
     refs={**arr(enum(*catalog) if catalog else S),'maxItems':min(3,len(catalog))}
     candidate=dict(title=S,rationale=S,length=S,visuals=S,source_ids=refs,rights=enum('unverified'))
@@ -175,22 +186,28 @@ def manager_schema(result,*,collection=False,diverse=False):
     usable=len(observed_metrics(result,fresh_only=collection))>=(3 if collection else 1)
     if diverse:
         from mobile_game_evidence import game_evidence
-        usable=len({row['game'] for row in game_evidence(result['observations'],result['at']).values()})>=3
+        linked=game_evidence(result['observations'],result['at']) if verified is None else verified
+        usable=len({row['game'] for row in linked.values()})>=3
     return obj(action=enum('hold','use_with_limits') if usable
                else enum('hold'),note=S,topics={**arr(obj(**candidate)),'minItems':3,'maxItems':3})
 
 
-def validate_manager(value,result,*,collection=False,diverse=False):
+def validate_manager(value,result,*,collection=False,diverse=False,verified=None):
     catalog=evidence_catalog(result['observations'])
     require(len({topic['title'].strip().casefold() for topic in value['topics']})==3,'general_report_changed')
     if diverse and value['action']=='use_with_limits':
-        from mobile_game_evidence import canonical_game,game_evidence
-        verified=game_evidence(result['observations'],result['at'])
-        games={canonical_game(topic['game']) for topic in value['topics']}
+        from mobile_game_evidence import canonical_game,game_evidence,normalized
+        if verified is None:
+            verified=game_evidence(result['observations'],result['at'])
+            game_name=canonical_game
+        else:
+            def game_name(value):
+                return canonical_game(value) or normalized(value)
+        games={game_name(topic['game']) for topic in value['topics']}
         require(len(games)==3 and None not in games,'research_evidence_invalid')
         for topic in value['topics']:
             keys=topic['source_ids']
-            require(keys and all(ref in verified and verified[ref]['game']==canonical_game(topic['game']) for ref in keys),
+            require(keys and all(ref in verified and verified[ref]['game']==game_name(topic['game']) for ref in keys),
                     'research_evidence_invalid')
     elif collection and value['action']=='use_with_limits':
         games={topic['game'].strip().casefold() for topic in value['topics']}

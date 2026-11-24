@@ -86,8 +86,11 @@ def assemble(project,history,store):
                         and re.fullmatch(r'[\w -]+',name) and clean_title(name,private)==name)
         if report.get('game_evidence') is not None:
             from mobile_game_evidence import canonical_game
+            from mobile_game_evidence import normalized
             canonical=canonical_game(name) if isinstance(name,str) else None
-            supported_name=bool(canonical and any(report['game_evidence'].get(ref,{}).get('game')==canonical
+            if report.get('supplement_of') and isinstance(name,str) and not canonical:
+                canonical=normalized(name)
+            supported_name=bool(canonical and clean_title(canonical,private)==canonical and any(report['game_evidence'].get(ref,{}).get('game')==canonical
                                                   for ref in refs))
             name=canonical
         if supported_name:
@@ -125,23 +128,31 @@ def assemble(project,history,store):
     if report.get('game_evidence') is not None:
         from mobile_game_evidence import MOBILE_GAMES
         verified={}
+        from mobile_catalog_evidence import listing_id
         for ref,row in report['game_evidence'].items():
             game=row['game']
-            if ref in labels and game in MOBILE_GAMES and row['platform_source']==MOBILE_GAMES[game][1]:
-                verified.setdefault(game,[]).append(labels[ref])
+            url=row['platform_source']
+            known=game in MOBILE_GAMES and url==MOBILE_GAMES[game][1]
+            app_listing=report.get('supplement_of') and listing_id(url)
+            if ref in labels and (known or app_listing) and clean_title(game,private)==game:
+                verified.setdefault((game,url),[]).append(labels[ref])
         lines+=['','## 게임별 연결 근거','',
                 '공식 출처는 모바일 지원을 확인한다. 영상의 실제 플랫폼은 미확인이다.']
-        for game,refs in verified.items():
-            lines.append(f'- {game} · 관측 {", ".join(refs)} · [공식 모바일 지원]({MOBILE_GAMES[game][1]})')
+        for (game,url),refs in verified.items():
+            lines.append(f'- {game} · 관측 {", ".join(refs)} · [공식 모바일 지원]({url})')
     lines+=['','## 미확인 사항과 실행 요약','',
             '- 공개 메타데이터는 실제 시청, Shorts 분류, 편집·게시 권리, 전체 인기 순위를 확인하지 않는다.']
     counts={}
     for unit,item in store.attempts().items():
-        vendor='YouTube' if unit.startswith('youtube-') else 'Tavily' if unit=='general-web' else 'Gemini'
+        vendor=('YouTube' if unit.startswith('youtube-') else 'Tavily' if unit=='general-web' or unit.startswith('supplement-web-')
+                else 'App Store 공개 페이지' if unit.startswith('listing-') else 'Gemini')
         counts.setdefault(vendor,[0,0])
         counts[vendor][0]+=1
         counts[vendor][1]+=int((item['result'] or {}).get('status')=='completed')
-    for name in ('Gemini','Tavily','YouTube'):
+    names=('Gemini','Tavily','YouTube')
+    if report.get('supplement_of'):
+        names+=('App Store 공개 페이지',)
+    for name in names:
         reserved,completed=counts.get(name,(0,0))
         lines.append(f'- {name} · 예약 {reserved}회 / 완료 {completed}회')
     if len(history)>1:

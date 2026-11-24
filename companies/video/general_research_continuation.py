@@ -38,7 +38,7 @@ def checkpoint(store, ledger):
 
 def choose(store, state, route):
     require(state and not store.read('continuation.json') and
-            (route == 'hold' or route == 'collect' and state['eligible']), 'research_continuation_blocked')
+            (route == 'hold' or route in ('collect', 'report') and state['eligible']), 'research_continuation_blocked')
     record = dict(route=route, checkpoint=state, checkpoint_sha256=digest(state), at=now())
     store.write('continuation.json', record)
     return record

@@ -277,7 +277,7 @@ def available(workflow,project,inputs,search_key=None,*,history=()):
     if extras:
         scope['max_youtube_requests']=len(extras)
     if continuation := base.get('continuation'):
-        tools=unused_collection(tools,continuation)
+        tools={} if continuation.get('report_only') else unused_collection(tools,continuation)
         collection_units=[operation for tool in tools.values()
                           for operation in (tool.requests or (tool.operation,))]
         scope.update(units=[*collection_units,model[rounds-1],model[-1]],max_model_calls=2,
@@ -286,6 +286,8 @@ def available(workflow,project,inputs,search_key=None,*,history=()):
                      tool_options=[tool.describe(set()) for tool in tools.values()],
                      continuation_sha256=continuation['checkpoint_sha256'])
         scope.pop('youtube_quota',None)
+        if continuation.get('report_only'):
+            scope['checkpoint_report_only']=True
     return store,tools,model,scope
 
 
@@ -569,6 +571,38 @@ def can_continue(workflow,project,inputs,checkpoint):
             set(checkpoint['excluded_units']).isdisjoint(operation['id'] for operation in model[-2:]))
 
 
+def can_resume_report(base,grant,state):
+    model_units=[item['id'] for item in grant['proposal']['units']
+                 if re.fullmatch(r'research-\d+',item['id'])]
+    model_units.sort(key=lambda name:int(name.split('-')[1]))
+    return (state['eligible'] and len(model_units)>=2 and state['failed']==model_units[-2:-1]
+            and grant['proposal'].get('decision_contract')!=GENERAL_CONTRACT_VERSION
+            and not base.get('continuation',{}).get('report_only'))
+
+
+def continuation_source(store,continuation):
+    source_hash=continuation['source_sha256']
+    source=OwnerOperatingPolicy(
+        store.root.parent/('research-'+store.binding['project']+'-'+source_hash[:20]),
+        {**store.binding,'input_sha256':source_hash})
+    transition=source.read('continuation.json')
+    route='report' if continuation.get('report_only') else 'collect'
+    require(transition and transition['route']==route and not source.read('revoked.json')
+            and digest(transition['checkpoint'])==continuation['checkpoint_sha256']
+            and digest(source.attempts())==transition['checkpoint']['ledger_sha256'],
+            'research_continuation_blocked')
+    return transition['checkpoint']
+
+
+def report_checkpoint(store,base,state):
+    if not base.get('continuation'):
+        return state
+    prior=continuation_source(store,base['continuation'])
+    observations=[*prior['observations'],*state['observations']]
+    return {**state,'observations':observations,'sources':len(evidence_catalog(observations)),
+            'excluded_payloads':sorted(set(prior['excluded_payloads']+state['excluded_payloads']))}
+
+
 def status(workflow,project):
     inputs=context(workflow,project)
     if inputs is None:
@@ -593,6 +627,8 @@ def status(workflow,project):
         general={}
     if base.get('continuation'):
         general['continued_from_checkpoint']=True
+        if base['continuation'].get('report_only'):
+            general['checkpoint_report_only']=True
     if not grant:
         if not (general_ready() if general else ready()):
             return dict(**general,status='setup_required')
@@ -626,6 +662,7 @@ def status(workflow,project):
             general['continuation_state']={
                 **{field:state[field] for field in ('completed','failed','sources','response','observations')},
                 'route':saved['route'] if saved else None, 'at':saved['at'] if saved else None,
+                'can_report':not saved and not store.read('revoked.json') and can_resume_report(base,grant,state),
                 'can_collect':not saved and state['eligible'] and not base.get('continuation')
                     and not store.read('revoked.json')
                     and can_continue(workflow,project,inputs,state)}
@@ -691,10 +728,10 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
             accounted(model[index],payload,execute)
         return approved_manager_result(worker)['decision']
 
-    if base.get('revision_plan'):
+    if base.get('revision_plan') and not base.get('continuation',{}).get('report_only'):
         require(tools,'research_collection_unavailable')
     if base.get('continuation'):
-        # Close the failed decision and collect only unused options in the new scope.
+        # Collect only approved unused options. Report-only scopes have no collection tools.
         observations=list(history)
         if base.get('diverse_games') or base.get('verified_mobile_report'):
             from mobile_game_evidence import game_evidence
@@ -783,6 +820,11 @@ def action(workflow,pid,name,body):
                             and state and state['eligible']
                             and can_continue(workflow,project,inputs,state),
                             'research_continuation_blocked')
+                if body['route']=='report':
+                    require(not source.read('revoked.json') and state
+                            and can_resume_report(base,source.read('policy.json'),state),
+                            'research_continuation_blocked')
+                    state=report_checkpoint(source,base,state)
                 return choose(source,state,body['route'])
             if name=='research-report-review':
                 return owner_review(workflow,project,body)
@@ -874,15 +916,7 @@ def action(workflow,pid,name,body):
         require(grant['proposal'] == scope, 'owner_policy_scope_changed')
         history=()
         if continuation := base.get('continuation'):
-            source_hash=continuation['source_sha256']
-            source=OwnerOperatingPolicy(store.root.parent/('research-'+pid+'-'+source_hash[:20]),
-                                       {**store.binding,'input_sha256':source_hash})
-            transition=source.read('continuation.json')
-            require(transition and transition['route']=='collect' and not source.read('revoked.json')
-                    and digest(transition['checkpoint'])==continuation['checkpoint_sha256']
-                    and digest(source.attempts())==transition['checkpoint']['ledger_sha256'],
-                    'research_continuation_blocked')
-            history=transition['checkpoint']['observations']
+            history=continuation_source(store,continuation)['observations']
             if base.get('previous'):
                 from general_research_report import versions
                 _,_,reports=versions(workflow,project)

@@ -41,8 +41,11 @@ def proposal(work,stage):
         limits['gemini']+=2
     for kind,count in limits.items():
         units.extend(dict(id=f'{kind}-{i}',provider=kind,max_cost_usd=0) for i in range(count))
+    phases=['approved_collection','staff_report','manager_review','owner_feedback_rewrite']
+    if stage.get('checkpoint_report_only'):
+        phases=['staff_report','manager_review']
     return {**work.proposal(units),'limits':limits,'allowed':allowed,'provider_project':MISSION_ACCOUNT,
-            'phases':['approved_collection','staff_report','manager_review','owner_feedback_rewrite'],
+            'phases':phases,
             'gemini_inputs':['project_goal','constraints','approved_public_queries','observed_evidence',
                              'prior_report_and_owner_feedback'],'initial_stage_sha256':digest(stage)}
 

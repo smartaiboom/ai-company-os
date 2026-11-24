@@ -92,15 +92,18 @@ def versions(workflow,project,*,through=None):
                         base['diverse_games']=[list(item) for item in base['diverse_games']]
                         store=research_store(workflow.store.root,project,base)
         transition=store.read('continuation.json')
-        if transition and transition['route']=='collect':
+        while transition and transition['route'] in ('collect','report'):
             saved=transition['checkpoint']
             require(digest(saved)==transition['checkpoint_sha256'],'general_report_changed')
             base={**base,'continuation':dict(source_sha256=digest(base), checkpoint_sha256=digest(saved),
                 excluded_units=saved['excluded_units'], excluded_payloads=saved['excluded_payloads'])}
+            if transition['route']=='report':
+                base['continuation']['report_only']=True
             base.pop('work_anchor',None)
             if base.get('adaptive_sample') and re.search(r'모바일|mobile',base['target'],re.I):
                 base['verified_mobile_report']=True
             store=research_store(workflow.store.root,project,base)
+            transition=store.read('continuation.json')
         result=store.read('research-result.json')
         review=store.read('manager-review.json')
         if not result or not review:

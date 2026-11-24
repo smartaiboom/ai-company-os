@@ -784,7 +784,7 @@ function researchSupervisionCommand(action, project) {
 function researchPanel(p) {
   const r=p.research;
   if (!r) return '';
-  const actions={available:['research-approve',r.revision_branch?.route==='collect'?'추가 조사 범위 검토·승인':'조사 범위 검토·승인'],active:['research-run',r.general?(r.revision_branch?.route==='collect'?'승인된 추가 조사 시작':r.version>1?'보고서 재작성 시작':'실제 조사 시작'):'웹·전문 자료 조사 실행']};
+  const actions={available:['research-approve',r.checkpoint_report_only?'보고서 작성 범위 검토·승인':r.revision_branch?.route==='collect'?'추가 조사 범위 검토·승인':'조사 범위 검토·승인'],active:['research-run',r.general?(r.checkpoint_report_only?'승인된 보고서 작성 시작':r.revision_branch?.route==='collect'?'승인된 추가 조사 시작':r.version>1?'보고서 재작성 시작':'실제 조사 시작'):'웹·전문 자료 조사 실행']};
   const action=actions[r.status];
   const exported=p.review_export;
   const checkpoint=r.continuation_state;
@@ -797,11 +797,12 @@ function researchPanel(p) {
     ${r.diagnostics?.failure?.code==='research_new_evidence_required'?'<p>직원이 신규 수집 전에 종료를 요청해 보고서 제출을 차단했습니다.</p>':''}
     ${checkpoint?`<p>완료 단계 ${h(checkpoint.completed.join(', ')||'없음')} · 중단 단계 ${h(checkpoint.failed.join(', '))} · 보존 출처 ${h(checkpoint.sources)}건</p>
       ${checkpoint.response.http_status?`<p>HTTP ${h(checkpoint.response.http_status)} ${h(checkpoint.response.status||'')} · 모델 출력·청구 미확인</p>`:''}
-      <p>${checkpoint.route==='hold'?'보류 기록을 저장했습니다.':checkpoint.can_collect?'미사용 조사 범위를 별도로 검토할 수 있습니다.':'현재 단계에서 외부 호출을 이어갈 수 없습니다.'} 기존 예약은 보존됩니다.</p>
+      <p>${checkpoint.route==='hold'?'보류 기록을 저장했습니다.':checkpoint.can_report?'보존 자료로 직원 보고와 관리자 검토 범위를 준비할 수 있습니다.':checkpoint.can_collect?'미사용 조사 범위를 별도로 검토할 수 있습니다.':'현재 단계에서 외부 호출을 이어갈 수 없습니다.'} 기존 예약은 보존됩니다.</p>
       ${checkpoint.observations.flatMap(o=>o.sources).map(ref=>`<p>${h(ref.title)} · ${sourceLink(ref.url)}</p>`).join('')}
       ${!p.readonly&&!checkpoint.route?`${checkpoint.can_collect?'<button class="button secondary" data-action="research-checkpoint-collect">보존 자료로 후속 조사 범위 준비</button>':''}
+        ${checkpoint.can_report?'<button class="button secondary" data-action="research-checkpoint-report">보존 자료로 보고서 작성 범위 준비</button>':''}
         <button class="button ghost" data-action="research-checkpoint-hold">보류 기록 저장</button>`:''}`:''}
-    ${r.continued_from_checkpoint&&['available','active'].includes(r.status)?'<p>저장된 관측을 이어받고 미사용 공개 질의만 수집합니다. 이전 요청은 재전송하지 않습니다.</p>':''}
+    ${r.continued_from_checkpoint&&['available','active'].includes(r.status)?r.checkpoint_report_only?'<p>보존 자료로 직원 보고와 관리자 검토를 진행합니다. 새 검색은 포함되지 않습니다.</p>':'<p>저장된 관측을 이어받고 미사용 공개 질의만 수집합니다. 이전 요청은 재전송하지 않습니다.</p>':''}
     ${r.general&&r.observations?.some(o=>o.tool.startsWith('youtube_sample')&&o.status==='empty')?
       '<p>일부 공개 질의에서 적격 표본을 얻지 못했습니다. 후보별 확인 여부는 관측 기록을 확인하세요.</p>':''}
     ${r.diagnostics?.failure?`<p>${h(researchErrorText(r.diagnostics.failure.code,r.diagnostics.failure.stage,r.diagnostics,r.general))}</p>`:''}
@@ -866,8 +867,8 @@ function researchPanel(p) {
 function researchCommand(action) {
   const p=detail, r=p.research;
   if (action.startsWith('research-checkpoint-')) {
-    const route=action.endsWith('-collect')?'collect':'hold';
-    const title=route==='collect'?'후속 조사 범위 준비':'보류 기록 저장';
+    const route=action.slice('research-checkpoint-'.length);
+    const title={collect:'후속 조사 범위 준비',report:'보존 자료 보고서 작성 범위 준비',hold:'보류 기록 저장'}[route];
     return modal(title,'<p>완료된 자료와 중단 상태를 로컬에 저장합니다. 외부 호출은 발생하지 않습니다.</p>',title,async ()=>{
       await api(detailApi(p)+'/research-checkpoint',{route});
       return {message:'조사 상태를 갱신했습니다.'};
@@ -898,14 +899,14 @@ function researchCommand(action) {
   const fields=approve?`<p>${r.work_scope?'현재 단계 · ':''}Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
     ${r.work_scope?`<p><strong>업무 총한도</strong> · Gemini ${h(r.work_scope.limits.gemini)}회 · Tavily ${h(r.work_scope.limits.tavily||0)}회
       · YouTube GET ${h(r.work_scope.limits.youtube||0)}회 · 24시간 · 무료 전용 $0</p>
-      <p>현재 단계와 후속 피드백 재작성 범위를 함께 승인합니다. 공급자 잔량과 실제 청구는 미확인입니다.</p>
+      <p>${r.checkpoint_report_only?'직원 보고와 관리자 검토를 승인합니다.':'현재 단계와 후속 피드백 재작성 범위를 함께 승인합니다.'} 공급자 잔량과 실제 청구는 미확인입니다.</p>
       <details><summary>공급자·모델·전송 자료와 프로젝트</summary><pre>${h(JSON.stringify({
         project:r.work_scope.provider_project,providers:r.work_scope.allowed,gemini_inputs:r.work_scope.gemini_inputs,
         phases:r.work_scope.phases
       },null,2))}</pre></details>`:''}
     ${proposal.youtube_quota?`<p>YouTube 업무 예산 · 검색 전용 버킷 ${h(proposal.youtube_quota.search_list)}회 ·
       영상 메타데이터 일반 버킷 ${h(proposal.youtube_quota.videos_list)}단위. 실제 잔량은 미확인입니다.</p>`:''}
-    ${proposal.revision_plan?`<p>신규 직원 작업 · 보존 자료와 수정 지시를 대조하고 공개 영상의 조회수·길이·시점·출처를 확인합니다.
+    ${proposal.revision_plan&&!r.checkpoint_report_only?`<p>신규 직원 작업 · 보존 자료와 수정 지시를 대조하고 공개 영상의 조회수·길이·시점·출처를 확인합니다.
       Tavily 자료는 단서로 취급하며 관리자 검토에서 게임별 신규 표본의 적합성과 미확인 항목을 표시합니다.</p>
       <p>계정 청구·실시간 잔량 미확인 · 무료 전용 $0 · 다운로드, 실제 화면 열람 및 편집 권리 인증 없음.</p>
       <p>전송 필드 · Gemini에는 기존 보고와 수정 요청, 승인된 목표·제약 및 발췌, Tavily에는 공개 질의,
@@ -921,8 +922,8 @@ function researchCommand(action) {
         review_hash:offer.review_hash
       },null,2))}</pre></details>`:''}
     <ul>${proposal.tool_options.map(t=>`<li>${h(t.name)} · ${h(Object.values(t.options).join(' / '))}</li>`).join('')}</ul>
-    <p>Tavily에 선택한 공개 검색어만, Google에 업무 범위·출처 발췌·조사 결과${recovery?'·규칙 코드와 이전 시도 참조':''}를 보냅니다.</p>
-    <label class="check"><input type="checkbox" name="confirmed" required>Tavily Researcher 및 결제·종량제 비활성, Google 무료 프로젝트와 잔여 한도 및 두 제공처의 데이터 처리를 확인했습니다.${r.general&&proposal.max_youtube_requests?' YouTube 무료 한도와 공개 메타데이터 이용 조건도 확인했습니다.':''}</label>`:
+    <p>${r.checkpoint_report_only?'Google에 보존된 업무 범위·출처 발췌·조사 결과':'Tavily에 선택한 공개 검색어만, Google에 업무 범위·출처 발췌·조사 결과'}${recovery?'·규칙 코드와 이전 시도 참조':''}를 보냅니다.</p>
+    <label class="check"><input type="checkbox" name="confirmed" required>${r.checkpoint_report_only?'Google 무료 프로젝트와 잔여 한도 및 데이터 처리를 확인했습니다.':'Tavily Researcher 및 결제·종량제 비활성, Google 무료 프로젝트와 잔여 한도 및 두 제공처의 데이터 처리를 확인했습니다.'}${r.general&&proposal.max_youtube_requests?' YouTube 무료 한도와 공개 메타데이터 이용 조건도 확인했습니다.':''}</label>`:
     action==='research-recovery-run'?'<p id="research-recovery-progress" role="status">승인한 범위에서 실행합니다.</p>':
       '<p>현재 서명 범위에 적용됩니다.</p>';
   modal(titles[action],fields,titles[action],async data=>{

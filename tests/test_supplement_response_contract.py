@@ -27,3 +27,16 @@ class SupplementResponseContractTests(TestCase):
             with self.subTest(changes=changes), self.assertRaises(DecisionViolation) as exc:
                 validate_plan_assignment(normalize_plan({**self.plan,**changes}))
             self.assertEqual(exc.exception.code,'supplement_response_semantics')
+
+    def test_reconsideration_requires_a_specific_covered_approval_issue(self):
+        from research_supplement import scope_correction
+        plan=dict(action='hold',blocker='approval_only',requested_tools=['youtube'])
+        scope=dict(approval='active',configured_tools=['youtube','official_listing'],
+                   reconsideration_remaining=True,gemini_remaining=11,collection_actions_remaining=8,
+                   listing_candidate_present=False)
+        self.assertTrue(scope_correction(plan,scope)['eligible'])
+        for changes in (dict(approval='expired'),dict(gemini_remaining=3),dict(collection_actions_remaining=0),
+                        dict(reconsideration_remaining=False),dict(configured_tools=[])):
+            self.assertFalse(scope_correction(plan,{**scope,**changes})['eligible'])
+        self.assertFalse(scope_correction({**plan,'blocker':'owner_judgment'},scope)['eligible'])
+        self.assertFalse(scope_correction({**plan,'requested_tools':['official_listing']},scope)['eligible'])

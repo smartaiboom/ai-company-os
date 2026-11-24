@@ -720,9 +720,16 @@ def status(workflow,project):
                 if configured:
                     gemini,search=research_credentials()
                     credential=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
-                repair=bool(followup[0].get('supplement_repair'))
-                supplement=supplement_status(followup[1],prior['report'],credential,configured,repair=repair)
-                if not repair and supplement['state']=='stopped':
+                continuation=bool(followup[0].get('supplement_continuation'))
+                repair=bool(followup[0].get('supplement_repair')) and not continuation
+                supplement=supplement_status(followup[1],prior['report'],credential,configured,
+                                             repair=repair,continuation=continuation)
+                if not continuation and supplement['state']=='stopped':
+                    continued=candidate(workflow,project,prior['report'],continuation=True)
+                    if continued:
+                        supplement['continuation']=supplement_status(
+                            continued[1],prior['report'],credential,configured,continuation=True)
+                if not repair and not continuation and supplement['state']=='stopped':
                     corrected=candidate(workflow,project,prior['report'],repair=True)
                     if corrected:
                         supplement['repair']=supplement_status(corrected[1],prior['report'],credential,configured,repair=True)
@@ -956,13 +963,14 @@ def action(workflow,pid,name,body):
         base=inputs[0]
         if base.get('mode'):
             from general_research_report import review as owner_review
-            if name in ('research-supplement-approve','research-supplement-repair-approve','research-supplement-run','research-supplement-revoke','research-supplement-close'):
+            if name in ('research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-run','research-supplement-revoke','research-supplement-close'):
                 from general_research_report import versions
                 from research_supplement import candidate, dispatch
                 _,_,reports=versions(workflow,project)
                 require(reports and reports[-1]['decision'] is None,'general_report_changed')
                 prior=reports[-1]['report']
-                followup=candidate(workflow,project,prior,repair=name=='research-supplement-repair-approve')
+                followup=candidate(workflow,project,prior,repair=name=='research-supplement-repair-approve',
+                                   continuation=name=='research-supplement-continuation-approve')
                 require(followup,'research_scope_invalid')
                 configured=general_ready()
                 require(configured or name in ('research-supplement-close','research-supplement-revoke'),

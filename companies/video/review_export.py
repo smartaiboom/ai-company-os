@@ -62,7 +62,8 @@ def public_sources(report,private):
 
 
 def decision(record):
-    return DECISIONS.get((record['decision'] or {}).get('action'),'검토 상태 미확인')
+    action=(record['decision'] or {}).get('action')
+    return '제한된 근거로 기획 인계' if action=='plan' else DECISIONS.get(action,'검토 상태 미확인')
 
 
 def assemble(project,history,store):

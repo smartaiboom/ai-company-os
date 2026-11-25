@@ -13,6 +13,7 @@ from urllib.parse import urlsplit
 
 from autonomous_company import CompanyError, Store, exact, require, digest, now
 from representative_workflow import RepresentativeVideoWorkflow, _file_hash
+from collaboration_handoff import ACTIONS as COLLABORATION_ACTIONS
 
 ASSETS = Path(__file__).with_name('studio')
 ROOT = Path('data/video_representative_workflow')
@@ -20,7 +21,7 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
-RESEARCH_ACTIONS = ('research-quality-approve', 'research-quality-run', 'research-quality-resume', 'research-quality-revoke', 'research-supplement-approve', 'research-supplement-repair-approve', 'research-supplement-continuation-approve','research-supplement-contract-run', 'research-supplement-resume-run', 'research-supplement-run', 'research-supplement-revoke', 'research-supplement-close', 'research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
+RESEARCH_ACTIONS = ('research-plan-handoff', 'research-quality-approve', 'research-quality-run', 'research-quality-resume', 'research-quality-revoke', 'research-supplement-approve', 'research-supplement-repair-approve', 'research-supplement-continuation-approve','research-supplement-contract-run', 'research-supplement-resume-run', 'research-supplement-run', 'research-supplement-revoke', 'research-supplement-close', 'research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
                     'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke',
                     'research-replan-approve', 'research-replan-run', 'research-replan-revoke',
                     'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke',
@@ -65,7 +66,12 @@ ERRORS = {
     'research_continuation_blocked': '새 조사 범위를 안전하게 이어갈 수 없습니다. 저장된 관측과 중단 기록을 확인하세요.',
     'research_collection_unavailable': '사용 가능한 신규 수집 도구가 없어 보류했습니다. 필요한 영상 표본과 원문은 미확인입니다.',
     'employee_web_failed_no_retry': 'YouTube 공개 조회가 실패하거나 미확정입니다. 새 영상 표본을 확보하지 못해 보류했습니다.',
-    'general_report_only':'이 프로젝트는 조사·기획 보고서 검토만 지원합니다.',
+    'general_report_only':'조사 보고서에서 대표 기획 인계 결정을 먼저 기록하세요.',
+    'collaboration_choice_invalid':'후보 또는 기획 방향을 선택하고 지원되는 길이와 근거 한계를 확인하세요.',
+    'collaboration_choice_required':'대표의 조사 인계 결정과 현재 작업 단계를 확인하세요.',
+    'collaboration_duplicate':'같은 인계 또는 수정 의견으로 이미 작업을 시작했습니다.',
+    'collaboration_internal_review_incomplete':'관리자 검토를 마친 기획·대본과 장면표가 필요합니다.',
+    'collaboration_candidate_changed':'직원 대본의 주제가 대표가 선택한 후보와 일치하지 않습니다.',
     'general_report_changed':'최신 조사 보고서와 검토 상태를 확인하세요.',
     'strategy_approval_required':'이 시범 제작 제안의 대표 승인과 실행 상태를 확인하세요.',
     'strategy_requires_separate_review':'추가 권리 또는 기획 검토가 필요한 제안입니다.',
@@ -271,7 +277,9 @@ class Studio:
                 review_export=generate(self.workflow,p)
             except (CompanyError,OSError,ValueError):
                 review_export=dict(local=False,shared=False)
-        return {**self.card(key, p), 'review_export':review_export, 'alternative':alternative, 'research':research, 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
+        from collaboration_handoff import state as collaboration_state
+        collaboration=collaboration_state(self.workflow,p) if key=='workspace' else None
+        return {**self.card(key, p), 'collaboration':collaboration, 'review_export':review_export, 'alternative':alternative, 'research':research, 'flow': flow, 'mission': mission, 'budget': self.budget_detail(key,p), 'budget_setup': self.budget_setup_view(key,p), 'rework': self.rework_view(key,p), 'revision_draft': draft, 'production': production,
                 'autonomous_production': autonomous_production,
                 'jobs': [dict(id=j['id'], status=j['status'], reason=j.get('reason_code'),
                               assignments=[dict(role=t['role'], state=t['state'], versions=len(t['versions']))
@@ -792,9 +800,12 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
-        if name not in RESEARCH_ACTIONS:
+        if name not in RESEARCH_ACTIONS+COLLABORATION_ACTIONS:
             from general_research_report import eligible
-            require(not eligible(self.workflow,self.project(key,pid)),'general_report_only')
+            current=self.project(key,pid)
+            flow=current['representative']
+            existing_mission=name=='mission' and flow.get('mission_one_job') and flow['stage']=='research_planning'
+            require(existing_mission or not eligible(self.workflow,current),'general_report_only')
         if name=='rework-quality-decide':
             self.rework_quality_decide(pid,body)
         elif name=='rework-finalize-recover':
@@ -803,6 +814,9 @@ class Studio:
         elif name in RESEARCH_ACTIONS:
             from research_workflow import action as research_action
             research_action(self.workflow,pid,name,body)
+        elif name in COLLABORATION_ACTIONS:
+            from collaboration_handoff import execute
+            execute(self.workflow,pid,name,body,**getattr(self,'collaboration_test_options',{}))
         elif name in MISSION_ACTIONS:
             self.mission_action(pid, name, body)
         elif name in ('rework-prepare','rework-new-prepare','rework-quality-prepare','rework-script-recover-prepare',
@@ -998,7 +1012,7 @@ def make_server(host, port, studio):
                     project = studio.project('workspace', match[1])
                     plan = matching_plan(project, body['version'], body['sha256'])
                     return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS+RESEARCH_ACTIONS+ALTERNATIVE_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS+RESEARCH_ACTIONS+COLLABORATION_ACTIONS+ALTERNATIVE_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
                     try:
                         result=studio.action(*match.groups(), body)
                     except CompanyError as exc:

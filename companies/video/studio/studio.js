@@ -131,7 +131,7 @@ function planPanel(p, plan, previous) {
   const script = plan.script;
   return `<section class="panel" id="plan-panel">
     <div class="panel-heading"><h2>${icon('script')} 기획·대본</h2>${versionSelect('plan',p.flow.plan_versions,plan)}</div>
-    <h3>${h(plan.topic)}</h3><p>${h(plan.summary)}</p>${facts([['목표 길이',script.target_duration+'초'],['첫 3초 후크',script.hook_0_3s],['시청자 문제',script.viewer_problem],['전달할 효용',script.payoff],['작성 출처',reportOrigin(plan)],['비용 한도',`$${plan.cost_limit_usd}`],['보고 시각',time(plan.reported_at)]])}
+    <h3>${h(plan.topic)}</h3><p>${h(plan.summary)}</p>${plan.research_handoff?`<p>조사 v${h(plan.research_handoff.report_version)}에서 인계 · ${h(plan.research_handoff.direction||'대표 선택 후보')}</p>`:''}${facts([['목표 길이',script.target_duration+'초'],['첫 3초 후크',script.hook_0_3s],['시청자 문제',script.viewer_problem],['전달할 효용',script.payoff],['작성 출처',reportOrigin(plan)],['비용 한도',`$${plan.cost_limit_usd}`],['보고 시각',time(plan.reported_at)]])}
     ${plan.research ? `<details class="subpanel" open><summary>조사 후보·선정 근거</summary>
       <p>${h(plan.research.selection_reason)}</p>
       ${plan.research.candidates.map(c=>`<p><strong>${h(c.topic)}</strong> · ${h(c.game ? c.game+' · ' : '')}${h(c.rationale)} · 쇼츠 성과 미검증${c.rights_plan ? ' · '+h(c.rights_plan) : ''}</p>`).join('')}
@@ -440,7 +440,20 @@ function productionPanel(p) {
     </section>`:''}
   </section>`;
 }
+function collaborationPanel(p) {
+  const state=p.collaboration;
+  if (!state || p.readonly) return '';
+  const action=state.status==='approval_required'?['collaboration-scope-approve','기획·대본 무료 범위 승인']:
+    state.status==='ready'?['collaboration-run',p.stage==='plan_revision'?'수정 의견으로 기획·대본 재작업':'관리자 배정과 기획·대본 시작']:null;
+  return `<section class="subpanel"><h3>조사에서 기획·대본으로</h3>
+    <p>조사 v${h(state.handoff.report_version)} · ${h(state.handoff.topic?.title||state.handoff.direction)}</p>
+    <p>${h(state.handoff.limits)}</p>
+    ${action?actionButton(action[0],action[1]):`<p>${h(state.current?.reason||state.status)}</p>`}
+    ${state.status==='ready'?actionButton('collaboration-scope-revoke','기획 범위 철회'):''}</section>`;
+}
+
 function operations(p) {
+  if (p.collaboration) return collaborationPanel(p);
   if (p.research?.general) return '';
   if (p.readonly) return '<p class="warning">기존 검증 사례 · 읽기 전용</p>';
   if (p.stage === 'completed') return '<p class="warning">최종 대표 승인이 기록되었습니다. 게시 작업은 별도입니다.</p>';
@@ -805,7 +818,7 @@ function researchPanel(p) {
   const checkpoint=r.continuation_state;
   const labels={setup_required:'무료 Tavily Researcher 계정과 서버 설정이 필요합니다.',
     available:'업무에 필요한 검색 또는 보존된 전문 자료를 직원이 선택합니다.',active:'승인한 범위 내에서 조사와 관리자 검토를 진행합니다.',
-    approved_report:'대표 승인 완료 · 조사·기획만 완료',rejected_report:'대표 반려 완료',
+    approved_report:'대표 승인 완료 · 조사 검토',handoff:'기획·대본 인계 결정 기록',rejected_report:'대표 반려 완료',
     review:'관리자가 조사 결과와 미확인 항목을 검토했습니다.',revoked:'조사 승인이 철회됐습니다.',
     expired:'조사 승인 유효 시간이 지났습니다.',contract_changed:'조사 계약이 바뀌었습니다. 기존 승인으로 실행할 수 없습니다.',stopped:'실패 또는 미확정 요청에서 조사를 중단했습니다.'};
   return `<section class="panel" id="cross-research"><h2>${r.general?'조사·기획 보고서':'웹·전문 자료 교차 조사'}</h2><p>${h(labels[r.status])}</p>
@@ -878,8 +891,10 @@ function researchPanel(p) {
       </details>
       <p>영상 표본의 Shorts 분류·도입부 실제 화면·편집 권리는 공개 메타데이터로 확인할 수 없습니다.</p>
       ${report.manager.action==='hold'?'<p>미확인 사항 · 근거 부족으로 후보를 검증하지 못했습니다. 제안 길이와 화면 가능성은 가설입니다.</p>':''}
-      ${decision?`<p>대표 결정 · ${h(({approve:'승인',revise:'수정 요청',reject:'반려'})[decision.action])} · ${h(decision.feedback)}</p>`:
+      ${decision?`<p>대표 결정 · ${h(({approve:'승인',revise:'수정 요청',reject:'반려',plan:'기획 인계'})[decision.action])} · ${h(decision.feedback)}</p>`:
         report.version===r.version&&r.status==='review'?'<button class="button" data-action="research-report-review">보고서 승인·수정·반려</button>':''}
+      ${!p.readonly&&!p.collaboration&&report.version===r.version&&['review','approved_report'].includes(r.status)?
+        '<button class="button secondary" data-action="research-plan-handoff">후보 선택 및 기획·대본 인계</button>':''}
       </details>`).join(''):''}
     ${researchRecoveryPanel(r.recovery,p.readonly)}
     ${researchReplanPanel(r.replan,p.readonly)}
@@ -989,6 +1004,22 @@ function researchCommand(action) {
       await api(detailApi(p)+'/research-checkpoint',{route});
       return {message:'조사 상태를 갱신했습니다.'};
     });
+  }
+  if (action==='research-plan-handoff') {
+    const report=r.reports.at(-1).report;
+    return modal('기획·대본 인계',`<label>후보 <select name="candidate">
+      <option value="">직접 방향 입력</option>${report.manager.topics.map((topic,i)=>`<option value="${i}">${h(topic.title)}</option>`).join('')}
+      </select></label>
+      <label>기획 방향·대본 요구<textarea name="direction" maxlength="1200"></textarea></label>
+      <label>목표 길이(초)<input name="duration" type="number" min="4" max="120" value="${h(p.flow.constraints.duration_seconds||60)}" required></label>
+      <label class="check"><input type="checkbox" name="goal_changed">기존 목표 변경을 기록합니다.</label>
+      <label class="check"><input type="checkbox" name="confirm_limits" required>미확인 근거와 권리 한계를 유지하며 기획을 진행합니다.</label>`,
+      '인계 결정 저장',async data=>{
+        await api(detailApi(p)+'/research-plan-handoff',{version:report.version,sha256:report.sha256,
+          candidate:data.get('candidate')===''?null:Number(data.get('candidate')),direction:data.get('direction'),
+          duration_seconds:Number(data.get('duration')),goal_changed:data.has('goal_changed'),confirm_limits:data.has('confirm_limits')});
+        return {message:'대표 기획 방향을 저장했습니다.'};
+      });
   }
   if (action==='research-report-review') {
     const report=r.reports.at(-1).report;
@@ -1270,9 +1301,11 @@ function nextWork(p,controlSource,selected) {
   const select=(...actions)=>actions.map(name=>controlSource.querySelector(`[data-action="${name}"]`)?.outerHTML||'').join('');
   const refresh=actionButton('refresh','상태 새로고침');
   if (p.readonly) return {message:'기존 검증 사례 · 읽기 전용'};
+  if (p.collaboration) return {message:'대표 기획 방향과 승인된 전송 범위를 확인하세요.',target:'work-detail',
+    buttons:select('collaboration-scope-approve','collaboration-run')||refresh};
   if (p.research?.general) {
     const item=p.research;
-    const buttons=select('research-quality-approve','research-quality-run','research-quality-resume','research-report-review','research-approve','research-run','research-provider-recovery','research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-resume-run','research-supplement-run');
+    const buttons=select('research-quality-approve','research-quality-run','research-quality-resume','research-report-review','research-plan-handoff','research-approve','research-run','research-provider-recovery','research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-resume-run','research-supplement-run');
     const message={setup_required:'Gemini·Tavily 무료 설정과 YouTube 키를 확인하세요.',
       available:item.revision_branch?.route==='collect'?'저장된 수정 요청으로 추가 조사 범위를 검토하세요.':item.version>1?'수정 지시를 보존했습니다. 재작성 전송 범위를 승인하세요.':'조사 범위를 확인하고 승인하세요.',
       active:'승인된 조사·기획 작업을 실행할 수 있습니다.',review:'대표가 최신 조사·기획 보고서를 검토할 차례입니다.',
@@ -1637,6 +1670,18 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action?.startsWith('collaboration-')) {
+    const p=detail, action=button.dataset.action, approve=action==='collaboration-scope-approve', revoke=action==='collaboration-scope-revoke', scope=p.collaboration;
+    modal(approve?'기획·대본 무료 범위 승인':revoke?'기획 범위 철회':'기획·대본 작업 시작',approve?
+      `<p>Gemini 3.5 Flash-Lite · ${h(scope.proposal.provider_project)} · 24시간 · 무료 전용 $0</p>
+      <p>목표, 대표 선택, 공개 조사 근거·한계, 기획·대본 및 수정 의견을 Gemini에 전송합니다. 같은 범위의 기획 재작업을 포함합니다.</p>
+      <label class="check"><input type="checkbox" name="confirmed" required>무료 프로젝트와 전송 범위를 확인했습니다.</label>`:
+      revoke?'<p>이후 기획·대본 전송을 중단합니다.</p>':'<p>관리자 기획과 직원 대본·장면표를 대표 검토용으로 작성합니다.</p>',
+      approve?'승인':revoke?'철회':'작업 시작',async data=>{
+        await api(detailApi(p)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:scope.review_hash}:{});
+        return {message:'기획·대본 작업 상태를 갱신했습니다.'};
+      });
+  }
   else if (button.dataset.action?.startsWith('research-')) researchCommand(button.dataset.action);
   else if (button.dataset.action?.startsWith('alternative-')) alternativeCommand(button.dataset.action);
   else if (button.dataset.action?.startsWith('production-')) productionCommand(button.dataset.action,button.dataset.scene);

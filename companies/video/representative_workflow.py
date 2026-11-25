@@ -31,6 +31,16 @@ def _match(versions, version, sha256):
     return report
 
 
+def portrait_script_spec(script, board, audio_mode):
+    spec=dict(tool=PORTRAIT_TOOL,width=720,height=1280,series='승인 대본 기술 시안',audio_mode=audio_mode,
+        palette=dict(background='#101728',surface='#1A2742',accent='#86C8F1',text='#FFFFFF'),
+        scenes=[dict(title=f'장면 {i}',subtitle=s['caption'],narration=s['narration'],seconds=s['end']-s['start'],
+                     graphic=dict(kind='target',labels=[f'장면 {i}']),camera='hold',transition='cut')
+                for i,s in enumerate(board['shots'],1)])
+    require(validate_portrait(spec)==script['target_duration'],'representative_render_script_mismatch')
+    return spec
+
+
 class RepresentativeVideoWorkflow:
     """Python entry point. The two decisions are local business approvals only."""
 
@@ -474,13 +484,7 @@ class RepresentativeVideoWorkflow:
         require(parse(writer['content'])==plan['script'], 'representative_artifact_changed')
         board = parse(editor['content'])
         validate_script_editor(board,[writer])
-        spec=dict(tool=PORTRAIT_TOOL,width=720,height=1280,series='승인 대본 기술 시안',audio_mode=audio_mode,
-            palette=dict(background='#101728',surface='#1A2742',accent='#86C8F1',text='#FFFFFF'),
-            scenes=[dict(title=f'장면 {i}',subtitle=s['caption'],narration=s['narration'],seconds=s['end']-s['start'],
-                         graphic=dict(kind='target',labels=[f'장면 {i}']),camera='hold',transition='cut')
-                    for i,s in enumerate(board['shots'],1)])
-        require(validate_portrait(spec)==plan['script']['target_duration'],'representative_render_script_mismatch')
-        return spec
+        return portrait_script_spec(plan['script'],board,audio_mode)
 
     def produce(self, project_id, *, version, sha256, changes, palette=None, cameras=None, preview_audio=None,
                 imported=False):

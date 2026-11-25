@@ -95,6 +95,7 @@ def approved_portrait_direction(project, plan, storyboard):
     policy = scoped_voice_policy(flow.get('scoped_experiences', {}), audience)
     return dict(goal=project['goal'], audience=audience, topic=plan['topic'],
         language=flow['constraints'].get('language'), duration=plan['script']['target_duration'],
+        **({'research_handoff':deepcopy(plan['research_handoff'])} if plan.get('research_handoff') else {}),
         storyboard=storyboard['shots'], source_observations=[
             {k:item[k] for k in ('id','title','duration_seconds','view_count','rights','shorts_classification') if k in item}
             for item in plan.get('research',{}).get('observations',[])],

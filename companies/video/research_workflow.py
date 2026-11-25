@@ -770,7 +770,7 @@ def status(workflow,project):
             general['revision_branch']={**branch,'route':'collect' if base.get('revision_plan') else 'rewrite'}
         decision=history[-1]['decision'] if history and history[-1]['report']['version']==base['version'] else None
         if decision:
-            return {**general,'status':'approved_report' if decision['action']=='approve' else 'rejected_report'}
+            return {**general,'status':{'approve':'approved_report','plan':'handoff','reject':'rejected_report'}[decision['action']]}
     else:
         general={}
     if base.get('continuation'):
@@ -1018,6 +1018,9 @@ def action(workflow,pid,name,body):
                 gemini,search=research_credentials() if configured else (None,None)
                 credential=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')]) if configured else None
                 return dispatch(followup[1],followup[0],prior,credential,gemini,search,body,name)
+            if name=='research-plan-handoff':
+                from collaboration_handoff import choose
+                return choose(workflow,project,body)
             if base.get('supplement_of'):
                 require(name=='research-report-review','research_scope_invalid')
             if name=='research-checkpoint':

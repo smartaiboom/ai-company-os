@@ -62,6 +62,9 @@ class StudioTests(unittest.TestCase):
             self.assertTrue(receipt['audio'] and receipt['decoded'])
             self.assertEqual(receipt['voice_engine'],'synthetic_test_tone_not_tts')
             self.assertEqual([item['subtitle_start_seconds'] for item in receipt['review_material']],[0,1])
+            self.assertEqual(receipt['subtitle_sync'],'measured_scene_audio')
+            self.assertEqual([item['subtitle_end_seconds'] for item in receipt['review_material']],
+                             [5/24,1+5/24])
             self.assertFalse(video['publish_authorized'])
 
             project=flow.store.load(pid)
@@ -83,6 +86,25 @@ class StudioTests(unittest.TestCase):
             for scene in spec['scenes']:
                 scene['camera']='push_in'
             self.assertEqual(changed['render_receipt']['input_hash'],digest(spec))
+
+    def test_measured_speech_overrun_can_request_revision_of_the_approved_script(self):
+        with TemporaryDirectory() as root:
+            studio=Studio(root)
+            flow=studio.workflow
+            pid=flow.create('가상 발화 초과 검토')
+            project=flow.store.load(pid)
+            plan=_report(dict(summary='가상 대본'),[])
+            video_state=project['representative']
+            video_state.update(stage='production',research_handoff={'report_sha256':'fixture'},plan_versions=[plan])
+            video_state['render_attempts'].append(dict(status='failed',reason='narration_exceeds_scene',
+                plan_sha256=plan['sha256'],speech_overruns=[dict(scene=1,seconds=3.4,allowed_seconds=3)]))
+            flow.store.save(project)
+            with self.assertRaisesRegex(CompanyError,'representative_stage_mismatch'):
+                flow.decide(pid,'plan',version=1,sha256='0'*64,action='request_revision',feedback='다른 버전')
+            decision=flow.decide(pid,'plan',version=1,sha256=plan['sha256'],action='request_revision',
+                                 feedback='첫 문장을 짧게 다듬어 주세요.')
+            self.assertEqual(decision['speech_overruns'][0]['seconds'],3.4)
+            self.assertEqual(flow.store.load(pid)['representative']['stage'],'plan_revision')
 
     def test_quality_draft_matches_only_the_undecided_stop_report(self):
         with TemporaryDirectory() as root:

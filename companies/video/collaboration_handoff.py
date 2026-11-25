@@ -74,11 +74,20 @@ def scope(root, project):
                                 dict(project=project['id'],research_sha256=digest(record),goal_sha256=digest(project['goal'])))
 
 
-def offer(policy):
-    return dict(policy.proposal([unit('planning',MODEL,ENDPOINT,
-        ['goal','owner_selection','public_research_evidence','research_limits','planning_and_script','owner_revision_feedback'])]),
+RENDER_MEASUREMENTS='local_render_measurements'
+
+
+def offer(policy, *, include_render_measurements=True):
+    data=['goal','owner_selection','public_research_evidence','research_limits','planning_and_script','owner_revision_feedback']
+    if include_render_measurements:
+        data.append(RENDER_MEASUREMENTS)
+    return dict(policy.proposal([unit('planning',MODEL,ENDPOINT,data)]),
         purpose='research_to_script_handoff',provider_project=MISSION_ACCOUNT,
         includes_plan_revisions=True,account_evidence='owner_attested_free_only_provider_status_unverified')
+
+
+def includes_render_measurements(grant):
+    return any(RENDER_MEASUREMENTS in item['data_types'] for item in grant['proposal']['units'])
 
 
 class HandoffStore(QualityProviderStore):
@@ -98,7 +107,7 @@ class HandoffCompany(VideoProviderQualityCompany):
     def _quality_transport_allowed(self,p):
         active=self.policy.active(self.parent_key)
         grant=self.store.grant(p)['body']
-        require(active['proposal']==offer(self.policy)
+        require(active['proposal']==offer(self.policy,include_render_measurements=includes_render_measurements(active))
                 and p['quality_inputs']['answers']['scope_sha256']==digest(active)
                 and grant['expires_at']<=active['expires_at']
                 and hmac.compare_digest(self.parent_key,_binding(self.policy.binding['project'],self.config.api_key)),
@@ -189,12 +198,25 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
             return
         exact(body,())
         grant=policy.active(credential)
-        require(grant['proposal']==proposal,'owner_policy_scope_changed')
+        measurements=includes_render_measurements(grant)
+        require(grant['proposal']==offer(policy,include_render_measurements=measurements),'owner_policy_scope_changed')
         config=Gemini35Config.from_env()
         require((config.model,config.endpoint)==(MODEL,ENDPOINT),'gemini_provider_binding')
         require(os.getenv('GEMINI35_AUTONOMOUS_FREE_ENABLED')=='1','gemini_execution_disabled')
         revision=flow['decisions'][-1] if flow['stage']=='plan_revision' else None
         prior=flow['plan_versions'][-1] if revision else None
+        video_context=None
+        if revision and revision['stage']=='video':
+            video=flow['video_versions'][-1]
+            require(video['sha256']==revision['sha256'] and video['plan_sha256']==prior['sha256']
+                    and revision['changes_plan'],'stale_representative_report')
+            workflow._verify_video(project,video)
+            receipt=video['render_receipt']
+            video_context=dict(version=video['version'],sha256=video['sha256'],plan_sha256=video['plan_sha256'],
+                duration_seconds=receipt['duration_seconds'], audio_mode=receipt['audio_mode'],
+                visual_scope=receipt.get('visual_scope'), measured_scenes=[
+                    {key:scene[key] for key in ('start_seconds','end_seconds','narration_duration_seconds')
+                     if key in scene} for scene in receipt['review_material']])
         revision_hash=digest(revision) if revision else None
         jobs=flow.setdefault('collaboration_jobs',[])
         require(not any(job['revision_sha256']==revision_hash for job in jobs),'collaboration_duplicate')
@@ -204,7 +226,9 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
                 'collaboration_orphan')
         inputs=dict(domain='video',target_segment=flow['audience'],
             answers=dict(research_handoff=flow['research_handoff'],scope_sha256=digest(grant),
-                prior_plan=dict(sha256=prior['sha256'],summary=prior['summary'],script=prior['script']) if prior else None),
+                prior_plan=dict(sha256=prior['sha256'],summary=prior['summary'],script=prior['script']) if prior else None,
+                **(dict(reviewed_video=video_context,speech_overruns=revision.get('speech_overruns',[]) if revision else [])
+                   if measurements else {})),
             constraints={**flow['constraints'],'aspect':'9:16'},
             capabilities=dict(script_contract=SCRIPT_CONTRACT), experiences=[],
             feedback_text=revision['feedback'] if revision else flow['research_handoff']['direction'])

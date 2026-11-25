@@ -2,15 +2,17 @@
 import hashlib
 from html import escape
 import json
+import math
 from pathlib import Path
 import re
 import tempfile
 import unicodedata
-from autonomous_company import require,exact,text,now,digest
+from autonomous_company import CompanyError, require,exact,text,now,digest
 from local_artifacts import run_command,FONT
 
 TOOL='production_video_v2'
 PORTRAIT_TOOL='approved_portrait_preview_v1'
+PORTRAIT_AUDIO_MODES=('none','local_speech','heami_local')
 CATALOG={TOOL:{'network':False,'uploads':False,
     'input':'JSON {tool,width,height,series,palette:{background,surface,accent,text},audio_mode,scenes:[{title,subtitle,narration,seconds,graphic:{kind,labels},camera,transition}]}',
     'visuals':'generated vector illustrations only: conversation,target,workflow,comparison; labels 1..3; no source paths/URLs',
@@ -62,7 +64,7 @@ def portrait_font():
 
 def validate_portrait(spec):
     require(spec['tool']==PORTRAIT_TOOL and (spec['width'],spec['height'])==(720,1280)
-            and spec['audio_mode'] in ('none','local_speech'),'invalid_portrait_preview')
+            and spec['audio_mode'] in PORTRAIT_AUDIO_MODES,'invalid_portrait_preview')
     total=validate({**spec,'tool':TOOL,'width':1280,'height':720,'audio_mode':'none'})
     for scene in spec['scenes']:
         caption_lines=scene['subtitle'].splitlines()
@@ -175,7 +177,7 @@ def render(spec,folder,*,speech=None,illustrated=False,caption_frames=None):
         require(illustrated and len(caption_frames)==len(spec['scenes']) and all(
             type(frames) is int and 0<frames<=round(scene['seconds']*24)
             for frames,scene in zip(caption_frames,spec['scenes'],strict=True)),'invalid_portrait_preview')
-    require((speech is not None)==(spec['audio_mode']=='local_speech'),'portrait_speech_required')
+    require((speech is not None)==(spec['audio_mode'] in PORTRAIT_AUDIO_MODES[1:]),'portrait_speech_required')
     folder=Path(folder).absolute()
     require(folder.is_dir() and not folder.is_symlink(),'invalid_tool_directory')
     require(all(not (folder/name).exists() and not (folder/name).is_symlink()
@@ -187,10 +189,20 @@ def render(spec,folder,*,speech=None,illustrated=False,caption_frames=None):
         speech_folder=folder/'speech'
         speech_folder.mkdir(mode=0o700)
         voice_receipt=speech.synthesize([s['narration'] for s in spec['scenes']],speech_folder)
-        utterances=(verify_speech(spec,voice_receipt,speech_folder,allowed_engines=('gemini_scene_receipt',))
-                    if illustrated else verify_speech(spec,voice_receipt,speech_folder))
-        require(all(item['duration']<=scene['seconds'] for item,scene in zip(utterances,spec['scenes'])),
-                'narration_exceeds_scene')
+        if illustrated:
+            utterances=verify_speech(spec,voice_receipt,speech_folder,allowed_engines=('gemini_scene_receipt',))
+        elif spec['audio_mode']=='heami_local':
+            from local_windows_tts import ENGINE
+            utterances=verify_speech(spec,voice_receipt,speech_folder,allowed_engines=(ENGINE,))
+        else:
+            utterances=verify_speech(spec,voice_receipt,speech_folder)
+        overruns=[dict(scene=index,seconds=round(item['duration'],3),allowed_seconds=scene['seconds'])
+                  for index,(item,scene) in enumerate(zip(utterances,spec['scenes'],strict=True),1)
+                  if item['duration']>scene['seconds']]
+        if overruns:
+            failure=CompanyError('narration_exceeds_scene')
+            failure.speech_overruns=overruns
+            raise failure
     with tempfile.TemporaryDirectory(dir=folder) as temporary:
         work=Path(temporary);segments=[]
         for i,scene in enumerate(spec['scenes']):
@@ -210,7 +222,9 @@ def render(spec,folder,*,speech=None,illustrated=False,caption_frames=None):
                 item=utterances[i]
                 speech_duration=item['duration']
                 audio=['-i',str(speech_folder/item['file']),'-af','apad','-c:a','aac','-ar','44100','-ac','1']
-            caption_end=caption_frames[i]/24 if caption_frames is not None else scene['seconds']
+            visible_frames=(caption_frames[i] if caption_frames is not None else
+                            math.ceil(speech_duration*24) if utterances else None)
+            caption_end=visible_frames/24 if visible_frames is not None else scene['seconds']
             motion={'hold':"z=1:x=0:y=0",'push_in':"z='1+0.0002*on':x='iw/2-iw/zoom/2':y='ih/2-ih/zoom/2'",
                     'pan_right':"z=1.04:x='min(on*0.18,iw-iw/zoom)':y='ih/2-ih/zoom/2'"}[scene['camera']]
             filters=f"zoompan={motion}:d=1:s={spec['width']}x{spec['height']}:fps=24"
@@ -222,7 +236,7 @@ def render(spec,folder,*,speech=None,illustrated=False,caption_frames=None):
                     overlays=[(scene['title'],36,150,'')]
                     overlays.extend((line,28,760+index*42,'')
                                     for index,line in enumerate(scene['graphic']['labels']))
-                    enable=f":enable='lt(n,{caption_frames[i]})'" if caption_frames is not None else ''
+                    enable=f":enable='lt(n,{visible_frames})'" if visible_frames is not None else ''
                     overlays.extend((line,34,1000+index*52,enable)
                                     for index,line in enumerate(scene['subtitle'].splitlines()))
                     for index,(value,size,y,when) in enumerate(overlays):
@@ -234,6 +248,8 @@ def render(spec,folder,*,speech=None,illustrated=False,caption_frames=None):
                     (work/'subtitle.txt').write_text(scene['subtitle'],encoding='utf-8')
                     filters+=(f",drawtext=fontfile={font[0]}:textfile=subtitle.txt:expansion=none:"
                               "fontsize=34:fontcolor=white:x=(w-tw)/2:y=1000:line_spacing=12")
+                    if visible_frames is not None:
+                        filters+=f":enable='lt(n,{visible_frames})'"
             if scene['transition']=='fade':filters+=f",fade=t=in:d=0.2,fade=t=out:st={scene['seconds']-0.2}:d=0.2"
             segment=work/f'segment-{i}.mp4';segments.append(segment)
             run_command(['ffmpeg','-nostdin','-v','error','-loop','1','-i',str(png),*audio,'-filter_threads','1',
@@ -269,6 +285,8 @@ def render(spec,folder,*,speech=None,illustrated=False,caption_frames=None):
         receipt.update(font_license=font[1],visual_scope='local_illustration_no_game_footage' if illustrated
                        else 'local_procedural_cards_no_game_footage')
         if utterances:
+            if caption_frames is None:
+                receipt['subtitle_sync']='measured_scene_audio'
             receipt.update(voice_engine=voice_receipt['engine'],speech_files=[
                 dict(file='speech/'+item['file'],sha256=item['sha256']) for item in utterances])
     (folder/'receipt.json').write_text(json.dumps(receipt,ensure_ascii=False,indent=2))

@@ -440,7 +440,12 @@ class RepresentativeVideoWorkflow:
         with self.store.lock(project_id):
             p = self.store.load(project_id)
             flow = p['representative']
-            require(flow['stage'] == f'awaiting_{stage}_approval', 'representative_stage_mismatch')
+            last_render=flow['render_attempts'][-1] if flow['render_attempts'] else {}
+            adjust_overrun=(stage=='plan' and action=='request_revision' and flow['stage']=='production'
+                            and flow.get('research_handoff') and last_render.get('status')=='failed'
+                            and last_render.get('reason')=='narration_exceeds_scene'
+                            and last_render.get('plan_sha256')==sha256)
+            require(flow['stage'] == f'awaiting_{stage}_approval' or adjust_overrun,'representative_stage_mismatch')
             report = _match(flow[f'{stage}_versions'], version, sha256)
             if stage == 'video':
                 require(action!='approve' or report['render_receipt'].get('visual_scope')!='local_procedural_cards_no_game_footage',
@@ -448,6 +453,8 @@ class RepresentativeVideoWorkflow:
                 self._verify_video(p, report)
             event = dict(stage=stage, action=action, version=version, sha256=sha256,
                          feedback=feedback, changes_plan=changes_plan, provenance=provenance, at=now())
+            if adjust_overrun:
+                event['speech_overruns']=deepcopy(last_render.get('speech_overruns',[]))
             flow['decisions'].append(event)
             if action == 'request_revision':
                 next_stage = 'plan_revision' if stage == 'plan' or changes_plan else 'video_revision'
@@ -526,6 +533,10 @@ class RepresentativeVideoWorkflow:
                     from local_melo_tts import MeloLocal
                     speech=MeloLocal()
                     require(speech.available(),'melo_runtime_missing')
+                elif preview_audio=='heami_local':
+                    from local_windows_tts import HeamiLocal
+                    speech=HeamiLocal()
+                    require(speech.available(),'heami_local_voice_missing')
             else:
                 require(plan['render_spec'] is not None, 'representative_render_spec_pending')
                 spec = deepcopy(plan['render_spec'])
@@ -567,6 +578,8 @@ class RepresentativeVideoWorkflow:
                 self._verify_video(p, report)
             except (CompanyError, OSError) as exc:
                 attempt.update(status='failed', reason=exc.code if isinstance(exc, CompanyError) else 'local_io_failed')
+                if overruns:=getattr(exc,'speech_overruns',None):
+                    attempt['speech_overruns']=overruns
                 self.store.save(p)
                 raise
             attempt['status'] = 'completed'

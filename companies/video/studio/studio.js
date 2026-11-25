@@ -468,12 +468,16 @@ function operations(p) {
     const prep=p.production;
     const direction=prep.direction;
     if (!direction) return `<p class="warning">승인 제작 입력 검증 실패 · ${h(prep.reason)}</p>`;
+    const overrun=attempt?.speech_overruns || [];
     return `${failed}<section class="subpanel"><h3>세로 9:16 테스트 제작</h3>
+      ${overrun.length&&p.stage==='production'&&p.flow.research_handoff?`<p>발화 초과 · ${overrun.map(row=>
+        `장면 ${h(row.scene)} (${h(row.seconds)}초 / ${h(row.allowed_seconds)}초)`).join(', ')}</p>
+        <button class="button secondary" data-review="plan:request_revision">발화 시간에 맞춰 대본 수정 요청</button>`:''}
       <p>승인된 장면과 자막을 자체 생성 카드에 표시합니다. 게임 화면은 확보되지 않았으며 자막은 장면 단위로 맞춥니다.</p>
-      ${prep.ready?'<button class="button secondary" data-action="mission-preview">세로 기술 시안 제작</button>':`<p class="warning">제작 준비 확인 필요 · ${h(prep.reason)}</p>`}
+      ${prep.ready&&!overrun.length?'<button class="button secondary" data-action="mission-preview">세로 기술 시안 제작</button>':overrun.length?'':`<p class="warning">제작 준비 확인 필요 · ${h(prep.reason)}</p>`}
       <details><summary>제작 준비 · 음성 및 외부 전송 범위</summary>
       <p>${h(direction.direction)}</p><p>이전 Gemini/Puck 청취 표본의 자연스러움은 대표 평가 7/10입니다. 이번 게임 대본의 음성 품질은 미평가입니다.</p>
-      <p>${prep.local_speech?'기존 MeloTTS 로컬 실행 가능 · 청취 미검증':'로컬 음성 런타임 또는 모델 미확보 · 무음 시안 가능'}</p>
+      <p>${prep.local_speech?'기존 MeloTTS 사용 가능 · ':''}${prep.heami_local?'Windows Heami 로컬 검토 음성 선택 가능 · ':''}무음 시안도 선택할 수 있습니다.</p>
       ${direction.external.map(call=>`<p>${h(call.kind)} · ${h(call.model)} · 후보 상한 ${h(call.proposed_max_calls)}회<br>전송 후보 자료 · ${h(call.data)}</p>`).join('')}
       <p>${h(direction.pricing)}. 현재 승인된 외부 요청 0회입니다. 지정 표본의 기존 TTS 승인으로는 이 대본을 보낼 수 없습니다.</p>
       <button type="button" class="button ghost" disabled>새 외부 전송 동의</button>
@@ -1324,6 +1328,11 @@ function nextWork(p,controlSource,selected) {
   }
   const attempt=f.render_attempts.at(-1);
   if (attempt?.status==='reserved') return {message:'로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단',buttons:refresh};
+  if (stage==='production' && attempt?.speech_overruns?.length && p.flow.research_handoff) {
+    const revise=controlSource.querySelector('[data-review="plan:request_revision"]');
+    return {message:'승인 장면보다 발화가 길어 제작을 중단했습니다. 대본과 장면 길이를 다시 검토하세요.',
+      target:'work-detail',buttons:revise?.outerHTML||refresh};
+  }
   if (stage==='video_revision' && p.flow.research_handoff && select('mission-preview'))
     return {message:'대표 수정 의견을 반영해 로컬 기술 시안을 다시 제작할 수 있습니다.',
       target:'work-detail',buttons:select('mission-preview')};
@@ -1678,7 +1687,7 @@ main.addEventListener('click',async event=>{
     const p=detail, action=button.dataset.action, approve=action==='collaboration-scope-approve', revoke=action==='collaboration-scope-revoke', scope=p.collaboration;
     modal(approve?'기획·대본 무료 범위 승인':revoke?'기획 범위 철회':'기획·대본 작업 시작',approve?
       `<p>Gemini 3.5 Flash-Lite · ${h(scope.proposal.provider_project)} · 24시간 · 무료 전용 $0</p>
-      <p>목표, 대표 선택, 공개 조사 근거·한계, 기획·대본 및 수정 의견을 Gemini에 전송합니다. 같은 범위의 기획 재작업을 포함합니다.</p>
+      <p>목표, 대표 선택, 공개 조사 근거·한계, 기획·대본, 수정 의견 및 로컬 검토 영상의 해시·길이 측정값을 Gemini에 전송합니다. 같은 범위의 기획 재작업을 포함합니다.</p>
       <label class="check"><input type="checkbox" name="confirmed" required>무료 프로젝트와 전송 범위를 확인했습니다.</label>`:
       revoke?'<p>이후 기획·대본 전송을 중단합니다.</p>':'<p>관리자 기획과 직원 대본·장면표를 대표 검토용으로 작성합니다.</p>',
       approve?'승인':revoke?'철회':'작업 시작',async data=>{
@@ -1696,13 +1705,16 @@ main.addEventListener('click',async event=>{
     const revision=project.stage==='video_revision' && project.flow.research_handoff
       && previous?.render_receipt.visual_scope==='local_procedural_cards_no_game_footage';
     modal('세로 기술 시안 제작','<p>승인 자막과 장면을 자체 생성 카드로 제작합니다. 외부 전송과 비용은 0입니다.</p>'+
-      (project.production.local_speech?'<label class="check"><input name="speech" type="checkbox">로컬 MeloTTS 음성 사용</label>':'<p>이번 시안은 무음입니다.</p>')+
+      `<label>음성<select name="audio_mode"><option value="none">무음</option>
+      ${project.production.local_speech?'<option value="local_speech">로컬 MeloTTS</option>':''}
+      ${project.production.heami_local?'<option value="heami_local">Windows Heami · 로컬 검토용</option>':''}
+      </select></label>`+
       (revision?`<p>대표 수정 의견 · ${h(project.flow.decisions.at(-1)?.feedback)}</p>
         <label>화면 이동 <select name="camera"><option value="hold">고정</option>
         <option value="push_in">천천히 확대</option><option value="pan_right">오른쪽 이동</option></select></label>`:''),
       '로컬 제작 시작',async data=>{
         await api(detailApi(project)+'/mission-preview',{version:plan.version,sha256:plan.sha256,
-          audio_mode:data.has('speech')?'local_speech':'none',
+          audio_mode:data.get('audio_mode'),
           ...(revision?{preview_revision:{video_sha256:previous.sha256,camera:data.get('camera')}}:{})});
         return {message:'세로 시안을 영상 검토에 제출했습니다.'};
       });

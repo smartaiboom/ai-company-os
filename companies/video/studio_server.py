@@ -289,6 +289,7 @@ class Studio:
         from shutil import which
         from local_melo_tts import MeloLocal
         from production_video import portrait_font
+        from local_windows_tts import HeamiLocal
         from video_production_company import approved_portrait_direction
         flow=project['representative']
         if flow['stage'] not in ('production','video_revision') or not flow['plan_versions']:
@@ -303,7 +304,7 @@ class Studio:
         board=next(json.loads(t['versions'][-1]['content']) for t in plan['task_history'] if t['role']=='editor')
         ready=bool(which('ffmpeg') and which('ffprobe') and portrait_font())
         uncertain=any(a['status']=='reserved' for a in flow['render_attempts'])
-        return dict(ready=ready and not uncertain,local_speech=ready and MeloLocal().available(),
+        return dict(ready=ready and not uncertain,local_speech=ready and MeloLocal().available(),heami_local=ready and HeamiLocal().available(),
                     reason='representative_render_uncertain' if uncertain else
                     None if ready else 'portrait_preview_tools_missing',
                     direction=approved_portrait_direction(project,plan,board))
@@ -875,9 +876,10 @@ class Studio:
                 self.workflow.produce(pid,version=plan['version'],sha256=plan['sha256'],
                     changes='개인 운영 정책에 따른 기존 승인 소스·대본·음성 로컬 합성',imported=True)
         elif name == 'mission-preview':
+            from production_video import PORTRAIT_AUDIO_MODES
             fields=('version','sha256','audio_mode')
             exact(body, (*fields,'preview_revision') if 'preview_revision' in body else fields)
-            require(body['audio_mode'] in ('none','local_speech')
+            require(body['audio_mode'] in PORTRAIT_AUDIO_MODES
                     and ('preview_revision' not in body or isinstance(body['preview_revision'],dict)),'invalid_request')
             self.workflow.produce(pid,version=body['version'],sha256=body['sha256'],
                 changes='대표 수정 의견과 선택한 화면 이동을 반영한 기술 시안' if 'preview_revision' in body

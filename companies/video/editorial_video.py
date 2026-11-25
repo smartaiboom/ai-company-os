@@ -147,6 +147,7 @@ def verify_speech(plan,receipt,folder,*,allowed_engines=('MeloTTS','synthetic_te
         with wave.open(str(path),'rb') as f:
             require(f.getnchannels()==1 and f.getsampwidth()==2 and f.getframerate()==44100,'invalid_speech_format')
             measured=f.getnframes()/44100
+            require(any(f.readframes(f.getnframes())),'silent_tts_audio')
         require(type(item['duration']) in (int,float) and math.isfinite(item['duration']) and measured>0
                 and abs(measured-item['duration'])<.001,'speech_receipt_mismatch')
     return items

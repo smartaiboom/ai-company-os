@@ -450,6 +450,8 @@ function collaborationPanel(p) {
     <p>조사 v${h(state.handoff.report_version)} · ${h(state.handoff.topic?.title||state.handoff.direction)}</p>
     <p>${h(state.handoff.limits)}</p>
     ${action?actionButton(action[0],action[1]):`<p>${h(state.current?.reason||state.status)}</p>`}
+    ${state.groq_offer?actionButton('collaboration-scope-approve','Groq 무료 범위 승인','','groq'):''}
+    ${state.proposal.provider==='groq'?'<p>Groq · Personal / Default Project · GPT-OSS 20B</p>':''}
     ${state.status==='ready'?actionButton('collaboration-scope-revoke','기획 범위 철회'):''}</section>`;
 }
 
@@ -1684,14 +1686,16 @@ main.addEventListener('click',async event=>{
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
   else if (button.dataset.action?.startsWith('collaboration-')) {
-    const p=detail, action=button.dataset.action, approve=action==='collaboration-scope-approve', revoke=action==='collaboration-scope-revoke', scope=p.collaboration;
+    const p=detail, action=button.dataset.action, approve=action==='collaboration-scope-approve', revoke=action==='collaboration-scope-revoke';
+    const groq=approve && button.dataset.scene==='groq';
+    const scope=groq?p.collaboration.groq_offer:p.collaboration;
     modal(approve?'기획·대본 무료 범위 승인':revoke?'기획 범위 철회':'기획·대본 작업 시작',approve?
-      `<p>Gemini 3.5 Flash-Lite · ${h(scope.proposal.provider_project)} · 24시간 · 무료 전용 $0</p>
-      <p>목표, 대표 선택, 공개 조사 근거·한계, 기획·대본, 수정 의견 및 로컬 검토 영상의 해시·길이 측정값을 Gemini에 전송합니다. 같은 범위의 기획 재작업을 포함합니다.</p>
+      `<p>${groq?'Groq GPT-OSS 20B':'Gemini 3.5 Flash-Lite'} · ${h(scope.proposal.provider_project)} · 24시간 · 무료 전용 $0</p>
+      <p>목표, 대표 선택, 공개 조사 근거·한계, 기획·대본, 수정 의견과 역할별 검토 자료${groq?'를 Groq에 전송합니다. 운영 자료·개인정보·영상·음성·실측값은 제외합니다.':' 및 로컬 검토 영상의 해시·길이 측정값을 Gemini에 전송합니다.'} 같은 범위의 기획 재작업을 포함합니다.</p>
       <label class="check"><input type="checkbox" name="confirmed" required>무료 프로젝트와 전송 범위를 확인했습니다.</label>`:
       revoke?'<p>이후 기획·대본 전송을 중단합니다.</p>':'<p>관리자 기획과 직원 대본·장면표를 대표 검토용으로 작성합니다.</p>',
       approve?'승인':revoke?'철회':'작업 시작',async data=>{
-        await api(detailApi(p)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:scope.review_hash}:{});
+        await api(detailApi(p)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:scope.review_hash,...(groq?{provider:'groq'}:{})}:{});
         return {message:'기획·대본 작업 상태를 갱신했습니다.'};
       });
   }

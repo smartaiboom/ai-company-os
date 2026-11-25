@@ -234,11 +234,13 @@ class StudioTests(unittest.TestCase):
         with TemporaryDirectory() as tmp, patch.dict('os.environ', {'GEMINI_API_KEY':'process-fixture-secret'}, clear=True):
             env = Path(tmp)/'.env'
             env.write_text("export GEMINI_API_KEY='file-fixture-secret'\n"
-                           "TAVILY_API_KEY=fake-tavily-123456\nTAVILY_RESEARCHER_FREE_ONLY=1\n")
+                           "TAVILY_API_KEY=fake-tavily-123456\nTAVILY_RESEARCHER_FREE_ONLY=1\n"
+                           "GROQ_API_KEY=groq-fixture-secret\n")
             load_environment(env)
             result = readiness()
             self.assertEqual(os.environ['GEMINI_API_KEY'],'process-fixture-secret')
             self.assertNotIn('GEMINI_PRODUCTION_PROJECT_API_KEY',os.environ)
+            self.assertEqual(os.environ['GROQ_API_KEY'],'groq-fixture-secret')
             self.assertEqual(result['configuration_blockers'],
                              ['gemini_free_execution_disabled','independent_production_key_missing'])
             self.assertEqual(result['provider_account_condition'],'unverified_locally')

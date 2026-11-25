@@ -260,13 +260,14 @@ class FreeCompany(LiveCompany):
 
     def _before_transport(self,p):
         # Persist pacing across process restarts; cancellation/expiry checked while waiting.
+        interval=self.store.rules['min_interval_seconds']
         wait_started=time.monotonic()
         while p['next_request_at']:
-            require(time.monotonic()-wait_started<=RULES['min_interval_seconds']+1,'clock_or_throttle_stalled')
+            require(time.monotonic()-wait_started<=interval+1,'clock_or_throttle_stalled')
             self.store.grant(p)
             remaining=(datetime.fromisoformat(p['next_request_at'])-datetime.fromisoformat(pacing_now())).total_seconds()
             if remaining<=0:break
-            require(remaining<=RULES['min_interval_seconds'],'clock_changed')
+            require(remaining<=interval,'clock_changed')
             time.sleep(min(remaining,0.25))
         self.store.grant(p)
         if p['run_started_at']:
@@ -274,7 +275,7 @@ class FreeCompany(LiveCompany):
                     <RULES['max_run_seconds'],'run_deadline_reached')
         require(self._run_monotonic is not None and time.monotonic()-self._run_monotonic<RULES['max_run_seconds'],
                 'run_deadline_reached')
-        p['next_request_at']=(datetime.fromisoformat(pacing_now())+timedelta(seconds=RULES['min_interval_seconds'])).isoformat()
+        p['next_request_at']=(datetime.fromisoformat(pacing_now())+timedelta(seconds=interval)).isoformat()
         self.store.save(p)
 
     def _request_json(self,p,*,model,base_url,body,api_key,timeout,transport,kind,task_id,goal):

@@ -9,7 +9,7 @@ from mission_production import production_keys
 
 VARIABLES = frozenset(('GEMINI_API_KEY', 'GEMINI_PRODUCTION_PROJECT_API_KEY', 'GEMINI35_MODEL',
                        'GEMINI35_ENDPOINT', 'GEMINI35_AUTONOMOUS_FREE_ENABLED',
-                       'TAVILY_API_KEY', 'TAVILY_RESEARCHER_FREE_ONLY', 'YOUTUBE_DATA_API_KEY'))
+                       'GROQ_API_KEY', 'TAVILY_API_KEY', 'TAVILY_RESEARCHER_FREE_ONLY', 'YOUTUBE_DATA_API_KEY'))
 
 
 def load_environment(path):

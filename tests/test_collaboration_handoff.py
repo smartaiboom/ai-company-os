@@ -1,15 +1,17 @@
 from datetime import datetime, timedelta, timezone
 from copy import deepcopy
 from itertools import count
+from io import BytesIO
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
 from unittest.mock import patch
+from urllib.error import HTTPError
 import json
 
 from autonomous_company import CompanyError, digest, now
 from autonomous_gemini35 import ENDPOINT, MODEL
-from collaboration_handoff import HandoffCompany, publish_plan
+from collaboration_handoff import GROQ_ENDPOINT, GROQ_MODEL, HandoffCompany, GroqHandoffCompany, publish_plan
 from general_research_report import base_for
 from research_workflow import research_store
 from studio_server import Studio
@@ -25,6 +27,18 @@ class FixtureHandoffCompany(HandoffCompany):
 
 class CollaborationHandoffTests(TestCase):
     def test_review_choice_revision_and_production_handoff(self):
+        self.exercise_handoff('gemini')
+
+    def test_groq_signed_scope_and_chat_completion_handoff(self):
+        with patch.object(GroqHandoffCompany,'source','offline_http_fixture'):
+            self.exercise_handoff('groq')
+
+    def test_groq_http_403_stops_and_preserves_attempt(self):
+        self.exercise_handoff('groq',reject=True)
+
+    def exercise_handoff(self,provider,*,reject=False):
+        groq=provider=='groq'
+        model,endpoint=(GROQ_MODEL,GROQ_ENDPOINT) if groq else (MODEL,ENDPOINT)
         root=Path(self.enterContext(TemporaryDirectory()))
         studio=Studio(root,[])
         studio.collaboration_test_options=dict(company_type=FixtureHandoffCompany,allow_fixture=True)
@@ -57,14 +71,37 @@ class CollaborationHandoffTests(TestCase):
 
         key='fixture-only-collaboration-key'
         self.enterContext(patch.dict('os.environ',GEMINI_API_KEY=key,GEMINI_PRODUCTION_PROJECT_API_KEY=key,
-            GEMINI35_MODEL=MODEL,GEMINI35_ENDPOINT=ENDPOINT,GEMINI35_AUTONOMOUS_FREE_ENABLED='1'))
+            GROQ_API_KEY=key,GEMINI35_MODEL=MODEL,GEMINI35_ENDPOINT=ENDPOINT,GEMINI35_AUTONOMOUS_FREE_ENABLED='1'))
         self.enterContext(patch('socket.socket.connect',side_effect=AssertionError('external network forbidden')))
         tick=count()
         self.enterContext(patch('autonomous_free.pacing_now',side_effect=lambda:
-            (datetime(2026,1,1,tzinfo=timezone(timedelta(hours=9)))+timedelta(seconds=4*next(tick))).isoformat()))
+            (datetime(2026,1,1,tzinfo=timezone(timedelta(hours=9)))+timedelta(seconds=61*next(tick))).isoformat()))
         with self.assertRaisesRegex(CompanyError,'owner_policy_required'):
             action('collaboration-run',{})
-        action('collaboration-scope-approve',dict(confirmed=True,review_hash=prepared['collaboration']['review_hash']))
+        scope=studio.detail('workspace',pid)['collaboration']
+        if groq:
+            with self.assertRaisesRegex(CompanyError,'owner_policy_scope_changed'):
+                action('collaboration-scope-approve',dict(confirmed=True,provider='groq',review_hash=scope['review_hash']))
+            scope=scope['groq_offer']
+            self.assertNotIn('local_render_measurements',scope['proposal']['units'][0]['data_types'])
+        action('collaboration-scope-approve',dict(confirmed=True,provider=provider,review_hash=scope['review_hash']))
+        if groq:
+            with patch.dict('os.environ',GROQ_API_KEY='different-test-key'):
+                with self.assertRaisesRegex(CompanyError,'owner_policy_key_changed'):
+                    action('collaboration-run',{})
+
+        if reject:
+            rejected=HTTPError(endpoint,403,'Rejected',{},BytesIO(b'{"error":{"code":"other"}}'))
+            with patch('collaboration_handoff.send_once',side_effect=rejected) as transport:
+                with self.assertRaisesRegex(CompanyError,'provider_rejected'):
+                    action('collaboration-run',{})
+                with self.assertRaisesRegex(CompanyError,'collaboration_duplicate'):
+                    action('collaboration-run',{})
+                transport.assert_called_once()
+            state=studio.detail('workspace',pid)
+            self.assertEqual(state['collaboration']['status'],'stopped')
+            self.assertEqual(state['flow']['plan_versions'],[])
+            return
 
         def beat(start,end,narration,shot):
             return dict(start=start,end=end,narration=narration,caption='가상 예시',screen='모의 예시 화면',
@@ -72,9 +109,17 @@ class CollaborationHandoffTests(TestCase):
         calls=[]
         def send(request,timeout):
             wire=json.loads(request.data)
-            self.assertEqual(request.full_url,ENDPOINT)
+            self.assertEqual(request.full_url,endpoint)
             self.assertNotIn(key,request.data.decode())
-            message=json.loads(wire['contents'][0]['parts'][0]['text'])
+            if groq:
+                self.assertEqual(wire['model'],model)
+                self.assertTrue(wire['response_format']['json_schema']['strict'])
+                self.assertEqual(request.get_header('Authorization'),'Bearer '+key)
+                message=json.loads(wire['messages'][1]['content'])
+                self.assertNotIn('reviewed_video',message['data']['quality']['answers'])
+                self.assertNotIn('speech_overruns',message['data']['quality']['answers'])
+            else:
+                message=json.loads(wire['contents'][0]['parts'][0]['text'])
             phase,context=message['phase'],message['data']
             feedback=context['quality']['feedback_text']
             calls.append((phase,context.get('assignment',{}).get('role'),feedback))
@@ -83,13 +128,17 @@ class CollaborationHandoffTests(TestCase):
                 beat(3,20,'수정 화면을 확인하세요.' if '수정' in feedback else '첫 줄을 살펴보세요.','demo'),
                 beat(20,40,'날짜와 장소를 표시해 주세요.','demo'),
                 beat(40,60,'원본과 한번 대조해 보세요.','card')])
-            draft['provenance']=dict(author='fixture response',model=MODEL,mock=False)
+            draft['provenance']=dict(author='fixture response',model=model,mock=False)
             manager,employee=script_callbacks(draft,draft)
             value=json.loads((employee if phase=='execute' else manager)(phase,context))
             if phase=='finalize':
                 value.update(action='deliver',content='가상 기획 및 대본',
                              checks=[{**item,'status':'met'} for item in value['checks']])
                 value.pop('task_refs',None)
+            if groq:
+                return FixtureResponse(json.dumps(dict(model=model,choices=[dict(finish_reason='stop',
+                    message=dict(role='assistant',content=json.dumps(dict(result=value),ensure_ascii=False)))]),
+                    ensure_ascii=False).encode())
             return FixtureResponse(json.dumps(dict(candidates=[dict(finishReason='STOP',content=dict(role='model',
                 parts=[dict(text=json.dumps(dict(result=value),ensure_ascii=False))]))],
                 usageMetadata=dict(promptTokenCount=20,candidatesTokenCount=30,totalTokenCount=50))).encode())
@@ -106,7 +155,7 @@ class CollaborationHandoffTests(TestCase):
                 'collaboration_handoff.publish_plan',side_effect=checked_publish):
             first=action('collaboration-run',{})['flow']['plan_versions'][-1]
             self.assertEqual(first['provenance'],'offline_http_fixture')
-            self.assertEqual(first['provider_identity'],dict(provider_id='gemini',model=MODEL,endpoint=ENDPOINT))
+            self.assertEqual(first['provider_identity'],dict(provider_id=provider,model=model,endpoint=endpoint))
             self.assertEqual(first['research_handoff']['report_sha256'],research['sha256'])
             review=dict(stage='plan',version=1,sha256=first['sha256'],action='request_revision',
                         feedback='수정 화면을 명확하게 보여 주세요.',changes_plan=False)

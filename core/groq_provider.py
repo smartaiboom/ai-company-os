@@ -1,6 +1,8 @@
 """Groq-specific wire format. No retries, mutable provider registry or billing APIs."""
 from copy import deepcopy
+from dataclasses import dataclass, field
 import json
+import os
 import re
 from urllib.request import Request
 from urllib.error import HTTPError,URLError
@@ -12,6 +14,17 @@ MODEL='openai/gpt-oss-20b'
 ENDPOINT='https://api.groq.com/openai/v1'
 COST_POLICY={'basis':'owner_verified_free_account','billing_enabled':False,
              'paid_fallback':False,'response_cost_required':False,'max_cost':0}
+
+
+@dataclass(frozen=True)
+class GroqConfig:
+    api_key: str = field(repr=False)
+    model: str = MODEL
+    endpoint: str = ENDPOINT+'/chat/completions'
+
+    @classmethod
+    def from_env(cls):
+        return cls(os.getenv('GROQ_API_KEY',''))
 
 
 class GroqFreeAdapter:

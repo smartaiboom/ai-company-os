@@ -83,6 +83,8 @@ ERROR_CODES={
     'invalid_api_key':'authentication',
     'model_not_found':'model_or_resource_not_found',
     'model_permission_blocked':'permission',
+    'model_permission_blocked_org':'permission',
+    'model_permission_blocked_project':'permission',
     'invalid_json_schema':'invalid_json_schema',
     'json_validate_failed':'json_schema_validation',
     'unsupported_parameter':'unsupported_parameter',

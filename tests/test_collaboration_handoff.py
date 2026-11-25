@@ -11,7 +11,7 @@ import json
 
 from autonomous_company import CompanyError, digest, now
 from autonomous_gemini35 import ENDPOINT, MODEL
-from collaboration_handoff import GROQ_ENDPOINT, GROQ_MODEL, HandoffCompany, GroqHandoffCompany, publish_plan
+from collaboration_handoff import GROQ_ENDPOINT, GROQ_MODEL, HandoffCompany, GroqHandoffCompany, GroqHandoffStore, publish_plan
 from general_research_report import base_for
 from research_workflow import research_store
 from studio_server import Studio
@@ -34,7 +34,9 @@ class CollaborationHandoffTests(TestCase):
             self.exercise_handoff('groq')
 
     def test_groq_http_403_stops_and_preserves_attempt(self):
-        self.exercise_handoff('groq',reject=True)
+        for code in ('model_permission_blocked_org','model_permission_blocked_project'):
+            with self.subTest(code=code):
+                self.exercise_handoff('groq',reject=code)
 
     def exercise_handoff(self,provider,*,reject=False):
         groq=provider=='groq'
@@ -91,7 +93,8 @@ class CollaborationHandoffTests(TestCase):
                     action('collaboration-run',{})
 
         if reject:
-            rejected=HTTPError(endpoint,403,'Rejected',{},BytesIO(b'{"error":{"code":"other"}}'))
+            rejected=HTTPError(endpoint,403,'Rejected',{'Via':'synthetic-header-value'},
+                               BytesIO(json.dumps({'error':{'code':reject,'message':'synthetic-body-value'}}).encode()))
             with patch('collaboration_handoff.send_once',side_effect=rejected) as transport:
                 with self.assertRaisesRegex(CompanyError,'provider_rejected'):
                     action('collaboration-run',{})
@@ -101,6 +104,12 @@ class CollaborationHandoffTests(TestCase):
             state=studio.detail('workspace',pid)
             self.assertEqual(state['collaboration']['status'],'stopped')
             self.assertEqual(state['flow']['plan_versions'],[])
+            store=GroqHandoffStore(root/'research_plan_handoff'/pid)
+            attempt,=store.load(state['collaboration']['current']['id'])['real_ai']['attempts']
+            self.assertEqual(attempt['provider_error_diagnostics']['provider_code'],reject)
+            self.assertTrue(attempt['response_source_hints']['header_presence']['via'])
+            self.assertEqual(attempt['response_source_hints']['origin_classification'],'unverified')
+            self.assertNotIn('synthetic-',json.dumps(attempt))
             return
 
         def beat(start,end,narration,shot):

@@ -3,6 +3,7 @@ import hmac
 import os
 from copy import deepcopy
 from urllib.parse import urlsplit
+from urllib.error import HTTPError
 
 from autonomous_company import CompanyError, digest, exact, now, parse, require
 from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config, Gemini35Store
@@ -10,7 +11,7 @@ from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
 from goal_dialogue import safe_text
 from goal_dialogue_live import send_once
 from groq_provider import (MODEL as GROQ_MODEL, ENDPOINT as GROQ_BASE, COST_POLICY as GROQ_COST,
-                           GroqConfig, GroqFreeAdapter, provider_error_diagnostics)
+                           GroqConfig, GroqFreeAdapter, provider_error_diagnostics, response_source_hints)
 from mission_production import production_keys
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import unit
@@ -214,6 +215,8 @@ class GroqHandoffCompany(HandoffCompany):
         diagnostics=provider_error_diagnostics(exception=exception,envelope=envelope,http_status=http_status)
         if diagnostics is not None:
             entry['provider_error_diagnostics']=diagnostics
+        if isinstance(exception,HTTPError):
+            entry['response_source_hints']=response_source_hints(exception.headers or {},exception.code)
 
 
 def state(workflow,project):

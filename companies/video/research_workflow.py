@@ -722,8 +722,15 @@ def status(workflow,project):
                     credential=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
                 continuation=bool(followup[0].get('supplement_continuation'))
                 repair=bool(followup[0].get('supplement_repair')) and not continuation
+                inherited=[]
+                receipt=followup[0].get('supplement_resume')
+                if receipt:
+                    from research_supplement_resume import checkpoint
+                    saved=checkpoint(parent_store(followup[1],receipt),prior['report'])
+                    require(saved and digest(saved)==receipt['checkpoint_sha256'],'research_continuation_blocked')
+                    inherited=saved['observations']
                 supplement=supplement_status(followup[1],prior['report'],credential,configured,
-                                             repair=repair,continuation=continuation,
+                                             repair=repair,continuation=continuation,observations=inherited,
                                              correction=bool(followup[0].get('supplement_blocker_correction')))
                 if not continuation and supplement['state']=='stopped':
                     continued=candidate(workflow,project,prior['report'],continuation=True)
@@ -734,6 +741,12 @@ def status(workflow,project):
                     corrected=candidate(workflow,project,prior['report'],repair=True)
                     if corrected:
                         supplement['repair']=supplement_status(corrected[1],prior['report'],credential,configured,repair=True)
+                if supplement['state']=='stopped':
+                    from research_supplement_resume import status as resume_status
+                    resumed=candidate(workflow,project,prior['report'],resume=True)
+                    if resumed:
+                        supplement['resume']=resume_status(followup[1],resumed[1],prior['report'],credential,
+                                                           resumed[0]['supplement_resume'])
                 general['supplement']=supplement
                 if base.get('supplement_of') and history[-1]['report']['version']<base['version']:
                     return dict(**general,status=supplement['state'],diagnostics=supplement.get('diagnostics'))
@@ -964,7 +977,7 @@ def action(workflow,pid,name,body):
         base=inputs[0]
         if base.get('mode'):
             from general_research_report import review as owner_review
-            if name in ('research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-contract-run','research-supplement-run','research-supplement-revoke','research-supplement-close'):
+            if name in ('research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-contract-run','research-supplement-resume-run','research-supplement-run','research-supplement-revoke','research-supplement-close'):
                 from general_research_report import versions
                 from research_supplement import candidate, dispatch
                 _,_,reports=versions(workflow,project)
@@ -972,7 +985,7 @@ def action(workflow,pid,name,body):
                 prior=reports[-1]['report']
                 followup=candidate(workflow,project,prior,repair=name=='research-supplement-repair-approve',
                                    continuation=name=='research-supplement-continuation-approve',
-                                   correction=name=='research-supplement-contract-run')
+                                   correction=name=='research-supplement-contract-run',resume=name=='research-supplement-resume-run')
                 require(followup,'research_scope_invalid')
                 configured=general_ready()
                 require(configured or name in ('research-supplement-close','research-supplement-revoke'),

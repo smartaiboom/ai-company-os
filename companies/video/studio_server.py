@@ -20,7 +20,7 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
-RESEARCH_ACTIONS = ('research-supplement-approve', 'research-supplement-repair-approve', 'research-supplement-continuation-approve','research-supplement-contract-run', 'research-supplement-run', 'research-supplement-revoke', 'research-supplement-close', 'research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
+RESEARCH_ACTIONS = ('research-supplement-approve', 'research-supplement-repair-approve', 'research-supplement-continuation-approve','research-supplement-contract-run', 'research-supplement-resume-run', 'research-supplement-run', 'research-supplement-revoke', 'research-supplement-close', 'research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
                     'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke',
                     'research-replan-approve', 'research-replan-run', 'research-replan-revoke',
                     'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke',

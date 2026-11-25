@@ -39,14 +39,19 @@ class OwnerOperatingPolicy:
                     valid_hours=24,provider_quota='unknown',provider_billing='unknown',
                     automatic_retry=False,stop_on_uncertain=True)
 
-    def approve(self, proposal, review_hash, key):
+    def approve(self, proposal, review_hash, key, *, expires_by=None):
         require(proposal['binding']==self.binding and digest(proposal)==review_hash
                 and proposal['units'] and proposal['free_only'] is True
                 and proposal['max_cost_usd']==0 and not self.root.exists(), 'owner_policy_scope_changed')
         issued=now()
+        issued_at=datetime.fromisoformat(issued)
+        expires=issued_at+timedelta(hours=proposal['valid_hours'])
+        if expires_by is not None:
+            expires=min(expires,datetime.fromisoformat(expires_by))
+        require(expires>issued_at, 'owner_policy_expired')
         self.root.mkdir(mode=0o700)
         self.write('policy.json',dict(proposal=proposal,issued_at=issued,
-            expires_at=(datetime.fromisoformat(issued)+timedelta(hours=proposal['valid_hours'])).isoformat(),
+            expires_at=expires.isoformat(),
             account_confirmation=('owner_attested_free_only_provider_status_unverified'
                                   if proposal.get('account_evidence') else
                                   'owner_attested_free_billing_disabled_and_budget_available'),

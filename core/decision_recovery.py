@@ -122,3 +122,34 @@ def correction_call(store, key, operation, payload_hash, feedback, execute):
             and operation.get('payload_sha256') == payload_hash
             and operation['id'] == 'correct-' + feedback['step'], 'decision_recovery_blocked')
     delegated_call(store, key, operation, payload_hash, execute)
+
+
+def received_contract_stop(row, attempt):
+    """Identify a recorded local rejection after delivery, with no provider error."""
+    outcome = row['result'] or {}
+    diagnostics = outcome.get('diagnostics') or {}
+    if not (attempt and outcome.get('status') == 'failed_or_uncertain'
+            and diagnostics.get('failure_type') == 'local_validation_failed'
+            and attempt.get('status') == 'uncertain'
+            and attempt.get('response_received') is True
+            and attempt.get('http_status') is None and not attempt.get('provider_response')
+            and attempt.get('payload_hash') == row['reservation']['payload_sha256']
+            and attempt.get('diagnostic', {}).get('stage') == 'decision_validation'
+            and type(attempt.get('usage', {}).get('total_tokens')) is int
+            and attempt['usage']['total_tokens'] >= 0):
+        return None
+    rejection = attempt.get('decision_rejection')
+    if rejection and diagnostics.get('decision_receipt') != dict(
+            attempt_id=attempt['id'], total_tokens=attempt['usage']['total_tokens'], **rejection):
+        return None
+    return dict(failed_payload_sha256=attempt['payload_hash'], rule=rejection['rule'] if rejection else None)
+
+
+def remaining_delegation(source, credential, ledger):
+    """Return the still-authorized units after counting every reservation."""
+    policy = source.active(credential)
+    units = {unit['id']: unit for unit in policy['proposal']['units']}
+    require(all(name in units and row['reservation']['unit'] == units[name]
+                and row['reservation']['policy_hash'] == digest(policy)
+                for name, row in ledger.items()), 'owner_policy_scope_changed')
+    return policy, [unit for name, unit in units.items() if name not in ledger]

@@ -192,9 +192,10 @@ def manager_schema(result,*,collection=False,diverse=False,verified=None):
                else enum('hold'),note=S,topics={**arr(obj(**candidate)),'minItems':3,'maxItems':3})
 
 
-def validate_manager(value,result,*,collection=False,diverse=False,verified=None):
+def validate_manager(value,result,*,collection=False,diverse=False,verified=None,partial_hold=False):
     catalog=evidence_catalog(result['observations'])
-    require(len({topic['title'].strip().casefold() for topic in value['topics']})==3,'general_report_changed')
+    count=len(value['topics']) if partial_hold and value['action']=='hold' else 3
+    require(len({topic['title'].strip().casefold() for topic in value['topics']})==count,'general_report_changed')
     if diverse and value['action']=='use_with_limits':
         from mobile_game_evidence import canonical_game,game_evidence,normalized
         if verified is None:

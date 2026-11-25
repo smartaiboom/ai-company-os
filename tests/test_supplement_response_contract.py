@@ -51,3 +51,31 @@ class SupplementResponseContractTests(TestCase):
             with self.subTest(kind=kind), self.assertRaises(DecisionViolation) as exc:
                 action_option(dict(tool=kind,option=option),{})
             self.assertEqual(exc.exception.rule,rule)
+
+    def test_normalizes_execution_irrelevant_options_before_validation(self):
+        from research_supplement import action_option, normalize_action
+
+        finish = dict(tool='finish', option='설명')
+        query = dict(tool='web', option='  public game name  ')
+        self.assertEqual(normalize_action(finish), dict(tool='finish', option=''))
+        self.assertEqual(normalize_action(query), dict(tool='web', option='public game name'))
+        action_option(normalize_action(query), {})
+        with self.assertRaises(DecisionViolation):
+            action_option(normalize_action(dict(tool='web', option=' https://example.invalid ')), {})
+        with self.assertRaises(DecisionViolation):
+            action_option(normalize_action(dict(tool='official_listing', option=' invented ')), {})
+
+    def test_resume_requires_delivery_and_a_local_validation_stop(self):
+        from decision_recovery import received_contract_stop
+
+        row = dict(reservation=dict(payload_sha256='signed-hash'), result=dict(
+            status='failed_or_uncertain', diagnostics=dict(failure_type='local_validation_failed')))
+        attempt = dict(status='uncertain', payload_hash='signed-hash', response_received=True,
+                       diagnostic=dict(stage='decision_validation'), usage=dict(total_tokens=20))
+        self.assertEqual(received_contract_stop(row, attempt),
+                         dict(failed_payload_sha256='signed-hash', rule=None))
+        for changes in (dict(response_received=False), dict(http_status=503),
+                        dict(provider_response={'http_status': 429}), dict(payload_hash='other')):
+            with self.subTest(changes=changes):
+                self.assertIsNone(received_contract_stop(row, {**attempt, **changes}))
+        self.assertIsNone(received_contract_stop({**row, 'result': None}, attempt))

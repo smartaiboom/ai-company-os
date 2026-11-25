@@ -916,6 +916,9 @@ function researchSupplementPanel(s, readonly) {
     ${s.initial_plan?`<p>재판단 전 관리자 판단 · ${h(s.initial_plan.decision.reason)}</p>`:''}
     ${s.continuation?`<p>기존 관리자 보류를 보존한 신규 실환경 검증 · 별도 승인 필요</p>
       ${!readonly&&s.continuation.state==='available'?'<button class="button secondary" data-action="research-supplement-continuation-approve">관리자 업무 연속성 검증 승인</button>':''}`:''}
+    ${s.resume?.state==='available'?`<p>저장된 조사에서 이어가기 · Gemini 최대 ${h(s.resume.limits.gemini)}회 · 추가 조사 선택 최대 ${h(s.resume.limits.collection_actions)}회</p>
+      ${readonly?'':'<button class="button secondary" data-action="research-supplement-resume-run">승인 잔여 범위에서 조사 재개</button>'}`:
+      s.resume?.state==='blocked'?`<p>조사 재개 제한 · ${h(({owner_policy_expired:'승인 만료',owner_policy_revoked:'승인 철회',owner_policy_key_changed:'승인 당시 키와 불일치',owner_policy_exhausted:'남은 호출 한도 부족'})[s.resume.reason]||s.resume.reason)}</p>`:''}
     ${s.repair?`<p>초기 관리자 응답 계약 수정본 · 개발 실환경 재검증용 별도 승인 필요</p>
       ${!readonly&&s.repair.state==='available'?'<button class="button secondary" data-action="research-supplement-repair-approve">계약 수정본 재검증 범위 승인</button>':''}`:''}
     ${!readonly&&s.state==='active'?'<button class="button ghost" data-action="research-supplement-revoke">보완 승인 철회</button>':''}
@@ -928,7 +931,7 @@ function researchCommand(action) {
     const continuation=action==='research-supplement-continuation-approve';
     const s=continuation?r.supplement.continuation:repair?r.supplement.repair:r.supplement, limits=s.proposal.limits;
     const approve=action.endsWith('-approve');
-    const title=continuation?'관리자 업무 연속성 검증 승인':repair?'계약 수정본 재검증 범위 승인':approve?'관리자 보완 범위 검토·승인':action.endsWith('-run')?'승인된 관리자 보완 시작':action.endsWith('-close')?'보완 종료 및 이전 보고서 검토':'보완 승인 철회';
+    const title=action==='research-supplement-resume-run'?'승인 잔여 범위에서 조사 재개':continuation?'관리자 업무 연속성 검증 승인':repair?'계약 수정본 재검증 범위 승인':approve?'관리자 보완 범위 검토·승인':action.endsWith('-run')?'승인된 관리자 보완 시작':action.endsWith('-close')?'보완 종료 및 이전 보고서 검토':'보완 승인 철회';
     const fields=approve?`${repair?'<p>개발 실환경 재검증을 위한 새 승인입니다. 기존 실패 예약은 보존됩니다.</p>':''}<p>Gemini 3.5 Flash-Lite · 프로젝트 ${h(s.proposal.provider_project)} · 최대 ${h(limits.gemini)}회
       · 최초 관리자 지시${limits.manager_scope_reconsiderations?', 승인 문맥 대조 후 필요한 경우 관리자 재판단 1회':''}, 직원 도구 선택·보고, 최종 관리자 검토 · 24시간 · 무료 전용 $0</p>
       <p>직원 조사 선택은 도구 전체에서 최대 ${h(limits.collection_actions)}회입니다. 선택에 따라
@@ -1249,7 +1252,7 @@ function nextWork(p,controlSource,selected) {
   if (p.readonly) return {message:'기존 검증 사례 · 읽기 전용'};
   if (p.research?.general) {
     const item=p.research;
-    const buttons=select('research-report-review','research-approve','research-run','research-provider-recovery','research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-run');
+    const buttons=select('research-report-review','research-approve','research-run','research-provider-recovery','research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-resume-run','research-supplement-run');
     const message={setup_required:'Gemini·Tavily 무료 설정과 YouTube 키를 확인하세요.',
       available:item.revision_branch?.route==='collect'?'저장된 수정 요청으로 추가 조사 범위를 검토하세요.':item.version>1?'수정 지시를 보존했습니다. 재작성 전송 범위를 승인하세요.':'조사 범위를 확인하고 승인하세요.',
       active:'승인된 조사·기획 작업을 실행할 수 있습니다.',review:'대표가 최신 조사·기획 보고서를 검토할 차례입니다.',

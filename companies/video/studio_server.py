@@ -110,7 +110,7 @@ ERRORS = {
     'voice_batch_scene_reserved': '이 장면은 일괄 승인 범위에 속합니다.',
     'production_source_asset_changed': '등록 당시의 권리 기록 또는 파일 해시와 일치하지 않습니다.',
     'source_library_selection_invalid': '승인된 자산 확보 결과의 장면과 자산 ID를 확인하세요.',
-    'technical_preview_not_approvable': '무음 카드 기술 시안은 영상 승인 대상이 아닙니다. 영상 수정 요청으로 제작을 이어가세요.',
+    'technical_preview_not_approvable': '자체 카드 기술 시안은 최종 영상 승인 대상이 아닙니다. 영상 수정 요청으로 제작을 이어가세요.',
     'production_project_key_unverified': '서버의 기존 API 키와 별도 확인한 제작 프로젝트 키가 일치해야 합니다.',
     'portrait_korean_font_missing': '로컬 세로 시안에 사용할 한글 글꼴을 찾을 수 없습니다.',
     'melo_runtime_missing': '로컬 MeloTTS 실행 환경 또는 모델이 준비되지 않았습니다.',
@@ -875,10 +875,14 @@ class Studio:
                 self.workflow.produce(pid,version=plan['version'],sha256=plan['sha256'],
                     changes='개인 운영 정책에 따른 기존 승인 소스·대본·음성 로컬 합성',imported=True)
         elif name == 'mission-preview':
-            exact(body, ('version', 'sha256', 'audio_mode'))
-            require(body['audio_mode'] in ('none','local_speech'),'invalid_request')
+            fields=('version','sha256','audio_mode')
+            exact(body, (*fields,'preview_revision') if 'preview_revision' in body else fields)
+            require(body['audio_mode'] in ('none','local_speech')
+                    and ('preview_revision' not in body or isinstance(body['preview_revision'],dict)),'invalid_request')
             self.workflow.produce(pid,version=body['version'],sha256=body['sha256'],
-                changes='승인된 9:16 대본·자막의 로컬 기술 시안',preview_audio=body['audio_mode'])
+                changes='대표 수정 의견과 선택한 화면 이동을 반영한 기술 시안' if 'preview_revision' in body
+                        else '승인된 9:16 대본·자막의 로컬 기술 시안',
+                preview_audio=body['audio_mode'],preview_revision=body.get('preview_revision'))
         elif name == 'produce':
             exact(body, ('version', 'sha256', 'changes', 'camera'))
             require(body['camera'] in (None, 'hold', 'push_in', 'pan_right'), 'invalid_request')

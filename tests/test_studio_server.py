@@ -64,6 +64,26 @@ class StudioTests(unittest.TestCase):
             self.assertEqual([item['subtitle_start_seconds'] for item in receipt['review_material']],[0,1])
             self.assertFalse(video['publish_authorized'])
 
+            project=flow.store.load(pid)
+            project['representative']['research_handoff']={'report_sha256':'fixture'}
+            flow.store.save(project)
+            with self.assertRaisesRegex(CompanyError,'technical_preview_not_approvable'):
+                flow.decide(pid,'video',version=1,sha256=video['sha256'],action='approve')
+            feedback=flow.decide(pid,'video',version=1,sha256=video['sha256'],action='request_revision',
+                                 feedback='기존 카드 화면을 천천히 확대해 주세요.')
+            with self.assertRaisesRegex(CompanyError,'stale_representative_report'):
+                flow.produce(pid,version=1,sha256=plan['sha256'],changes='오래된 버전',preview_audio='none',
+                             preview_revision=dict(video_sha256='0'*64,camera='push_in'))
+            changed=flow.produce(pid,version=1,sha256=plan['sha256'],changes='카드 확대',preview_audio='none',
+                                 preview_revision=dict(video_sha256=video['sha256'],camera='push_in'))
+            self.assertEqual(changed['revision_feedback'],feedback)
+            self.assertEqual(changed['previous_video_sha256'],video['sha256'])
+            self.assertEqual(changed['plan_sha256'],plan['sha256'])
+            spec=flow.mission_production_spec(saved,1,plan['sha256'],'none')
+            for scene in spec['scenes']:
+                scene['camera']='push_in'
+            self.assertEqual(changed['render_receipt']['input_hash'],digest(spec))
+
     def test_quality_draft_matches_only_the_undecided_stop_report(self):
         with TemporaryDirectory() as root:
             report = dict(decision='stop', original_action='revise', reason='revision_limit_reached')

@@ -180,6 +180,7 @@ function videoPanel(p, video) {
     ['음성',r.audio_mode==='espeak_reference'?'eSpeak 로컬 참조 음성':r.voice_engine==='synthetic_test_tone_not_tts'?'합성 테스트 신호':r.voice_engine|| (r.audio?'로컬 음성':'없음')],['자막',r.subtitle_sync==='measured_scene_audio'?'장면별 실측 발화 길이':'장면 단위'],
     ['QA','기술 검사 완료 · 시청·청취 품질 미평가'],['비용',`$${video.cost_usd}`]])}
     <details class="subpanel"><summary>변경사항·파일 및 기획 SHA-256</summary><p>${h(video.changes)}</p>
+    ${video.revision_feedback?`<p>대표 수정 의견 · ${h(video.revision_feedback.feedback)}</p>`:''}
     <p class="muted">영상 파일</p><p class="mono">${h(video.artifact_sha256)}</p>
     <p class="muted">승인 기획</p><p class="mono">${h(video.plan_sha256)}</p></details>
     <details class="subpanel"><summary>시각 소스·사용 권리</summary>
@@ -462,7 +463,7 @@ function operations(p) {
   if (attempt?.status === 'reserved') return '<p class="warning">로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단</p>';
   if (p.stage==='goal_submitted') return `<button class="button secondary" data-action="mission">${icon('folder')} 미션 01 준비</button><p class="muted">기획 작업만 준비합니다. 외부 전송은 별도 승인 후 실행합니다.</p>`;
   if (p.rework && p.stage==='plan_revision') return reworkPanel(p);
-  if (p.autonomous_production) return failed;
+  if (p.autonomous_production && !p.flow.research_handoff) return failed;
   if (p.production) {
     const prep=p.production;
     const direction=prep.direction;
@@ -1323,6 +1324,9 @@ function nextWork(p,controlSource,selected) {
   }
   const attempt=f.render_attempts.at(-1);
   if (attempt?.status==='reserved') return {message:'로컬 렌더 실행 중 또는 결과 미확정 · 중복 렌더 차단',buttons:refresh};
+  if (stage==='video_revision' && p.flow.research_handoff && select('mission-preview'))
+    return {message:'대표 수정 의견을 반영해 로컬 기술 시안을 다시 제작할 수 있습니다.',
+      target:'work-detail',buttons:select('mission-preview')};
   if (p.autonomous_production) return {...productionNext(p.autonomous_production,selected),target:'production-detail'};
   const budget=p.budget?.requests.find(request=>request.status==='pending');
   if (budget) return {message:'추가 예산의 사용 범위와 한도를 검토하세요.',target:'budget-panel',buttons:[...controlSource.querySelectorAll('[data-budget-decision]')].filter(button=>button.dataset.request===budget.id).map(button=>button.outerHTML).join('')};
@@ -1688,11 +1692,18 @@ main.addEventListener('click',async event=>{
   else if (button.dataset.action==='mission-preview') {
     const project=detail;
     const plan=project.flow.plan_versions.at(-1);
+    const previous=project.flow.video_versions.at(-1);
+    const revision=project.stage==='video_revision' && project.flow.research_handoff
+      && previous?.render_receipt.visual_scope==='local_procedural_cards_no_game_footage';
     modal('세로 기술 시안 제작','<p>승인 자막과 장면을 자체 생성 카드로 제작합니다. 외부 전송과 비용은 0입니다.</p>'+
-      (project.production.local_speech?'<label class="check"><input name="speech" type="checkbox">로컬 MeloTTS 음성 사용</label>':'<p>이번 시안은 무음입니다.</p>'),
+      (project.production.local_speech?'<label class="check"><input name="speech" type="checkbox">로컬 MeloTTS 음성 사용</label>':'<p>이번 시안은 무음입니다.</p>')+
+      (revision?`<p>대표 수정 의견 · ${h(project.flow.decisions.at(-1)?.feedback)}</p>
+        <label>화면 이동 <select name="camera"><option value="hold">고정</option>
+        <option value="push_in">천천히 확대</option><option value="pan_right">오른쪽 이동</option></select></label>`:''),
       '로컬 제작 시작',async data=>{
         await api(detailApi(project)+'/mission-preview',{version:plan.version,sha256:plan.sha256,
-          audio_mode:data.has('speech')?'local_speech':'none'});
+          audio_mode:data.has('speech')?'local_speech':'none',
+          ...(revision?{preview_revision:{video_sha256:previous.sha256,camera:data.get('camera')}}:{})});
         return {message:'세로 시안을 영상 검토에 제출했습니다.'};
       });
   }

@@ -487,7 +487,7 @@ class RepresentativeVideoWorkflow:
         return portrait_script_spec(plan['script'],board,audio_mode)
 
     def produce(self, project_id, *, version, sha256, changes, palette=None, cameras=None, preview_audio=None,
-                imported=False):
+                imported=False, preview_revision=None):
         """Render the approved narration/captions; a video revision may adjust visual styling."""
         text(changes, 2000)
         with self.store.lock(project_id):
@@ -498,12 +498,29 @@ class RepresentativeVideoWorkflow:
             require(not any(a['status'] == 'reserved' for a in flow['render_attempts']),
                     'representative_render_uncertain')
             speech=None
+            if preview_revision is not None:
+                exact(preview_revision,('video_sha256','camera'))
+                require(preview_audio is not None and not imported and cameras is None
+                        and flow.get('research_handoff') and flow['stage']=='video_revision'
+                        and preview_revision['camera'] in ('hold','push_in','pan_right'),
+                        'representative_unapproved_render_change')
+                previous=flow['video_versions'][-1]
+                feedback=flow['decisions'][-1]
+                require(previous['sha256']==preview_revision['video_sha256']==feedback['sha256']
+                        and previous['plan_sha256']==sha256 and feedback['stage']=='video'
+                        and feedback['action']=='request_revision' and not feedback['changes_plan']
+                        and previous['render_receipt'].get('visual_scope')=='local_procedural_cards_no_game_footage',
+                        'stale_representative_report')
+                self._verify_video(p,previous)
             if imported:
                 from mission_production import imported_preview_inputs,render_imported
                 require(preview_audio is None and palette is None and cameras is None,'invalid_request')
                 clip_job,speech,spec=imported_preview_inputs(self,p)
             elif preview_audio is not None:
                 spec=self.mission_production_spec(flow,version,sha256,preview_audio)
+                if preview_revision is not None:
+                    for scene in spec['scenes']:
+                        scene['camera']=preview_revision['camera']
                 require(portrait_font() is not None,'portrait_korean_font_missing')
                 if preview_audio=='local_speech':
                     from local_melo_tts import MeloLocal
@@ -541,7 +558,8 @@ class RepresentativeVideoWorkflow:
                 require(receipt['input_hash'] == attempt['spec_sha256'], 'representative_render_receipt_mismatch')
                 feedback = flow['decisions'][-1] if flow['stage'] == 'video_revision' else None
                 report = _report(dict(plan_version=version, plan_sha256=sha256, changes=changes,
-                    revision_feedback=feedback, previous_video_sha256=flow['video_versions'][-1]['sha256'] if flow['video_versions'] else None,
+                    revision_feedback=feedback, **({'preview_revision':preview_revision} if preview_revision else {}),
+                    previous_video_sha256=flow['video_versions'][-1]['sha256'] if flow['video_versions'] else None,
                     artifact=str(relative/'video.mp4'), artifact_sha256=receipt['sha256'],
                     receipt_sha256=_file_hash(folder/'receipt.json'), render_receipt=receipt,
                     qa=dict(full_decode=True, perceptual_quality='unassessed', subtitles=receipt['subtitle_sync']),

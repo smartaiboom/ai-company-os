@@ -1,4 +1,5 @@
 from datetime import datetime, timedelta, timezone
+from copy import deepcopy
 from itertools import count
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -8,7 +9,7 @@ import json
 
 from autonomous_company import CompanyError, digest, now
 from autonomous_gemini35 import ENDPOINT, MODEL
-from collaboration_handoff import HandoffCompany
+from collaboration_handoff import HandoffCompany, publish_plan
 from general_research_report import base_for
 from research_workflow import research_store
 from studio_server import Studio
@@ -93,9 +94,19 @@ class CollaborationHandoffTests(TestCase):
                 parts=[dict(text=json.dumps(dict(result=value),ensure_ascii=False))]))],
                 usageMetadata=dict(promptTokenCount=20,candidatesTokenCount=30,totalTokenCount=50))).encode())
 
-        with patch('collaboration_handoff.send_once',side_effect=send):
+        def checked_publish(workflow,project,job,prior,**kwargs):
+            for field in ('provider_id','model','endpoint','grant_id','cost_policy_hash','role_result_status'):
+                mismatched=deepcopy(job)
+                mismatched['real_ai']['attempts'][0][field]='mismatch'
+                with self.assertRaisesRegex(CompanyError,'collaboration_internal_review_incomplete'):
+                    publish_plan(workflow,project,mismatched,prior,**kwargs)
+            return publish_plan(workflow,project,job,prior,**kwargs)
+
+        with patch('collaboration_handoff.send_once',side_effect=send), patch(
+                'collaboration_handoff.publish_plan',side_effect=checked_publish):
             first=action('collaboration-run',{})['flow']['plan_versions'][-1]
             self.assertEqual(first['provenance'],'offline_http_fixture')
+            self.assertEqual(first['provider_identity'],dict(provider_id='gemini',model=MODEL,endpoint=ENDPOINT))
             self.assertEqual(first['research_handoff']['report_sha256'],research['sha256'])
             review=dict(stage='plan',version=1,sha256=first['sha256'],action='request_revision',
                         feedback='수정 화면을 명확하게 보여 주세요.',changes_plan=False)

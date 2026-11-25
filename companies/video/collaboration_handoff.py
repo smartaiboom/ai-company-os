@@ -244,19 +244,25 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
             company=company_type(store,config,policy,credential)
             result=company.run(job['id'],expected_state_hash=signed['storage_hash'])
             require(result['status']=='needs_user_review',result.get('reason_code') or 'collaboration_internal_review_incomplete')
-            publish_plan(workflow,project,result,prior,allow_fixture=allow_fixture)
+            publish_plan(workflow,project,result,prior,grant=store.grant(result),allow_fixture=allow_fixture)
         except CompanyError as exc:
             entry.update(status='stopped',reason=exc.code)
             workflow.store.save(project)
             raise
 
 
-def publish_plan(workflow, project, job, prior, *, allow_fixture):
+def publish_plan(workflow, project, job, prior, *, grant, allow_fixture):
     flow=project['representative']
     attempts=job['real_ai']['attempts']
+    body=grant['body']
+    identity=dict(provider_id=body['provider'],model=body['model'],endpoint=body['endpoint'])
+    cost_policy_hash=digest(body['cost_policy'])
     require(job['status']=='needs_user_review' and job['final'] and not job['active_operation']
             and attempts and all(row['status']=='completed' and row.get('role_result_status')=='validated'
-                                 and row.get('http_status')==200 and row['model']==MODEL for row in attempts),
+                                 and row.get('http_status')==200 and row.get('grant_id')==grant['id']
+                                 and row.get('cost_policy_hash')==cost_policy_hash
+                                 and all(row.get(key)==value for key,value in identity.items())
+                                 for row in attempts),
             'collaboration_internal_review_incomplete')
     tasks={task['role']:task for task in job['assignments']}
     require(set(tasks)=={'writer','editor'} and len(job['assignments'])==2
@@ -283,7 +289,7 @@ def publish_plan(workflow, project, job, prior, *, allow_fixture):
         topic=script['topic']['title'],script=script,render_spec=None,cost_limit_usd=0,
         internal_job=job['id'],writer_sha256=digest(writer),editor_sha256=digest(editor),
         internal_reviews=tasks['writer']['reviews'],previous_plan_sha256=prior['sha256'] if prior else None,
-        provenance=provenance,task_history=deepcopy(job['assignments']),manager_plan=job['plan'],
+        provenance=provenance,provider_identity=identity,task_history=deepcopy(job['assignments']),manager_plan=job['plan'],
         final_review=job['final'],research_handoff=deepcopy(record)),flow['plan_versions'])
     flow['plan_versions'].append(report)
     flow['collaboration_jobs'][-1]['status']='completed'

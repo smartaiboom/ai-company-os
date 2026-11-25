@@ -33,13 +33,51 @@ def candidate(workflow, project, report, *, resume=False):
     base = dict(base_for(workflow, project), version=report['version']+1,
                 supplement_of=report['sha256'], quality_loop=PURPOSE)
     source = research_store(workflow.store.root, project, base)
-    if saved := report_checkpoint(source,report):
+    if saved := quality_checkpoint(source,report):
         child_base = {**base,'quality_resume':dict(source_sha256=source.binding['input_sha256'],
                                                    checkpoint_sha256=digest(saved))}
         child = research_store(workflow.store.root,project,child_base)
         if resume or child.read('policy.json'):
             return child_base,child
     return base,source
+
+
+def quality_checkpoint(source, prior):
+    return report_checkpoint(source,prior) or repeated_assignment_checkpoint(source,prior)
+
+
+def repeated_assignment_checkpoint(source, prior):
+    from research_workflow import linked_attempt
+
+    policy=source.read('policy.json')
+    outcome=source.read('quality-outcome.json')
+    if (not policy or policy['proposal'].get('purpose')!=PURPOSE or not outcome
+            or outcome['reason']!='owner_policy_replay' or source.read('research-result.json')
+            or list(source.root.glob('quality-observation-*.json'))):
+        return None
+    rounds=list(source.root.glob('quality-round-*.json'))
+    if len(rounds)!=1:
+        return None
+    ledger=source.attempts()
+    if set(ledger)!={f'model:{i}' for i in range(1,5)} or any(
+            not row['result'] or row['result']['status']!='completed'
+            or row['reservation']['policy_hash']!=digest(policy)
+            or not source.allows(policy['proposal'],row['reservation']['unit'])
+            for row in ledger.values()):
+        return None
+    completed=source.read(rounds[0].name)
+    review=completed['review']
+    linked=linked_attempt(source,'model:4',ledger['model:4'])
+    staff=linked_attempt(source,'model:3',ledger['model:3'])
+    result=completed['result']
+    raw_claims=[{**claim,'citations':[row['source'] for row in claim['citations']]} for claim in result['claims']]
+    raw_staff=dict(tool='finish',option='',feasibility=result['feasibility'],claims=raw_claims)
+    if (not linked or linked.get('response_hash')!=digest(review)
+            or not staff or staff.get('response_hash')!=digest(raw_staff)
+            or completed['stop']!='staff_finished' or review['decision']!=completed['assignment']
+            or result['observations']!=prior['staff']['observations']):
+        return None
+    return dict(kind='repeated_assignment',completed=completed,observations=[],ledger_sha256=digest(ledger))
 
 
 def report_checkpoint(source, prior):
@@ -120,10 +158,53 @@ def offer(store, prior):
                 account_evidence='owner_attested_free_only_provider_status_unverified')
 
 
-def status(store, prior, configured, credential):
+def development_chain(store):
+    from research_workflow import parent_store
+
+    while store is not None:
+        yield store
+        proposal=store.read('policy.json')['proposal']
+        parent=proposal.get('development_parent_input_sha256') or proposal.get('resume_source_input_sha256')
+        store=parent_store(store,{'source_sha256':parent}) if parent else None
+
+
+def active_chain(store, credential):
+    for ancestor in development_chain(store):
+        ancestor.active(credential)
+
+
+def followup_offer(store, prior, source, credential):
+    if source is None:
+        return None
+    grant=source.read('policy.json')
+    if not grant or grant['proposal'].get('followup_scope')!='same_project':
+        return None
+    outcome=source.read('quality-outcome.json')
+    review=source.read('manager-review.json')
+    require(outcome and outcome['reason']=='hold' and review
+            and review['result_sha256']==digest(prior['staff']) and review['decision']==prior['manager']
+            and all(row['result'] and row['result']['status']=='completed' for row in source.attempts().values()),
+            'research_continuation_blocked')
+    active_chain(source,credential)
+    proposed=offer(store,prior)
+    approved=grant['proposal']
+    for field in ('units','purpose','provider_project','free_only','max_cost_usd','valid_hours','mode','account_evidence'):
+        require(proposed[field]==approved[field],'owner_policy_scope_changed')
+    require(source.binding['project']==store.binding['project'],'owner_policy_scope_changed')
+    return {**proposed,'followup_scope':'same_project','development_parent_input_sha256':source.binding['input_sha256']}, grant['expires_at']
+
+
+def status(store, prior, configured, credential, previous_store=None):
     proposal = offer(store,prior)
     policy = store.read('policy.json')
     if not policy:
+        if configured:
+            try:
+                if inherited:=followup_offer(store,prior,previous_store,credential):
+                    scoped,expiry=inherited
+                    return dict(state='active',proposal=scoped,expires_at=expiry,inherited=True)
+            except CompanyError as exc:
+                return dict(state='blocked',reason=exc.code,proposal=proposal)
         return dict(state='available' if configured else 'setup_required', proposal=proposal, review_hash=digest(proposal))
     outcome = store.read('quality-outcome.json')
     from research_workflow import research_diagnostics
@@ -131,7 +212,7 @@ def status(store, prior, configured, credential):
     view = dict(proposal=proposal, expires_at=policy['expires_at'], outcome=outcome, reserved=len(ledger),
                 diagnostics=research_diagnostics(store,ledger) if ledger else None)
     if outcome:
-        recoverable=bool(report_checkpoint(store,prior) and not store.read('revoked.json'))
+        recoverable=bool(quality_checkpoint(store,prior) and not store.read('revoked.json'))
         if recoverable:
             try:
                 store.active(credential)
@@ -139,7 +220,9 @@ def status(store, prior, configured, credential):
                 recoverable=False
         return dict(view,state='complete' if store.read('manager-review.json') else 'stopped',recoverable=recoverable)
     try:
-        require(store.active(credential)['proposal']==proposal,'owner_policy_scope_changed')
+        current=store.active(credential)['proposal']
+        expected=dict(proposal,followup_scope='same_project') if current.get('followup_scope') else proposal
+        require(current==expected,'owner_policy_scope_changed')
     except CompanyError as exc:
         return dict(view,state='blocked',reason=exc.code)
     if view['reserved'] or store.read('quality-start.json'):
@@ -147,15 +230,25 @@ def status(store, prior, configured, credential):
     return dict(view,state='active')
 
 
-def dispatch(store, base, prior, credential, gemini, search, name, body):
+def dispatch(store, base, prior, credential, gemini, search, name, body, previous_store=None):
     proposal = offer(store,prior)
     if name == 'research-quality-approve':
-        exact(body,('confirmed','review_hash'))
+        opt_in=body.get('followups') is True
+        exact(body,('confirmed','review_hash','followups') if opt_in else ('confirmed','review_hash'))
         require(body['confirmed'] is True,'owner_policy_required')
-        return store.approve(proposal,body['review_hash'],credential)
+        require(followup_offer(store,prior,previous_store,credential) is None,'owner_policy_scope_changed')
+        require(digest(proposal)==body['review_hash'],'owner_policy_scope_changed')
+        if opt_in:
+            proposal={**proposal,'followup_scope':'same_project'}
+        return store.approve(proposal,digest(proposal),credential)
     exact(body,())
     if name == 'research-quality-revoke':
-        return store.revoke()
+        target=store
+        if not store.read('policy.json') and previous_store is not None:
+            grant=previous_store.read('policy.json')
+            if grant and grant['proposal'].get('followup_scope')=='same_project':
+                target=previous_store
+        return target.revoke()
     receipt=base.get('quality_resume')
     if name=='research-quality-resume':
         from research_workflow import parent_store
@@ -163,10 +256,16 @@ def dispatch(store, base, prior, credential, gemini, search, name, body):
         require(receipt and not store.read('policy.json'),'research_continuation_blocked')
         parent=parent_store(store,receipt)
         grant=parent.active(credential)
-        saved=report_checkpoint(parent,prior)
+        saved=quality_checkpoint(parent,prior)
         require(saved and digest(saved)==receipt['checkpoint_sha256'],'research_continuation_blocked')
         authorized=grant['proposal']
-        require(authorized==offer(parent,prior),'owner_policy_scope_changed')
+        expected=offer(parent,prior)
+        if authorized.get('followup_scope'):
+            expected['followup_scope']='same_project'
+        if authorized.get('development_parent_input_sha256'):
+            expected['development_parent_input_sha256']=authorized['development_parent_input_sha256']
+        require(authorized==expected,'owner_policy_scope_changed')
+        active_chain(parent,credential)
         derived={**authorized,'binding':store.binding,'resume_source_input_sha256':receipt['source_sha256'],
                  'report_checkpoint_sha256':receipt['checkpoint_sha256']}
         store.approve(derived,digest(derived),credential,expires_by=grant['expires_at'])
@@ -176,7 +275,14 @@ def dispatch(store, base, prior, credential, gemini, search, name, body):
         except CompanyError as exc:
             store.write('quality-outcome.json',dict(reason=exc.code,at=now()))
             raise
-    require(store.active(credential)['proposal']==proposal,'owner_policy_scope_changed')
+    if not store.read('policy.json') and (inherited:=followup_offer(store,prior,previous_store,credential)):
+        proposal,expiry=inherited
+        store.approve(proposal,digest(proposal),credential,expires_by=expiry)
+    else:
+        current=store.active(credential)['proposal']
+        if current.get('followup_scope'):
+            proposal={**proposal,'followup_scope':'same_project'}
+        require(current==proposal,'owner_policy_scope_changed')
     require(not store.attempts() and not store.read('quality-start.json'),'owner_policy_exhausted')
     store.write('quality-start.json',dict(at=now(), prior_report_sha256=prior['sha256']))
     try:
@@ -237,7 +343,12 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
     observations = list(prior['staff']['observations'])
     inherited = resume[1]['observations'] if resume else []
     observations.extend(inherited)
-    previous_payloads={row['reservation']['payload_sha256'] for row in resume[0].attempts().values()} if resume else set()
+    from research_workflow import parent_store
+    parent_hash=proposal.get('development_parent_input_sha256')
+    parent=resume[0] if resume else parent_store(store,{'source_sha256':parent_hash}) if parent_hash else None
+    previous_payloads={row['reservation']['payload_sha256']
+                       for ancestor in development_chain(parent) for name,row in ancestor.attempts().items()
+                       if not (name.startswith('listing-robots:') and (row['result'] or {}).get('status')=='completed')}
     previous = prior['game_evidence']
     goal = {key:base[key] for key in ('target','audience','constraints','output')}
     criteria = ('Compare three games using distinct recent videos and independent mobile distribution proof. '
@@ -258,15 +369,13 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
 
     def send(name, payload, work):
         nonlocal sequence
-        if resume:
-            resume[0].active(credential)
-            require(payload not in previous_payloads,'owner_policy_replay')
+        active_chain(parent,credential)
+        require(payload not in previous_payloads,'owner_policy_replay')
         sequence += 1
         operation = {**templates[name], 'id':f'{name}:{sequence}'}
         def checked_work(proof,check):
             def checked():
-                if resume:
-                    resume[0].active(credential)
+                active_chain(parent,credential)
                 check()
             return work(proof,checked)
         delegated_call(store,credential,operation,payload,checked_work)
@@ -287,7 +396,13 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
 
     def common(task):
         verified=linked()
-        return dict(goal=task,project=goal,criteria=criteria,verified=verified,evidence=evidence_input(observations),
+        count=len({row['game'] for row in verified.values()})
+        candidates={ref:row['url'] for ref,row in evidence_catalog(observations).items()
+                    if row['scope']=='search_lead' and (app:=listing_id(row['url']))
+                    and ('official_listing',app) not in used}
+        return dict(goal=task,project=goal,prior_report_sha256=prior['sha256'],criteria=criteria,
+                    independent_mobile_games=count, independent_mobile_games_missing=max(0,TARGET-count),
+                    unvisited_official_candidates=candidates, verified=verified,evidence=evidence_input(observations),
                     evidence_milestones=sorted(evidence_progress(observations,verified)),
                     listing_extractions=extraction_receipts(observations))
 
@@ -315,23 +430,44 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
     plan_guide = ('Judge what evidence is missing and whether a different investigation method has value. '
                   'For reinvestigate choose available tools youtube, web or official_listing and give a specific '
                   'assignment plus measurable success criteria. web also enables app_store_search. '
+                  'Treat independent_mobile_games and independent_mobile_games_missing as measured facts. '
+                  'Search snippets cannot reduce the gap; an unvisited official candidate may be checked. '
                   'For hold, alternative or ask_owner use no tools and explain the next option.')
-    if resume:
+    repeat=resume[1]['completed'] if resume and resume[1].get('kind')=='repeated_assignment' else None
+    round_number=idle_rounds=0
+    finished_rounds=[]
+    completed=None
+    if repeat:
+        result=repeat['result']
+        completed=dict(result_sha256=digest(result),decision=repeat['review']['review'],at=result['at'],
+                       game_evidence=linked(),provenance=provenance)
+        finished_rounds.append(dict(assignment=repeat['assignment'],stop=repeat['stop'],observed=0))
+        round_number=idle_rounds=1
+        revised=model(dict(**common('Reconsider a repeated research assignment'),
+                           prior_round=repeat['review'],previous_assignment=repeat['assignment'],
+                           staff=repeat['result']['claims'],tools=TOOLS,used=sorted(used)),
+                      PLAN_SCHEMA,plan_guide+' The staff already finished under the previous assignment. '
+                      'Propose a materially different evidence path with an actionable first step, or stop. '
+                      'Use the observed official candidates and extraction diagnostics.',
+                      validate_plan_assignment,normalize_plan)
+        plan=revised['decision']
+        store.write('quality-reconsidered-plan.json',revised)
+    elif resume:
         plan=resume[1]['assignment']
     else:
-        initial = model(dict(**common('Assign a research improvement'),prior_manager=prior['manager'],
-                             prior_staff=prior['staff']['claims'],used=sorted(used),tools=TOOLS,
-                             scope='Owner-approved free development research; provider quota and billing unknown.'),
-                        PLAN_SCHEMA,plan_guide,validate_plan_assignment,normalize_plan)
-        plan = initial['decision']
+        initial=model(dict(**common('Assign a research improvement'),prior_manager=prior['manager'],
+                           prior_staff=prior['staff']['claims'],used=sorted(used),tools=TOOLS,
+                           scope='Owner-approved free development research; provider quota and billing unknown.'),
+                      PLAN_SCHEMA,plan_guide,validate_plan_assignment,normalize_plan)
+        plan=initial['decision']
         store.write('quality-initial-plan.json',initial)
-    stop = plan['action']
-    completed = None
-    idle_rounds = round_number = 0
-    index = len(inherited)
-    while plan['action']=='reinvestigate':
+    stop=plan['action']
+    if repeat and plan==repeat['assignment']:
+        stop='no_progress'
+    index=len(inherited)
+    while plan['action']=='reinvestigate' and not (repeat and round_number==1 and plan==repeat['assignment']):
         round_number += 1
-        restoring=bool(resume and round_number==1)
+        restoring=bool(resume and not repeat and round_number==1)
         original=prior['staff']['observations'] if restoring else observations
         before_linked=verified_games(original,now(),previous)
         before={row['game'] for row in before_linked.values()}
@@ -348,7 +484,7 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
             if 'web' in choices:
                 choices.append(APP_STORE_SEARCH)
             step = model(dict(**common('Choose a next research action'),assignment=plan,tools=choices,
-                              official_candidates=leads,used=sorted(used)),
+                              official_candidates=leads,used=sorted(used),prior_rounds=finished_rounds),
                          obj(tool=enum(*choices,'finish'),option=S,gap=enum('mobile_support','video_sample','none')),
                          'Name the gap. For youtube, web or app_store_search use public game words only, without '
                          'URLs, domains, site operators or personal data. app_store_search applies the App Store '
@@ -424,9 +560,14 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
         completed = dict(result_sha256=digest(result),decision=review['review'],at=now(),
                          game_evidence=verified,provenance=provenance)
         store.write(f'quality-round-{round_number:04}.json',dict(assignment=plan,result=result,review=review,stop=stop))
+        finished_rounds.append(dict(assignment=plan,stop=stop,observed=len(observations)-observation_start))
+        previous_plan=plan
         plan = review['decision']
         if plan['action']!='reinvestigate':
             stop = plan['action']
+            break
+        if idle_rounds and plan==previous_plan:
+            stop='no_progress'
             break
         if idle_rounds >= IDLE_ROUNDS or stop == 'duplicate_instruction':
             stop = 'no_progress' if idle_rounds >= IDLE_ROUNDS else stop

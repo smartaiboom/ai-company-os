@@ -63,3 +63,35 @@ class OwnerOperatingPolicyTests(TestCase):
             with self.assertRaisesRegex(CompanyError,'owner_policy_unresolved_attempt'):
                 policy.reserve(key,{**template,'id':'model:3'},digest('third'))
             self.assertEqual(set(policy.attempts()),{'model:1','model:2'})
+
+    def test_quality_followup_requires_explicit_opt_in_and_completed_bound_report(self):
+        from research_quality_loop import followup_offer, offer
+
+        with TemporaryDirectory() as directory:
+            root=Path(directory)
+            person='same-project'
+            source=OwnerOperatingPolicy(root/'source',{'project':person,'input_sha256':'old'})
+            target=OwnerOperatingPolicy(root/'target',{'project':person,'input_sha256':'new'})
+            prior=dict(sha256='finished-report',staff={'observations':[]},manager={'action':'hold'})
+            legacy=OwnerOperatingPolicy(root/'legacy',{'project':person,'input_sha256':'legacy'})
+            legacy_offer=offer(legacy,{'sha256':'starting-report'})
+            legacy.approve(legacy_offer,digest(legacy_offer),'fixture-key')
+            self.assertIsNone(followup_offer(target,prior,legacy,'fixture-key'))
+            proposal=dict(offer(source,{'sha256':'starting-report'}),followup_scope='same_project')
+            source.approve(proposal,digest(proposal),'fixture-key')
+            with self.assertRaisesRegex(CompanyError,'research_continuation_blocked'):
+                followup_offer(target,prior,source,'fixture-key')
+            source.write('quality-outcome.json',dict(reason='hold'))
+            source.write('manager-review.json',dict(result_sha256=digest(prior['staff']),decision=prior['manager']))
+            authorized,expiry=followup_offer(target,prior,source,'fixture-key')
+            self.assertEqual(authorized['units'],proposal['units'])
+            self.assertEqual(authorized['prior_report_sha256'],'finished-report')
+            self.assertEqual(authorized['development_parent_input_sha256'],'old')
+            self.assertEqual(expiry,source.read('policy.json')['expires_at'])
+            with self.assertRaisesRegex(CompanyError,'owner_policy_key_changed'):
+                followup_offer(target,prior,source,'other-key')
+            with self.assertRaisesRegex(CompanyError,'research_continuation_blocked'):
+                followup_offer(target,{**prior,'staff':{'observations':['changed']}},source,'fixture-key')
+            source.revoke()
+            with self.assertRaisesRegex(CompanyError,'owner_policy_revoked'):
+                followup_offer(target,prior,source,'fixture-key')

@@ -148,7 +148,11 @@ def assemble(project,history,store):
     counts={}
     proposal=(store.read('policy.json') or {}).get('proposal',{}) if report.get('supplement_of') else {}
     stores=(store,)
-    if proposal.get('resume_source_input_sha256'):
+    if proposal.get('development_parent_input_sha256') or proposal.get('followup_scope'):
+        from research_quality_loop import development_chain
+        stores=development_chain(store)
+        lines.append('- 호출 집계는 같은 개발 승인에서 이어받은 서명 원장 기준이다.')
+    elif proposal.get('resume_source_input_sha256'):
         from research_supplement_resume import ancestry
         stores=ancestry(store)
         lines.append('- 호출 집계는 이번 보완과 재개 과정에서 이어받은 서명 원장 기준이다.')

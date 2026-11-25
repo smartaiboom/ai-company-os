@@ -712,7 +712,7 @@ def status(workflow,project):
     grant=store.read('policy.json')
     if base.get('mode'):
         from general_research_report import versions
-        _,_,history=versions(workflow,project)
+        _,quality_parent,history=versions(workflow,project)
         general=dict(general=True,reports=history,version=base['version'])
         if history and history[-1]['decision'] is None:
             from research_quality_loop import candidate as quality_candidate, status as quality_status
@@ -721,7 +721,7 @@ def status(workflow,project):
             if quality:
                 configured=general_ready()
                 key=digest([*research_credentials(),os.getenv('YOUTUBE_DATA_API_KEY','')]) if configured else None
-                general['quality_loop']=quality_status(quality[1],latest,configured,key)
+                general['quality_loop']=quality_status(quality[1],latest,configured,key,quality_parent)
         if history and not base.get('quality_loop') and (base.get('supplement_of') or history[-1]['decision'] is None):
             from research_supplement import candidate, status as supplement_status
             prior=history[-2] if base.get('supplement_of') and history[-1]['report']['version']==base['version'] else history[-1]
@@ -993,7 +993,7 @@ def action(workflow,pid,name,body):
             if name in QUALITY_ACTIONS:
                 from general_research_report import versions
                 from research_quality_loop import candidate as quality_candidate, dispatch
-                _,_,reports=versions(workflow,project)
+                _,quality_parent,reports=versions(workflow,project)
                 require(reports and reports[-1]['decision'] is None,'general_report_changed')
                 prior=reports[-1]['report']
                 followup=quality_candidate(workflow,project,prior,resume=name=='research-quality-resume')
@@ -1001,7 +1001,7 @@ def action(workflow,pid,name,body):
                 require(general_ready() or name=='research-quality-revoke','research_search_disabled')
                 gemini,search=research_credentials() if name!='research-quality-revoke' else (None,None)
                 key=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
-                return dispatch(followup[1],followup[0],prior,key,gemini,search,name,body)
+                return dispatch(followup[1],followup[0],prior,key,gemini,search,name,body,quality_parent)
             if name in ('research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-contract-run','research-supplement-resume-run','research-supplement-run','research-supplement-revoke','research-supplement-close'):
                 from general_research_report import versions
                 from research_supplement import candidate, dispatch

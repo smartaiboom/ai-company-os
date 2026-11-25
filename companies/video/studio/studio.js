@@ -938,10 +938,11 @@ function researchCommand(action) {
     const fields=approve?`<p>관리자·직원 조사 품질 검증 · 보고서 v${h(r.reports.at(-1).report.version)} · 24시간 · 무료 전용 $0</p>
       <p>Gemini 프로젝트 ${h(scope.proposal.provider_project)} · 공급자 잔량과 청구 미확인</p>
       <ul>${scope.proposal.units.map(unit=>`<li>${h(unit.model)} · ${h(unit.endpoint)} · ${h(unit.data_types.join(', '))}</li>`).join('')}</ul>
-      <label class="check"><input type="checkbox" name="confirmed" required>무료 전용 프로젝트와 위 전송 범위를 확인하고 개발 검증을 승인합니다.</label>`:
+      <label class="check"><input type="checkbox" name="confirmed" required>무료 전용 프로젝트와 위 전송 범위를 확인하고 개발 검증을 승인합니다.</label>
+      <label class="check"><input type="checkbox" name="followups">같은 목적·데이터 범위의 후속 보고서 검증도 포함합니다.</label>`:
       '<p>현재 개발 검증 서명 범위에 적용됩니다.</p>';
     return modal(title,fields,title,async data=>{
-      await api(detailApi(p)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:scope.review_hash}:{});
+      await api(detailApi(p)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:scope.review_hash,...(data.has('followups')?{followups:true}:{})}:{});
       return {message:'개발 검증 상태를 갱신했습니다.'};
     });
   }

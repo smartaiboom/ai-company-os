@@ -109,6 +109,9 @@ def assemble(project,history,store):
         previous=history[-2]['report']
         previous_count=len(public_sources(previous,private))
         comparison=f"직전 v{previous['version']} 대비 공개 메타데이터 {previous_count} → {len(sources)}건."
+    candidates=(['| 후보 | 공개 제목에 근거한 게임명 | 참고 영상 제목 | 제안 길이 | 출처 | 사용권 |',
+                 '| --- | --- | --- | --- | --- | --- |',*topic_rows]
+                if topic_rows else ['관리자가 대표 검토 후보를 제안하지 않았다.'])
     lines=['# 컷룸 최신 조사 검토 요약','',
            '- 프로젝트 표시명 · 게임 쇼츠 조사 / 분야 · 영상 기획',
            f"- 보고서 v{report['version']} · {timestamp(report['at'])} · {decision(latest)}",
@@ -118,8 +121,7 @@ def assemble(project,history,store):
            +('세 게임 비교 및 영상 사용 조건의 근거가 부족하다.' if hold and len(games)<3
              else '확인한 메타데이터의 범위와 별도 권리 검토 조건을 유지한다.'),
            comparison,'','## 후보 비교','',
-           '| 후보 | 공개 제목에 근거한 게임명 | 참고 영상 제목 | 제안 길이 | 출처 | 사용권 |',
-           '| --- | --- | --- | --- | --- | --- |',*topic_rows,'','## 공개 관측','',
+           *candidates,'','## 공개 관측','',
            '| 출처 | 공개 제목 | 조회수 | 영상 길이 | 관측 시각 | 게시 시각 |',
            '| --- | --- | ---: | ---: | --- | --- |']
     for key,row in sources.items():
@@ -137,18 +139,26 @@ def assemble(project,history,store):
             if ref in labels and (known or app_listing) and clean_title(game,private)==game:
                 verified.setdefault((game,url),[]).append(labels[ref])
         lines+=['','## 게임별 연결 근거','',
-                '공식 출처는 모바일 지원을 확인한다. 영상의 실제 플랫폼은 미확인이다.']
+                f'공식 모바일 지원과 연결된 게임은 {len({game for game,_ in verified})}종이다. '
+                '영상의 실제 플랫폼은 미확인이다.']
         for (game,url),refs in verified.items():
             lines.append(f'- {game} · 관측 {", ".join(refs)} · [공식 모바일 지원]({url})')
     lines+=['','## 미확인 사항과 실행 요약','',
             '- 공개 메타데이터는 실제 시청, Shorts 분류, 편집·게시 권리, 전체 인기 순위를 확인하지 않는다.']
     counts={}
-    for unit,item in store.attempts().items():
-        vendor=('YouTube' if unit.startswith('youtube-') else 'Tavily' if unit=='general-web' or unit.startswith('supplement-web-')
-                else 'App Store 공개 페이지' if unit.startswith('listing-') else 'Gemini')
-        counts.setdefault(vendor,[0,0])
-        counts[vendor][0]+=1
-        counts[vendor][1]+=int((item['result'] or {}).get('status')=='completed')
+    proposal=(store.read('policy.json') or {}).get('proposal',{}) if report.get('supplement_of') else {}
+    stores=(store,)
+    if proposal.get('resume_source_input_sha256'):
+        from research_supplement_resume import ancestry
+        stores=ancestry(store)
+        lines.append('- 호출 집계는 이번 보완과 재개 과정에서 이어받은 서명 원장 기준이다.')
+    for source in stores:
+        for unit,item in source.attempts().items():
+            vendor=('YouTube' if unit.startswith('youtube-') else 'Tavily' if unit=='general-web' or unit.startswith('supplement-web-')
+                    else 'App Store 공개 페이지' if unit.startswith('listing-') else 'Gemini')
+            counts.setdefault(vendor,[0,0])
+            counts[vendor][0]+=1
+            counts[vendor][1]+=int((item['result'] or {}).get('status')=='completed')
     names=('Gemini','Tavily','YouTube')
     if report.get('supplement_of'):
         names+=('App Store 공개 페이지',)

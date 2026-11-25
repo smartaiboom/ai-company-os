@@ -47,7 +47,7 @@ class SupplementResponseContractTests(TestCase):
                 ('finish','details','supplement_finish_option_not_empty'),
                 ('official_listing','invented','supplement_listing_not_observed'),
                 ('youtube',' a game','supplement_query_whitespace'),
-                ('web','https://example.invalid','supplement_query_not_public_keywords')):
+                ('web','https://example.invalid','supplement_query_unsafe')):
             with self.subTest(kind=kind), self.assertRaises(DecisionViolation) as exc:
                 action_option(dict(tool=kind,option=option),{})
             self.assertEqual(exc.exception.rule,rule)
@@ -79,3 +79,22 @@ class SupplementResponseContractTests(TestCase):
             with self.subTest(changes=changes):
                 self.assertIsNone(received_contract_stop(row, {**attempt, **changes}))
         self.assertIsNone(received_contract_stop({**row, 'result': None}, attempt))
+
+    def test_search_contract_uses_fixed_domain_filter_and_rejects_unsafe_keywords(self):
+        from autonomous_company import digest
+        from research_supplement import APP_STORE_SEARCH, action_option, web_search_hash
+        from web_research import tavily_search_body
+
+        query = "Example Game: iOS"
+        for unsafe in (query, 'site:apps.apple.com Example Game', 'Game apps.apple.com',
+                       'Game name@example.com', 'Game 010-1234-5678', 'Game tvly-hidden',
+                       'Game ＨＴＴＰ：／／example.com'):
+            with self.subTest(unsafe=unsafe), self.assertRaises(DecisionViolation):
+                action_option(dict(tool=APP_STORE_SEARCH, option=unsafe), {})
+        query = "Example Game (iOS) & Mobile 2"
+        action_option(dict(tool=APP_STORE_SEARCH, option=query), {})
+        body = tavily_search_body(query, include_domains=('apps.apple.com',))
+        self.assertEqual(body['include_domains'], ['apps.apple.com'])
+        self.assertEqual(body['search_depth'], 'basic')
+        self.assertEqual(web_search_hash(APP_STORE_SEARCH, query), digest(body))
+        self.assertNotEqual(web_search_hash(APP_STORE_SEARCH, query), web_search_hash('web', query))

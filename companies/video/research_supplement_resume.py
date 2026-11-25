@@ -46,6 +46,7 @@ def check_ancestors(source, credential):
 
 def checkpoint(source, prior):
     from research_workflow import linked_attempt
+    from research_supplement import APP_STORE_SEARCH, LEGACY_SEARCH_RULE, TOOL_CONTRACT, web_search_hash
 
     policy = source.read('policy.json')
     if not policy or source.read('manager-review.json') or source.read('supplement-outcome.json'):
@@ -81,7 +82,15 @@ def checkpoint(source, prior):
     known = {'supplement_finish_option_not_empty', 'supplement_query_whitespace', 'invalid_finish'}
     if stage == 'review':
         known.add('supplement_worker_shape')
-    if rejection['rule'] not in known and not (
+    # Migrate the exact legacy selection failure only when the signed lineage proves
+    # that it followed the historical selection continuation. New unsafe input stops.
+    migrate_search = (stage == 'selection' and rejection['rule'] == LEGACY_SEARCH_RULE
+                      and inherited and inherited['corrections'] == [['selection', None]]
+                      and not offer.get('tool_contract') and not source.read('research-result.json')
+                      and not any(not name.startswith('research-') for name in ledger))
+    migrate_report = (stage == 'report' and rejection['rule'] == 'insufficient_independent_evidence'
+                      and offer.get('tool_contract') == TOOL_CONTRACT and not offer.get('report_contract'))
+    if rejection['rule'] not in known and not migrate_search and not migrate_report and not (
             not inherited and rejection['rule'] is None and stage == 'selection'
             and attempt['reason'] == 'research_step_invalid'):
         return None
@@ -117,6 +126,7 @@ def checkpoint(source, prior):
         expected = {
             'youtube': {f'youtube-search-{i}'},
             'web': {f'supplement-web-{i}'},
+            APP_STORE_SEARCH: {f'supplement-web-{i}'},
             'official_listing': {f'listing-page-{i}'},
         }.get(kind)
         if not expected or not expected <= ledger.keys() or row.get('blocked_host') or row['status'] == 'policy_blocked':
@@ -129,7 +139,7 @@ def checkpoint(source, prior):
                     ledger[name]['reservation']['payload_sha256'] for name in requests]:
                 return None
             expected.update(requests)
-        if kind == 'web' and ledger[f'supplement-web-{i}']['reservation']['payload_sha256'] != digest(row['option']):
+        if kind in ('web', APP_STORE_SEARCH) and ledger[f'supplement-web-{i}']['reservation']['payload_sha256'] != web_search_hash(kind,row['option']):
             return None
         if kind == 'official_listing':
             requests = [entry for entry in row['requests'] if entry['kind'] == 'page']
@@ -174,6 +184,8 @@ def checkpoint(source, prior):
 
 
 def proposal(source, child, prior, credential, receipt):
+    from research_supplement import REPORT_CONTRACT, TOOL_CONTRACT
+
     check_ancestors(source, credential)
     state = checkpoint(source, prior)
     require(state and digest(state) == receipt['checkpoint_sha256'], 'research_continuation_blocked')
@@ -196,9 +208,10 @@ def proposal(source, child, prior, credential, receipt):
     for field, prefix in (('youtube_search', 'youtube-search-'), ('youtube_details', 'youtube-videos-'),
                           ('tavily', 'supplement-web-'), ('official_listing', 'listing-page-'), ('robots', 'listing-robots')):
         limits[field] = sum(unit['id'].startswith(prefix) for unit in units)
-    return state, policy, {**original, 'binding': child.binding, 'units': units, 'limits': limits,
+    report_version = {'report_contract': REPORT_CONTRACT} if state['stage'] == 'report' else {}
+    return state, policy, {**original, **report_version, 'binding': child.binding, 'units': units, 'limits': limits,
                            'resume_checkpoint_sha256': receipt['checkpoint_sha256'], 'resume_original_steps': steps,
-                           'resume_source_input_sha256': source.binding['input_sha256']}
+                           'resume_source_input_sha256': source.binding['input_sha256'], 'tool_contract': TOOL_CONTRACT}
 
 
 def status(source, child, prior, credential, receipt):

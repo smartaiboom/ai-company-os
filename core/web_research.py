@@ -69,10 +69,18 @@ def has_reviewable_claim(result):
     return any(claim['assessment'] in ('supported', 'conflicting') for claim in result['claims'])
 
 
-def tavily_search(query,key):
+def tavily_search_body(query, *, include_domains=()):
     safe_text(query,180)
+    body=dict(query=query,**SEARCH_FIELDS)
+    if include_domains:
+        body['include_domains']=list(include_domains)
+    return body
+
+
+def tavily_search(query,key,*,include_domains=()):
+    body=tavily_search_body(query,include_domains=include_domains)
     require(isinstance(key,str) and re.fullmatch(r'[A-Za-z0-9_-]{16,200}',key),'research_search_disabled')
-    raw=json.dumps(dict(query=query,**SEARCH_FIELDS),ensure_ascii=False).encode()
+    raw=json.dumps(body,ensure_ascii=False).encode()
     require(key.encode() not in raw,'research_secret_detected')
     deadline=monotonic()+15
     host='api.tavily.com'

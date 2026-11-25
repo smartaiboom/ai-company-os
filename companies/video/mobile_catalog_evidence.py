@@ -5,7 +5,7 @@ from html.parser import HTMLParser
 import json
 import re
 
-from autonomous_company import CompanyError, digest
+from autonomous_company import CompanyError, digest, require
 from commons_discovery import USER_AGENT
 from goal_dialogue import safe_text
 from mobile_game_evidence import canonical_game, game_evidence, normalized
@@ -32,10 +32,15 @@ class ListingMetadata(HTMLParser):
         self.structured=False
         self.parts=[]
         self.records=[]
+        self.canonical=[]
+        self.malformed=False
 
     def handle_starttag(self, tag, attrs):
+        attrs=dict(attrs)
+        if tag=='link' and 'canonical' in (attrs.get('rel') or '').lower().split():
+            self.canonical.append(attrs.get('href'))
         if tag=='script':
-            self.structured=dict(attrs).get('type')=='application/ld+json'
+            self.structured=(attrs.get('type') or '').split(';',1)[0].strip().lower()=='application/ld+json'
             self.parts=[]
 
     def handle_data(self, data):
@@ -46,40 +51,126 @@ class ListingMetadata(HTMLParser):
         if tag=='script' and self.structured:
             self.structured=False
             try:
-                self.records.append(json.loads(''.join(self.parts)))
+                self.records.append(json.loads(''.join(self.parts),object_pairs_hook=unique_fields))
             except (ValueError,RecursionError):
-                pass
+                self.malformed=True
+
+
+def unique_fields(pairs):
+    node=dict(pairs)
+    if len(node)!=len(pairs):
+        raise ValueError('duplicate JSON-LD field')
+    return node
+
+
+def graph_nodes(records):
+    stack=list(reversed(records))
+    while stack:
+        node=stack.pop()
+        if isinstance(node,list):
+            stack.extend(reversed(node))
+        elif isinstance(node,dict):
+            yield node
+            if isinstance(node.get('@graph'),(dict,list)):
+                stack.append(node['@graph'])
+
+
+def values(value):
+    return value if isinstance(value,list) else [value]
+
+
+def terms(value):
+    for text in values(value):
+        if isinstance(text,str):
+            yield re.sub(r'^https?://schema\.org/', '', text.strip(), flags=re.I).casefold()
 
 
 def listing(url,body):
+    def unavailable(reason):
+        return dict(status='empty',sources=[],reason=reason,
+                    extraction=dict(method='app_store_json_ld_v2',status='unverified',reason=reason))
+
+    app_id=listing_id(url)
+    if not app_id:
+        return unavailable('listing_url_not_allowed')
     parser=ListingMetadata()
     parser.feed(body)
-    matches=set()
-    for record in parser.records:
-        if not isinstance(record,dict) or record.get('@type')!='SoftwareApplication':
+    parser.close()
+    if any(not isinstance(item,str) or listing_id(item)!=app_id for item in parser.canonical):
+        return unavailable('listing_identity_conflict')
+    if parser.malformed:
+        return unavailable('listing_json_ld_invalid')
+    matched=[]
+    for record in graph_nodes(parser.records):
+        types=set(terms(record.get('@type')))
+        if not types & {'softwareapplication','mobileapplication','videogame','gameapplication'}:
             continue
-        canonical=record.get('url')
-        category=record.get('applicationCategory')
-        platform=record.get('operatingSystem')
-        name=record.get('name')
-        if not all(isinstance(value,str) for value in (canonical,category,platform,name)):
-            continue
-        if (listing_id(canonical)!=listing_id(url) or category.casefold() not in ('game','gameapplication','games')
-                or not re.search(r'\b(?:iOS|iPadOS)\b',platform,re.I)):
-            continue
+        identities=[]
+        for field in ('url','@id'):
+            for value in values(record.get(field)):
+                if not isinstance(value,str):
+                    continue
+                if field=='@id' and re.fullmatch(r'[0-9]{6,15}',value):
+                    identities.append(value)
+                elif field=='url' or value.startswith(('https://','http://')):
+                    identities.append(listing_id(value))
+        if app_id in identities:
+            if set(identities)!={app_id}:
+                return unavailable('listing_identity_conflict')
+            matched.append((record,types))
+    if not matched:
+        return unavailable('listing_app_node_unverified')
+    names=set()
+    categories=set()
+    platforms=set()
+    valid=[]
+    for record,types in matched:
         try:
+            name=record.get('name')
             safe_text(name,100)
+            name=name.strip()
+            names.add(normalized(name))
         except CompanyError:
-            continue
-        matches.add(name.strip())
-    if len(matches)!=1:
-        return dict(status='empty',sources=[],reason='mobile_listing_unverified')
-    name=matches.pop()
-    return dict(status='observed',sources=[evidence(url,name,'App Store game listing with iOS or iPadOS support.',
-                                                 'public_page',ORIGIN)])
+            name=None
+        category=set(terms(record.get('applicationCategory')))
+        typed_game=bool(types & {'videogame','gameapplication'})
+        category_game=bool(category & {'game','games','gameapplication','videogame'})
+        if typed_game and category and not category_game:
+            return unavailable('listing_metadata_conflict')
+        game=typed_game or category_game
+        if category or game:
+            categories.add(game)
+        os_values=[]
+        for item in values(record.get('operatingSystem')):
+            if isinstance(item,dict) and 'operatingsystem' in set(terms(item.get('@type'))):
+                item=item.get('name')
+            if isinstance(item,str):
+                os_values.extend(item.split(','))
+        mobile={match[1].lower() for text in os_values if (match:=re.fullmatch(
+            r'\s*(?:Requires\s+)?(iOS|iPadOS)(?:\s+[0-9]+(?:\.[0-9]+)*\s*(?:or later|and later|\+)?)?\.?\s*',
+            text,re.I))}
+        if os_values:
+            platforms.add(bool(mobile))
+        if name and game and mobile:
+            valid.append((name,mobile))
+    if len(names)>1 or len(categories)>1 or len(platforms)>1:
+        return unavailable('listing_metadata_conflict')
+    if not valid:
+        return unavailable('listing_name_unverified' if not names else
+                           'listing_game_category_unverified' if True not in categories else
+                           'listing_mobile_platform_unverified' if True not in platforms else
+                           'listing_evidence_incomplete')
+    name=valid[0][0]
+    labels=sorted({{'ios':'iOS','ipados':'iPadOS'}[item] for _,mobile in valid for item in mobile})
+    return dict(status='observed',extraction=dict(method='app_store_json_ld_v2',status='verified',
+                app_id=app_id,platforms=labels),sources=[evidence(url,name,
+                    f"App Store structured game listing explicitly lists {', '.join(labels)}.",
+                    'public_page',ORIGIN)])
 
 
 def read_listing(url,robots_operation,page_operation,invoke,cache):
+    require(listing_id(url),'research_evidence_invalid')
+
     def entry(target, kind, operation):
         return dict(url=target,host=HOST,path=source_url(target).path,kind=kind,
                     operation={**operation,'payload_sha256':digest(dict(method='GET',url=target))})
@@ -105,7 +196,16 @@ def verified_games(observations,at,preserved):
             if deadline-timedelta(days=30)<=when<=deadline:
                 apps[listing_id(row['url'])].append((ref,row))
     listings=defaultdict(list)
+    aliases=defaultdict(set)
+    for app_id,pages in apps.items():
+        for _,page in pages:
+            aliases[normalized(page['title'])].add(app_id)
     for pages in apps.values():
+        storefronts=defaultdict(set)
+        for _,page in pages:
+            storefronts[source_url(page['url']).path.split('/')[1]].add(normalized(page['title']))
+        if any(len(names)>1 for names in storefronts.values()):
+            continue
         names={canonical_game(page['title']) for _,page in pages} - {None}
         if len(names)<=1:
             game=next(iter(names)) if names else normalized(pages[0][1]['title'])
@@ -131,7 +231,8 @@ def verified_games(observations,at,preserved):
             ids={listing_id(page['url']) for _,page in pages}
             if len(ids)!=1:
                 continue
-            if not any(re.search(r'(?<!\w)'+re.escape(normalized(page['title']))+r'(?!\w)',title) for _,page in pages):
+            if not any(len(aliases[alias])==1 and re.search(r'(?<!\w)'+re.escape(alias)+r'(?!\w)',title)
+                       for _,page in pages if (alias:=normalized(page['title']))):
                 continue
             page_ref,page=pages[0]
             if game not in candidates[row['url']]:

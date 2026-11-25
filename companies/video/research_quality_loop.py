@@ -1,21 +1,22 @@
 """Owner-approved development verification of manager-led research improvement."""
-from itertools import combinations
 import os
+import re
 
 from autonomous_company import CompanyError, digest, exact, now, require
 from autonomous_gemini35 import ENDPOINT, MODEL
-from decision_recovery import delegated_call, received_contract_stop
+from decision_recovery import DecisionViolation, delegated_call, received_contract_stop
 from employee_web_research import ENDPOINT as YOUTUBE
 from goal_dialogue import safe_text
 from mission_production import approved_manager_result, draft_id
-from mobile_catalog_evidence import HOST, listing_id, read_listing, verified_games
+from mobile_catalog_evidence import HOST, ORIGIN, listing_id, read_listing, verified_games
+from mobile_game_evidence import normalized
 from production_operating import run_worker, unit
 from research_supplement import (APP_STORE_SEARCH, CLAIMS, PLAN_SCHEMA, TARGET, TOOLS, SupplementWorker,
     action_option, evidence_input, normalize_action, normalize_plan, validate_plan_assignment)
 from role_json_schema import S, arr, enum, obj
 from video_mission_one import MISSION_ACCOUNT
 from web_research import (TAVILY, collect_observation, evidence_catalog, independent_sources, research_report,
-                          tavily_search, tavily_search_body, validate_step)
+                          source_url, tavily_search, tavily_search_body, validate_step)
 
 PURPOSE = 'development_research_quality_loop_v1'
 ACTIONS = ('research-quality-approve', 'research-quality-run', 'research-quality-revoke', 'research-quality-resume')
@@ -185,6 +186,49 @@ def dispatch(store, base, prior, credential, gemini, search, name, body):
         raise
 
 
+def evidence_progress(observations, linked):
+    """Track evidence milestones by identity, ignoring newer copies of the same records."""
+    catalog=evidence_catalog(observations)
+    titles=[normalized(row['title']) for row in catalog.values()
+            if row['scope']=='api_metric' and row['origin']=='youtube_data_api']
+    signals={('linked_game',row['game']) for row in linked.values()}
+    for row in catalog.values():
+        app=listing_id(row['url'])
+        if not app:
+            continue
+        if row['scope']=='public_page' and row['origin']==ORIGIN:
+            signals.add(('official_mobile',app))
+        elif row['scope']=='search_lead':
+            parts=source_url(row['url']).path.split('/')
+            phrase=normalized(parts[-2].replace('-',' ')) if len(parts)==5 else ''
+            if len(phrase)>=4 and any(re.search(r'(?<!\w)'+re.escape(phrase)+r'(?!\w)',title) for title in titles):
+                signals.add(('relevant_listing_lead',app))
+    return signals
+
+
+def extraction_receipts(observations):
+    return [dict(at=row['at'], candidate=row.get('option'), status=row['status'], reason=row.get('reason'),
+                 http_status=[entry['http_status'] for entry in row.get('requests',[])],
+                 extraction=row.get('extraction'), sources=[item['id'] for item in row['sources']])
+            for row in observations if row.get('tool')=='official_listing']
+
+
+def linked_citation_pairs(catalog, verified):
+    pairs=[]
+    for video,row in verified.items():
+        official=row.get('platform_source_id')
+        if video in catalog and official in catalog and independent_sources([catalog[video],catalog[official]]):
+            pairs.append((video,official))
+    return pairs
+
+
+def validate_staff_report(value, observations, pairs):
+    validate_step(value,{},set(),observations,True)
+    for claim in value['claims']:
+        if claim['assessment']!='unverified' and not any(set(pair)<=set(claim['citations']) for pair in pairs):
+            raise DecisionViolation('research_evidence_invalid','quality_claim_pair_unlinked')
+
+
 def execute(store, base, prior, credential, gemini, search, proposal, *, provenance='provider_model_claim', resume=None):
     from general_research_report import manager_schema, validate_manager, youtube_tool
 
@@ -242,7 +286,10 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
         return verified_games(observations,now(),previous)
 
     def common(task):
-        return dict(goal=task,project=goal,criteria=criteria,verified=linked(),evidence=evidence_input(observations))
+        verified=linked()
+        return dict(goal=task,project=goal,criteria=criteria,verified=verified,evidence=evidence_input(observations),
+                    evidence_milestones=sorted(evidence_progress(observations,verified)),
+                    listing_extractions=extraction_receipts(observations))
 
     def collection(operation, payload, work):
         name = operation['id'].split(':',1)[0]
@@ -286,13 +333,15 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
         round_number += 1
         restoring=bool(resume and round_number==1)
         original=prior['staff']['observations'] if restoring else observations
-        before={row['game'] for row in verified_games(original,now(),previous).values()}
+        before_linked=verified_games(original,now(),previous)
+        before={row['game'] for row in before_linked.values()}
+        milestones=evidence_progress(original,before_linked)
         observation_start=len(original)
         idle=0
         stop='staff_finished' if restoring else 'target_met'
         while not restoring and len({row['game'] for row in linked().values()}) < TARGET:
             catalog = evidence_catalog(observations)
-            known_listings = {listing_id(row['url']) for row in catalog.values() if listing_id(row['url'])}
+            previous_progress=evidence_progress(observations,linked())
             leads = {ref:row['url'] for ref,row in catalog.items() if row['scope']=='search_lead' and listing_id(row['url'])
                      and ('official_listing',listing_id(row['url'])) not in used}
             choices = [tool for tool in plan['tools'] if tool!='official_listing' or leads]
@@ -304,7 +353,9 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
                          'Name the gap. For youtube, web or app_store_search use public game words only, without '
                          'URLs, domains, site operators or personal data. app_store_search applies the App Store '
                          'filter; its results are leads. Choose official_listing by observed ID. Prioritize '
-                         'independent mobile evidence. Use finish with empty option if no useful step remains.',
+                         'independent mobile evidence. Search leads and HTTP 200 alone do not verify support. '
+                         'Use extraction failure reasons to choose a different observed candidate or search approach. '
+                         'Use finish with empty option if no useful step remains.',
                          lambda value:action_option(value,leads),normalize_action)
             kind, option = step['tool'], step['option']
             if kind == 'finish':
@@ -326,17 +377,15 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
             if new_games:
                 stop = 'target_met' if len(before | new_games)>=TARGET else 'independent_evidence_added'
                 break
-            new_lead = any((app:=listing_id(row['url'])) and app not in known_listings
-                           for row in observed['sources'])
-            idle = 0 if new_lead else idle+1
+            new_signals=evidence_progress(observations,linked())-previous_progress
+            idle = 0 if new_signals else idle+1
             if idle >= IDLE_ACTIONS:
                 stop = 'no_progress'
                 break
 
         verified = linked()
         catalog = evidence_catalog(observations)
-        pairs = [(left,right) for left,right in combinations(catalog,2)
-                 if independent_sources([catalog[left],catalog[right]])]
+        pairs = linked_citation_pairs(catalog,verified)
         claim_schema=CLAIMS if pairs else arr(obj(statement=S,assessment=enum('unverified'),citations=arr(S)))
         staff = model(dict(**common('Write the staff report'),assignment=plan,stop_reason=stop,
                            independent_citation_pairs=pairs,report_resume=restoring),
@@ -345,7 +394,7 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
                       'about the same claim and only directly observed citations. Use unverified for gaps and '
                       'single-source observations. If there are no eligible pairs, all assessments must be unverified. '
                       'Cite at most four distinct observed IDs per claim. Use an empty option.',
-                      lambda value:validate_step(value,{},set(),observations,True),normalize_action)
+                      lambda value:validate_staff_report(value,observations,pairs),normalize_action)
         result = research_report(staff,observations)
         schema = manager_schema(result,collection=True,diverse=True,verified=verified)
         topics = schema['properties']['topics']
@@ -363,13 +412,15 @@ def execute(store, base, prior, credential, gemini, search, proposal, *, provena
                             staff=staff,used=sorted(used),stop_reason=stop,
                             collection=[dict(tool=row['tool'], status=row['status'], sources=len(row['sources']))
                                         for row in observations[observation_start:]],
-                            previous_independent_games=len(before),recent_rounds_without_new_games=idle_rounds),
+                            previous_independent_games=len(before),recent_rounds_without_evidence_progress=idle_rounds),
                        obj(review=schema,decision=PLAN_SCHEMA['properties']['decision']),
                        plan_guide+' In review, use hold for insufficient evidence and include only defensible '
                        'topics. Limited use needs exactly three separately verified games. Compare actual staff '
-                       'methods and outcomes. Reinvestigate only with a different method and expected evidence gain.',
+                       'methods and outcomes. Separate search leads, direct platform verification and interpretation. '
+                       'For each proposal explain audience value, why the length is suitable and practical feasibility. '
+                       'Keep rights unverified. Reinvestigate only with a different method and expected evidence gain.',
                        validate,wire=obj(review=wire_review,decision=PLAN_SCHEMA['properties']['decision']))
-        idle_rounds = 0 if {row['game'] for row in verified.values()}-before else idle_rounds+1
+        idle_rounds = 0 if evidence_progress(observations,verified)-milestones else idle_rounds+1
         completed = dict(result_sha256=digest(result),decision=review['review'],at=now(),
                          game_evidence=verified,provenance=provenance)
         store.write(f'quality-round-{round_number:04}.json',dict(assignment=plan,result=result,review=review,stop=stop))

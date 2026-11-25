@@ -54,3 +54,56 @@ def strategy_assignment(decision, contract, inputs, roles):
     return dict(role=role,input_sha256=digest(inputs),decision_sha256=digest(decision),
                 work=decision['work'],completion=decision['success_criteria'],risk=decision['risk'],
                 next_reviewer='owner')
+
+
+def completion_snapshot(criteria, available_tools):
+    """Facts supplied by a domain adapter, independent of the model's recommendation."""
+    records = {}
+    for row in criteria:
+        key = row['id']
+        refs = row['source_ids']
+        require(key not in records and row['state'] in ('met','unmet','unknown')
+                and type(row['observed']) is int and type(row['target']) is int
+                and 0 <= row['observed'] and row['target'] > 0
+                and (row['state']=='unknown' or (row['state']=='met') == (row['observed']>=row['target']))
+                and len(refs)==len(set(refs)), 'judgment_criteria_invalid')
+        records[key] = dict(state=row['state'], observed=row['observed'],
+                            target=row['target'], source_ids=sorted(refs))
+    facts = dict(criteria=records, available_tools=sorted(set(available_tools)))
+    return dict(**facts, sha256=digest(facts))
+
+
+def judgment_schema(snapshot):
+    return obj(snapshot_sha256=enum(snapshot['sha256']),
+               criteria=obj(**{key:obj(state=enum('met','unmet','unknown'),
+                                      observed={'type':'integer'},source_ids=arr(S))
+                               for key in snapshot['criteria']}))
+
+
+def verify_judgment(value, snapshot):
+    require(matches(value,judgment_schema(snapshot)), 'judgment_facts_invalid')
+    for key, row in value['criteria'].items():
+        bound = snapshot['criteria'][key]
+        require(row['state']==bound['state'] and row['observed']==bound['observed']
+                and sorted(row['source_ids'])==bound['source_ids'], 'judgment_facts_mismatch')
+
+
+def completion_record(value, snapshot, attempts):
+    """Retain an early stop for the reviewer with a deterministic gap assessment."""
+    reason = value['stop_reason']
+    require(reason in ('criteria_met','no_useful_path','access_limited','manager_review'), 'judgment_stop_invalid')
+    safe_text(value['explanation'],460)
+    remaining = [key for key,row in snapshot['criteria'].items() if row['state']!='met']
+    require(reason!='criteria_met' or not remaining, 'judgment_premature_completion')
+    require(reason!='access_limited' or not snapshot['available_tools']
+            or any(row['status'] in ('unavailable','policy_blocked') for row in attempts),
+            'judgment_access_unverified')
+    return dict(reason=reason, explanation=value['explanation'], remaining=remaining,
+                attempts=attempts, available_tools=snapshot['available_tools'],
+                reviewer_attention=bool(remaining and snapshot['available_tools']),
+                snapshot_sha256=snapshot['sha256'])
+
+
+def approach_key(value):
+    """Compare actual first actions, independent of a paraphrased rationale."""
+    return value['tool'], ' '.join(value['option'].casefold().split())

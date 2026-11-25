@@ -118,6 +118,8 @@ def versions(workflow,project,*,through=None):
                     duration_sample=duration_sample(result['observations'],fresh_only=bool(base.get('adaptive_sample'))))
         if 'game_evidence' in review:
             report['game_evidence']=review['game_evidence']
+        if 'judgment' in review:
+            report['judgment']=review['judgment']
         if 'supplement_of' in base:
             report['supplement_of']=base['supplement_of']
         report['sha256']=digest(report)

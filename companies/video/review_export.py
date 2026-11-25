@@ -143,6 +143,20 @@ def assemble(project,history,store):
                 '영상의 실제 플랫폼은 미확인이다.']
         for (game,url),refs in verified.items():
             lines.append(f'- {game} · 관측 {", ".join(refs)} · [공식 모바일 지원]({url})')
+    if judgment:=report.get('judgment'):
+        measured=judgment['measured']['criteria']['independent_mobile_comparison']
+        comparison=judgment['comparison']
+        lines+=['','## 근거 상태와 품질 변화','',
+                f"- 독립 모바일 근거 기준 · {measured['observed']}/{measured['target']}종"]
+        dimensions={'linked_games':'독립 근거 연결 게임','linked_candidates':'독립 근거 연결 후보',
+                    'candidates_with_length':'구체적 길이 제안','observed_sources':'직접 관측',
+                    'candidate_count':'후보'}
+        for key,label in dimensions.items():
+            old,new=comparison['before'][key],comparison['after'][key]
+            lines.append(f'- {label} · {old} → {new}'+(' · 감소' if key in comparison['declined'] else ''))
+        if completion:=judgment.get('completion'):
+            if completion['reviewer_attention']:
+                lines.append('- 직원은 미충족 기준과 추가로 사용할 수 있는 도구를 남기고 종료했다.')
     lines+=['','## 미확인 사항과 실행 요약','',
             '- 공개 메타데이터는 실제 시청, Shorts 분류, 편집·게시 권리, 전체 인기 순위를 확인하지 않는다.']
     counts={}

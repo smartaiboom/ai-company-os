@@ -996,7 +996,7 @@ def action(workflow,pid,name,body):
                 _,_,reports=versions(workflow,project)
                 require(reports and reports[-1]['decision'] is None,'general_report_changed')
                 prior=reports[-1]['report']
-                followup=quality_candidate(workflow,project,prior)
+                followup=quality_candidate(workflow,project,prior,resume=name=='research-quality-resume')
                 require(followup,'research_scope_invalid')
                 require(general_ready() or name=='research-quality-revoke','research_search_disabled')
                 gemini,search=research_credentials() if name!='research-quality-revoke' else (None,None)

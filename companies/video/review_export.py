@@ -154,7 +154,7 @@ def assemble(project,history,store):
         lines.append('- 호출 집계는 이번 보완과 재개 과정에서 이어받은 서명 원장 기준이다.')
     for source in stores:
         for unit,item in source.attempts().items():
-            vendor=('YouTube' if unit.startswith('youtube-') else 'Tavily' if unit=='general-web' or unit.startswith('supplement-web-')
+            vendor=('YouTube' if unit.startswith('youtube-') else 'Tavily' if unit=='general-web' or unit.startswith(('supplement-web-','web:'))
                     else 'App Store 공개 페이지' if unit.startswith('listing-') else 'Gemini')
             counts.setdefault(vendor,[0,0])
             counts[vendor][0]+=1

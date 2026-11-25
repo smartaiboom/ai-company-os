@@ -328,7 +328,11 @@ RESEARCH_ERROR_STAGES={
 
 def linked_attempt(store, name, row):
     supplement_step=re.fullmatch(r'research-(\d+)',name)
-    if supplement_step and (store.root/('supplement-step-'+supplement_step[1])).is_dir():
+    quality_step=re.fullmatch(r'model:([1-9][0-9]*)',name)
+    if quality_step:
+        from research_supplement import SupplementWorker
+        worker=SupplementWorker(store.root/('quality-model-'+quality_step[1]),{})
+    elif supplement_step and (store.root/('supplement-step-'+supplement_step[1])).is_dir():
         from research_supplement import SupplementWorker
         worker=SupplementWorker(store.root/('supplement-step-'+supplement_step[1]),{})
     elif name == 'manager-replan':
@@ -372,7 +376,7 @@ def research_diagnostics(store, ledger):
     providers = {name: dict(reserved=0, completed=0, unresolved=0) for name in ('gemini', 'tavily')}
     failure = None
     for name, row in ledger.items():
-        provider = ('tavily' if name=='general-web' or name.startswith('supplement-web-')
+        provider = ('tavily' if name=='general-web' or name.startswith(('supplement-web-','web:'))
                     else 'youtube' if name.startswith('youtube-')
                     else 'public_listing' if name.startswith('listing-') else 'gemini')
         providers.setdefault(provider,dict(reserved=0,completed=0,unresolved=0))
@@ -710,7 +714,15 @@ def status(workflow,project):
         from general_research_report import versions
         _,_,history=versions(workflow,project)
         general=dict(general=True,reports=history,version=base['version'])
-        if history and (base.get('supplement_of') or history[-1]['decision'] is None):
+        if history and history[-1]['decision'] is None:
+            from research_quality_loop import candidate as quality_candidate, status as quality_status
+            latest=history[-1]['report']
+            quality=quality_candidate(workflow,project,latest)
+            if quality:
+                configured=general_ready()
+                key=digest([*research_credentials(),os.getenv('YOUTUBE_DATA_API_KEY','')]) if configured else None
+                general['quality_loop']=quality_status(quality[1],latest,configured,key)
+        if history and not base.get('quality_loop') and (base.get('supplement_of') or history[-1]['decision'] is None):
             from research_supplement import candidate, status as supplement_status
             prior=history[-2] if base.get('supplement_of') and history[-1]['report']['version']==base['version'] else history[-1]
             followup=candidate(workflow,project,prior['report'])
@@ -977,6 +989,19 @@ def action(workflow,pid,name,body):
         base=inputs[0]
         if base.get('mode'):
             from general_research_report import review as owner_review
+            from research_quality_loop import ACTIONS as QUALITY_ACTIONS
+            if name in QUALITY_ACTIONS:
+                from general_research_report import versions
+                from research_quality_loop import candidate as quality_candidate, dispatch
+                _,_,reports=versions(workflow,project)
+                require(reports and reports[-1]['decision'] is None,'general_report_changed')
+                prior=reports[-1]['report']
+                followup=quality_candidate(workflow,project,prior)
+                require(followup,'research_scope_invalid')
+                require(general_ready() or name=='research-quality-revoke','research_search_disabled')
+                gemini,search=research_credentials() if name!='research-quality-revoke' else (None,None)
+                key=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
+                return dispatch(followup[1],followup[0],prior,key,gemini,search,name,body)
             if name in ('research-supplement-approve','research-supplement-repair-approve','research-supplement-continuation-approve','research-supplement-contract-run','research-supplement-resume-run','research-supplement-run','research-supplement-revoke','research-supplement-close'):
                 from general_research_report import versions
                 from research_supplement import candidate, dispatch

@@ -38,3 +38,28 @@ class OwnerOperatingPolicyTests(TestCase):
             with self.assertRaisesRegex(CompanyError,'owner_policy_revoked'):
                 policy.reserve('fixture-key',second,'payload-2')
             self.assertEqual(list(policy.attempts()),[unit['id']])
+
+    def test_development_scope_reserves_distinct_requests_within_signed_templates(self):
+        with TemporaryDirectory() as directory:
+            policy=OwnerOperatingPolicy(Path(directory)/'scope',{'project':'fixture'})
+            template=dict(id='model',model='fixture',endpoint='https://example.test',data_types=['public'],max_cost_usd=0)
+            proposal=dict(policy.proposal([template]),mode='development_scope')
+            key='fixture-key'
+            policy.approve(proposal,digest(proposal),key)
+            first={**template,'id':'model:1'}
+            second={**template,'id':'model:2'}
+            for change in (dict(endpoint='https://elsewhere.test'),dict(data_types=['private']),
+                           dict(max_cost_usd=1),dict(id='unknown:1'),dict(model='other')):
+                with self.assertRaisesRegex(CompanyError,'owner_policy_scope_changed'):
+                    policy.reserve(key,{**first,**change},digest(change))
+            reservation=policy.reserve(key,first,digest('first'))
+            with self.assertRaisesRegex(CompanyError,'owner_policy_unresolved_attempt'):
+                policy.reserve(key,second,digest('second'))
+            policy.finish(reservation,'completed')
+            with self.assertRaisesRegex(CompanyError,'owner_policy_replay'):
+                policy.reserve(key,second,digest('first'))
+            reservation=policy.reserve(key,second,digest('second'))
+            policy.finish(reservation,'failed_or_uncertain')
+            with self.assertRaisesRegex(CompanyError,'owner_policy_unresolved_attempt'):
+                policy.reserve(key,{**template,'id':'model:3'},digest('third'))
+            self.assertEqual(set(policy.attempts()),{'model:1','model:2'})

@@ -127,7 +127,12 @@ def versions(workflow,project,*,through=None):
         if version==through:
             return base,store,history
         if not decision:
+            from research_quality_loop import candidate as quality_candidate
             from research_supplement import candidate
+            quality=quality_candidate(workflow,project,report)
+            if quality and quality[1].read('policy.json') and quality[1].read('manager-review.json'):
+                base=quality[0]
+                continue
             followup=candidate(workflow,project,report)
             if followup and followup[1].read('policy.json') and not followup[1].read('supplement-closed.json'):
                 base=followup[0]

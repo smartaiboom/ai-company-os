@@ -20,7 +20,7 @@ PROJECT = r'company-[0-9a-f]{32}'
 STATIC = {'/': ('index.html', 'text/html'), '/studio.css': ('studio.css', 'text/css'),
           '/studio.js': ('studio.js', 'text/javascript')}
 MISSION_ACTIONS = ('mission-connect-web', 'mission-prepare', 'mission-consent', 'mission-run', 'mission-report')
-RESEARCH_ACTIONS = ('research-supplement-approve', 'research-supplement-repair-approve', 'research-supplement-continuation-approve','research-supplement-contract-run', 'research-supplement-resume-run', 'research-supplement-run', 'research-supplement-revoke', 'research-supplement-close', 'research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
+RESEARCH_ACTIONS = ('research-quality-approve', 'research-quality-run', 'research-quality-revoke', 'research-supplement-approve', 'research-supplement-repair-approve', 'research-supplement-continuation-approve','research-supplement-contract-run', 'research-supplement-resume-run', 'research-supplement-run', 'research-supplement-revoke', 'research-supplement-close', 'research-approve', 'research-run', 'research-revoke', 'research-report-review', 'research-checkpoint',
                     'research-recovery-approve', 'research-recovery-run', 'research-recovery-revoke',
                     'research-replan-approve', 'research-replan-run', 'research-replan-revoke',
                     'research-reinvestigate-approve', 'research-reinvestigate-run', 'research-reinvestigate-revoke',
@@ -1016,7 +1016,8 @@ def make_server(host, port, studio):
                         recovery = (state or {}).get('recovery') if match[3] == 'research-recovery-run' else None
                         replan = (state or {}).get('replan') if match[3] in (
                             'research-replan-run','research-reinvestigate-run') else None
-                        diagnostics = (replan or recovery or {}).get('diagnostics') or (state or {}).get('diagnostics')
+                        quality = (state or {}).get('quality_loop') if match[3] in ('research-quality-run',) else None
+                        diagnostics = (quality or replan or recovery or {}).get('diagnostics') or (state or {}).get('diagnostics')
                         error['research']=dict(stage=RESEARCH_ERROR_STAGES.get(exc.code,'preflight'),
                             diagnostics=diagnostics)
                         return self.send_json(409,error)

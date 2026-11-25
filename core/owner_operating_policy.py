@@ -1,9 +1,10 @@
-"""Finite owner delegation. Callers serialize control and execution under their project lock."""
+"""Signed owner delegation. Callers serialize control and execution under their project lock."""
 from contextlib import contextmanager
 from datetime import datetime, timedelta
 import fcntl
 import hmac
 import os
+import re
 from pathlib import Path
 
 from autonomous_company import Store, digest, now, parse, require
@@ -96,15 +97,26 @@ class OwnerOperatingPolicy:
             attempts[item['unit']['id']]=dict(reservation=item,result=result)
         return attempts
 
+    @staticmethod
+    def allows(proposal, unit):
+        if proposal.get('mode') != 'development_scope':
+            return unit in proposal['units']
+        identifier = re.fullmatch(r'([a-z][a-z-]*):[1-9][0-9]*', unit['id'])
+        return bool(identifier and {**unit, 'id': identifier[1]} in proposal['units'])
+
     def reserve(self, key, unit, payload_hash):
         with self.control_lock():
             grant=self.active(key)
             ledger=self.attempts()
             require(all(item['result'] and item['result']['status']=='completed' for item in ledger.values()),
                     'owner_policy_unresolved_attempt')
-            require(unit in grant['proposal']['units'] and unit['max_cost_usd']==0, 'owner_policy_scope_changed')
+            require(self.allows(grant['proposal'], unit) and unit['max_cost_usd']==0, 'owner_policy_scope_changed')
             require(unit.get('payload_sha256',payload_hash)==payload_hash,'owner_policy_scope_changed')
             require(unit['id'] not in ledger, 'owner_policy_exhausted')
+            if grant['proposal'].get('mode') == 'development_scope':
+                require(re.fullmatch(r'[a-f0-9]{64}', payload_hash) and all(
+                    row['reservation']['payload_sha256'] != payload_hash for row in ledger.values()),
+                    'owner_policy_replay')
             reservation=dict(policy_hash=digest(grant),unit=unit,payload_sha256=payload_hash,at=now())
             self.write('reserve-'+digest(unit['id'])+'.json',reservation)
             return reservation

@@ -327,7 +327,14 @@ class GeneralResearchTests(TestCase):
         worker=step_worker(store,base,{tool.name:tool},1,prior)
         self.assertEqual(worker.contract['schema']['properties']['decision']['properties']['tool']['enum'],['youtube_sample'])
         wire=worker._payload(None)['generationConfig']['responseJsonSchema']
-        self.assertEqual(wire['properties']['decision']['properties']['option']['enum'],['sample'])
+        properties=wire['properties']['decision']['properties']
+        self.assertEqual(properties['option']['enum'],['sample'])
+        self.assertEqual(properties['claims']['maxItems'],0)
+        self.assertEqual(properties['feasibility']['enum'],[''])
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid') as mixed:
+            worker.validate_response(dict(decision=dict(tool=tool.name,option='sample',claims=[],
+                                                        feasibility='시연 가능성 확인 예정')))
+        self.assertEqual(mixed.exception.rule,'mixed_tool_and_report')
         with self.assertRaisesRegex(CompanyError,'research_step_invalid') as invalid:
             worker.validate_response(dict(decision=dict(tool=tool.name,option='mobile games',claims=[],feasibility='')))
         self.assertEqual(invalid.exception.rule,'option_not_allowed')

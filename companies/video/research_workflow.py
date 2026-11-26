@@ -453,12 +453,16 @@ def step_worker(store, base, tools, index, observations, feedback=None, *, round
         claims=arr(obj(statement=S,assessment=enum('supported','conflicting','unverified'),citations=arr(S)))
         choices=[tool['name'] for tool in context['tools']]
         options=list(dict.fromkeys(option for tool in context['tools'] for option in tool['options']))
-        if not collection_required:
+        feasibility=S
+        if collection_required:
+            claims={**claims,'maxItems':0}
+            feasibility=enum('')
+        else:
             choices.append('finish')
             options.append('')
         # Keep the Gemini schema flat. The provider has rejected complex schemas on this path.
         worker.contract['wire_schema']=obj(decision=obj(tool=enum(*choices),option=enum(*options),
-                                                       claims=claims,feasibility=S))
+                                                       claims=claims,feasibility=feasibility))
         worker.contract['system'] += (
             ' For option, copy the exact key from the selected tool options object, not its search text. '
             'Collect a useful public observation before finishing when tools are available and there are no observations. '

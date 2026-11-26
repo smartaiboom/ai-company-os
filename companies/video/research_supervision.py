@@ -73,12 +73,17 @@ class Supervisor(ProductionManager):
 
 def supervision_store(source, binding=None):
     version = 8
-    prior = checkpoint_store(source).read('supervision-outcome.json')
-    if prior and prior['decision']['action']=='hold':
+    checkpoint = checkpoint_store(source)
+    prior = checkpoint.read('supervision-outcome.json')
+    grant = checkpoint.read('policy.json')
+    if (prior and prior['decision']['action']=='hold' and grant
+            and grant['proposal'].get('resume_checkpoint') and not checkpoint.read('revoked.json')):
         version = 9
         previous = discovery_store(source)
         outcome = previous.read('supervision-outcome.json')
-        if outcome and outcome['decision']['action']=='hold':
+        discovery_grant = previous.read('policy.json')
+        if (outcome and outcome['decision']['action']=='hold' and discovery_grant
+                and discovery_grant['proposal'].get('discovery_checkpoint') and not previous.read('revoked.json')):
             version = 10
             failed = (followup_store(source).attempts().get('staff-1') or {}).get('result') or {}
             receipt = (failed.get('diagnostics') or {}).get('decision_receipt') or {}
@@ -148,9 +153,10 @@ def checkpoint_store(source):
 
 def discovery_checkpoint(source, observations, checkpoint):
     previous = checkpoint_store(source)
-    if not previous.read('supervision-outcome.json'):
-        return None
     grant = previous.read('policy.json')
+    if (not previous.read('supervision-outcome.json') or not grant
+            or not grant['proposal'].get('resume_checkpoint')):
+        return None
     require(grant and not previous.read('revoked.json')
             and grant['proposal']['resume_checkpoint']==checkpoint
             and previous.read('preserved-observations.json')==dict(observations=observations),

@@ -5,7 +5,7 @@ from copy import deepcopy
 from urllib.parse import urlsplit
 from urllib.error import HTTPError
 
-from autonomous_company import CompanyError, digest, exact, now, parse, require
+from autonomous_company import CompanyError, Store, digest, exact, now, parse, require
 from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config, Gemini35Store
 from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
 from goal_dialogue import safe_text
@@ -15,8 +15,9 @@ from groq_provider import (MODEL as GROQ_MODEL, ENDPOINT as GROQ_BASE, COST_POLI
 from mission_production import production_keys
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import unit
-from quality_provider import QualityProviderStore
+from quality_provider import QualityProviderStore, experience_context
 from quality_workflow import VideoProviderQualityCompany
+from representative_experience import current_selection, select, work_scope
 from representative_workflow import _report, portrait_script_spec
 from script_quality import SCRIPT_CONTRACT, script_editor_handoff, validate_script_editor
 from video_mission_one import MISSION_ACCOUNT, _binding
@@ -67,7 +68,11 @@ def choose(workflow, project, body):
     elif not latest['decision']:
         store.write('owner-review.json',dict(action='plan',feedback=record['direction'],report_sha256=report['sha256'],
                                              handoff_sha256=digest(record),at=now()))
+    initial_scope = work_scope(flow)
     flow['research_handoff']=record
+    if work_scope(flow) != initial_scope:
+        flow['experience_snapshot'] = select(workflow.store, flow, omit=project['id'],
+                                             fixture=workflow.fixture_experiences)
     workflow.store.save(project)
 
 
@@ -82,18 +87,21 @@ GROQ_ENDPOINT=GROQ_BASE+'/chat/completions'
 GROQ_PROJECT='Personal / Default Project'
 
 
-def offer(policy, *, include_render_measurements=True, provider='gemini'):
+def offer(policy, *, include_render_measurements=True, provider='gemini', experiences=()):
     require(provider in ('gemini','groq'),'collaboration_provider_invalid')
     data=['goal','owner_selection','public_research_evidence','research_limits','planning_and_script','owner_revision_feedback']
-    if provider=='groq':
-        return dict(policy.proposal([unit('planning',GROQ_MODEL,GROQ_ENDPOINT,data)]),
-            purpose='research_to_script_handoff',provider='groq',provider_project=GROQ_PROJECT,
-            includes_plan_revisions=True,account_evidence='owner_attested_free_only_provider_status_unverified')
-    if include_render_measurements:
+    fields = {'provider': 'groq'} if provider == 'groq' else {}
+    if experiences:
+        data.append('scoped_representative_preferences')
+        fields['experiences_sha256'] = digest(experiences)
+    if provider=='gemini' and include_render_measurements:
         data.append(RENDER_MEASUREMENTS)
-    return dict(policy.proposal([unit('planning',MODEL,ENDPOINT,data)]),
-        purpose='research_to_script_handoff',provider_project=MISSION_ACCOUNT,
-        includes_plan_revisions=True,account_evidence='owner_attested_free_only_provider_status_unverified')
+    model, endpoint, account = ((GROQ_MODEL,GROQ_ENDPOINT,GROQ_PROJECT) if provider=='groq'
+                                else (MODEL,ENDPOINT,MISSION_ACCOUNT))
+    return dict(policy.proposal([unit('planning',model,endpoint,data)]),
+        purpose='research_to_script_handoff',provider_project=account,
+        includes_plan_revisions=True,account_evidence='owner_attested_free_only_provider_status_unverified',
+        **fields)
 
 
 def includes_render_measurements(grant):
@@ -139,8 +147,9 @@ class HandoffCompany(VideoProviderQualityCompany):
     def _quality_transport_allowed(self,p):
         active=self.policy.active(self.parent_key)
         grant=self.store.grant(p)['body']
+        experiences = p['quality_inputs']['experiences']
         require(active['proposal']==offer(self.policy,include_render_measurements=includes_render_measurements(active),
-                                          provider=self.store.provider_id)
+                                          provider=self.store.provider_id,experiences=experiences)
                 and p['quality_inputs']['answers']['scope_sha256']==digest(active)
                 and grant['expires_at']<=active['expires_at']
                 and hmac.compare_digest(self.parent_key,_binding(self.policy.binding['project'],self.config.api_key)),
@@ -153,6 +162,11 @@ class HandoffCompany(VideoProviderQualityCompany):
     def _before_transport(self,p):
         super()._before_transport(p)
         self._quality_transport_allowed(p)
+        if p['quality_inputs']['experiences']:
+            store = Store(self.policy.root.parent.parent)
+            project = store.load(self.policy.binding['project'])
+            selection = current_selection(store, project, fixture=self.source == 'offline_http_fixture')
+            require(experience_context(selection) == p['quality_inputs']['experiences'], 'owner_policy_scope_changed')
 
     def _delivery_blockers(self,p):
         return ['needs_user_review']
@@ -226,7 +240,8 @@ def state(workflow,project):
     policy=scope(workflow.store.root,project)
     grant=policy.read('policy.json')
     provider=grant['proposal'].get('provider','gemini') if grant else 'gemini'
-    proposal=grant['proposal'] if grant else offer(policy)
+    experiences=experience_context(workflow.selected_experiences(project))
+    proposal=grant['proposal'] if grant else offer(policy,experiences=experiences)
     revision=flow['decisions'][-1] if flow['stage']=='plan_revision' else None
     jobs=flow.get('collaboration_jobs',[])
     current=next((job for job in reversed(jobs) if job['revision_sha256']==(digest(revision) if revision else None)),None)
@@ -235,14 +250,16 @@ def state(workflow,project):
         if grant:
             config=provider_config(provider)
             policy.active(_binding(project['id'],config.api_key))
+            require(proposal==offer(policy,provider=provider,include_render_measurements=includes_render_measurements(grant),
+                                    experiences=experiences),'owner_policy_scope_changed')
     except CompanyError as exc:
         status=exc.code
     if current:
         status=current['status']
-    groq_offer=offer(policy,provider='groq') if not grant and os.getenv('GROQ_API_KEY') else None
+    groq_offer=offer(policy,provider='groq',experiences=experiences) if not grant and os.getenv('GROQ_API_KEY') else None
     return dict(status=status,proposal=proposal,review_hash=digest(proposal),
                 groq_offer=dict(proposal=groq_offer,review_hash=digest(groq_offer)) if groq_offer else None,
-                handoff=flow['research_handoff'], current=current)
+                handoff=flow['research_handoff'], current=current, experience_inputs=experiences)
 
 
 def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=False):
@@ -259,10 +276,14 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
                 'collaboration_choice_required')
         policy=scope(workflow.store.root,project)
         existing=policy.read('policy.json')
+        experiences=experience_context(workflow.selected_experiences(project))
+        require(not experiences or not workflow.fixture_experiences or (
+                allow_fixture and company_type.source=='offline_http_fixture'),
+                'collaboration_fixture_forbidden')
         if name=='collaboration-scope-approve':
             exact(body,('confirmed','review_hash','provider') if 'provider' in body else ('confirmed','review_hash'))
             provider=body.get('provider','gemini')
-            proposal=offer(policy,provider=provider)
+            proposal=offer(policy,provider=provider,experiences=experiences)
             config=provider_config(provider)
             if provider=='groq':
                 GroqFreeAdapter().build_request(b'{}',config.api_key)
@@ -278,13 +299,15 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
         credential=_binding(pid,config.api_key)
         grant=policy.active(credential)
         measurements=includes_render_measurements(grant)
-        require(grant['proposal']==offer(policy,include_render_measurements=measurements,provider=provider),
+        require(grant['proposal']==offer(policy,include_render_measurements=measurements,provider=provider,experiences=experiences),
                 'owner_policy_scope_changed')
         if provider=='gemini':
             require((config.model,config.endpoint)==(MODEL,ENDPOINT),'gemini_provider_binding')
             require(os.getenv('GEMINI35_AUTONOMOUS_FREE_ENABLED')=='1','gemini_execution_disabled')
         else:
             company_type=GroqHandoffCompany
+        require(not experiences or not workflow.fixture_experiences or company_type.source=='offline_http_fixture',
+                'collaboration_fixture_forbidden')
         revision=flow['decisions'][-1] if flow['stage']=='plan_revision' else None
         prior=flow['plan_versions'][-1] if revision else None
         video_context=None
@@ -314,7 +337,7 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
                 **(dict(reviewed_video=video_context,speech_overruns=revision.get('speech_overruns',[]) if revision else [])
                    if measurements else {})),
             constraints={**flow['constraints'],'aspect':'9:16'},
-            capabilities=dict(script_contract=SCRIPT_CONTRACT), experiences=[],
+            capabilities=dict(script_contract=SCRIPT_CONTRACT), experiences=experiences,
             feedback_text=revision['feedback'] if revision else flow['research_handoff']['direction'])
         job=store.create(project['goal'],inputs=inputs,max_calls=None,max_total_revisions=1)
         if provider=='groq' and jobs:
@@ -377,7 +400,8 @@ def publish_plan(workflow, project, job, prior, *, grant, allow_fixture):
         internal_job=job['id'],writer_sha256=digest(writer),editor_sha256=digest(editor),
         internal_reviews=tasks['writer']['reviews'],previous_plan_sha256=prior['sha256'] if prior else None,
         provenance=provenance,provider_identity=identity,task_history=deepcopy(job['assignments']),manager_plan=job['plan'],
-        final_review=job['final'],research_handoff=deepcopy(record)),flow['plan_versions'])
+        final_review=job['final'],experience_input_hashes=[item['record_hash']
+            for item in job['quality_inputs']['experiences']],research_handoff=deepcopy(record)),flow['plan_versions'])
     flow['plan_versions'].append(report)
     flow['collaboration_jobs'][-1]['status']='completed'
     workflow._transition(project,'awaiting_plan_approval')

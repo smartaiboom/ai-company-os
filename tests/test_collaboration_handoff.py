@@ -2,6 +2,9 @@ from datetime import datetime, timedelta, timezone
 from copy import deepcopy
 from itertools import count
 from io import BytesIO
+from http.client import HTTPConnection
+from threading import Thread
+from uuid import uuid4
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest import TestCase
@@ -14,7 +17,8 @@ from autonomous_gemini35 import ENDPOINT, MODEL
 from collaboration_handoff import GROQ_ENDPOINT, GROQ_MODEL, HandoffCompany, GroqHandoffCompany, GroqHandoffStore, publish_plan
 from general_research_report import base_for
 from research_workflow import research_store
-from studio_server import Studio
+from studio_server import Studio, make_server
+from representative_workflow import RepresentativeVideoWorkflow
 from tests.test_script_quality import script_callbacks, script_from_beats
 from tests.test_video_mission_one import FixtureResponse
 from voice_quality import AUDIENCE
@@ -38,27 +42,72 @@ class CollaborationHandoffTests(TestCase):
             with self.subTest(code=code):
                 self.exercise_handoff('groq',reject=code)
 
-    def exercise_handoff(self,provider,*,reject=False):
+    def test_cutroom_feedback_reuse(self):
+        self.exercise_handoff('gemini',reuse=True)
+
+    def exercise_handoff(self,provider,*,reject=False,reuse=False):
         groq=provider=='groq'
         model,endpoint=(GROQ_MODEL,GROQ_ENDPOINT) if groq else (MODEL,ENDPOINT)
         root=Path(self.enterContext(TemporaryDirectory()))
         studio=Studio(root,[])
         studio.collaboration_test_options=dict(company_type=FixtureHandoffCompany,allow_fixture=True)
-        pid=studio.workflow.create('가상 근거 자료에서 초보자용 영상 기획',audience=AUDIENCE)
-        studio.workflow.stage_mission_one(pid)
-        project=studio.project('workspace',pid)
-        store=research_store(root,project,dict(base_for(studio.workflow,project),version=1))
+        root.mkdir(exist_ok=True)
+        if reuse:
+            studio.workflow=RepresentativeVideoWorkflow(studio.workflow.store,fixture_experiences=True)
+            server=self.enterContext(make_server('127.0.0.1',0,studio))
+            thread=Thread(target=server.serve_forever,daemon=True)
+            thread.start()
+            self.addCleanup(server.shutdown)
+
+        def http(path, body=None, *, expected=200, headers=None):
+            from socket import socket
+            with patch.object(socket,'connect',connect_loopback):
+                conn=HTTPConnection('127.0.0.1',server.server_port,timeout=120)
+                try:
+                    request_headers={'Content-Type':'application/json','X-Studio-Token':studio.token,**(headers or {})}
+                    conn.request('GET' if body is None else 'POST',path,
+                                 None if body is None else json.dumps(body),request_headers)
+                    response=conn.getresponse()
+                    payload=response.read()
+                    self.assertEqual(response.status,expected,payload[:1000])
+                    return json.loads(payload) if response.getheader('Content-Type').startswith('application/json') else payload
+                finally:
+                    conn.close()
+
+        from socket import socket
+        original_connect=socket.connect
+        def connect_loopback(sock,address):
+            self.assertEqual(address,('127.0.0.1',server.server_port))
+            return original_connect(sock,address)
+
+        def create(audience):
+            if not reuse:
+                return studio.workflow.create('가상 근거 자료에서 초보자용 영상 기획',audience=audience)
+            return http('/api/project',dict(goal='가상 안내 영상',audience=audience,language='한국어',platform='YouTube Shorts',
+                        duration=60,notes='',key=str(uuid4())),expected=201)['id']
+
         row=evidence('https://example.org/public/tutorial','공개 자료 예시','제안 화면을 검증해야 합니다.',
                      'public_page','fixture')
         result=research_report(dict(claims=[dict(statement='예시 제안',assessment='unverified',
             citations=[row['id']])],feasibility='제작 소스 권리 미확인'),[dict(sources=[row],tool='fixture',status='observed')])
         topic=dict(title='약속 안내 문자에 들어갈 조건',rationale='가상 자료',length='60초',
                    visuals='자체 화면',source_ids=[row['id']],rights='unverified')
-        store.root.mkdir(mode=0o700)
-        store.write('research-result.json',result)
-        store.write('manager-review.json',dict(result_sha256=digest(result),at=now(),provenance='offline_fixture',
-                    decision=dict(action='hold',note='자료 한계',topics=[topic])))
+
+        def prepare_research(pid):
+            studio.workflow.stage_mission_one(pid)
+            project=studio.project('workspace',pid)
+            store=research_store(root,project,dict(base_for(studio.workflow,project),version=1))
+            store.root.mkdir(mode=0o700)
+            store.write('research-result.json',result)
+            store.write('manager-review.json',dict(result_sha256=digest(result),at=now(),provenance='offline_fixture',
+                        decision=dict(action='hold',note='자료 한계',topics=[topic])))
+            return studio.detail('workspace',pid)['research']['reports'][-1]['report']
+
+        pid=create(AUDIENCE)
+        research=prepare_research(pid)
         def action(name,body):
+            if reuse and name in ('decide','mission-preview','experience-save','experience-withdraw'):
+                return http(f'/api/project/workspace/{pid}/{name}',body)
             return studio.action('workspace',pid,name,body)
         research=studio.detail('workspace',pid)['research']['reports'][-1]['report']
         choice=dict(version=1,sha256=research['sha256'],candidate=0,direction='자체 화면으로 구성',
@@ -112,10 +161,11 @@ class CollaborationHandoffTests(TestCase):
             self.assertNotIn('synthetic-',json.dumps(attempt))
             return
 
-        def beat(start,end,narration,shot):
-            return dict(start=start,end=end,narration=narration,caption='가상 예시',screen='모의 예시 화면',
+        def beat(start,end,narration,shot,caption):
+            return dict(start=start,end=end,narration=narration,caption=caption,screen='모의 예시 화면',
                 shot_type=shot,source_ref='미확보',source_status='pending',fact_status='illustrative')
         calls=[]
+        expected_experiences=[]
         def send(request,timeout):
             wire=json.loads(request.data)
             self.assertEqual(request.full_url,endpoint)
@@ -133,10 +183,13 @@ class CollaborationHandoffTests(TestCase):
             feedback=context['quality']['feedback_text']
             calls.append((phase,context.get('assignment',{}).get('role'),feedback))
             self.assertEqual(context['quality']['answers']['research_handoff']['evidence_ids'],[row['id']])
-            draft=script_from_beats([beat(0,3,'무엇이 달라졌을까요?','card'),
-                beat(3,20,'수정 화면을 확인하세요.' if '수정' in feedback else '첫 줄을 살펴보세요.','demo'),
-                beat(20,40,'날짜와 장소를 표시해 주세요.','demo'),
-                beat(40,60,'원본과 한번 대조해 보세요.','card')])
+            self.assertEqual(context['quality']['experiences'],expected_experiences)
+            revised='수정' in feedback or bool(expected_experiences)
+            caption='날짜·장소' if revised else '가상 안내 자막입니다'
+            draft=script_from_beats([beat(0,3,'무엇이 달라졌을까요?','card',caption),
+                beat(3,20,'수정 화면을 확인하세요.' if revised else '첫 줄을 살펴보세요.','demo',caption),
+                beat(20,40,'날짜와 장소를 표시해 주세요.','demo',caption),
+                beat(40,60,'원본과 한번 대조해 보세요.','card',caption)])
             draft['provenance']=dict(author='fixture response',model=model,mock=False)
             manager,employee=script_callbacks(draft,draft)
             value=json.loads((employee if phase=='execute' else manager)(phase,context))
@@ -167,8 +220,13 @@ class CollaborationHandoffTests(TestCase):
             self.assertEqual(first['provider_identity'],dict(provider_id=provider,model=model,endpoint=endpoint))
             self.assertEqual(first['research_handoff']['report_sha256'],research['sha256'])
             review=dict(stage='plan',version=1,sha256=first['sha256'],action='request_revision',
-                        feedback='수정 화면을 명확하게 보여 주세요.',changes_plan=False)
-            action('decide',review)
+                        feedback='수정 화면을 명확하게 보여 주고 자막을 짧게 줄여 주세요.',changes_plan=False)
+            if reuse:
+                action('decide',{**review,'action':'approve','feedback':''})
+                v1=self.render_preview(action,first)
+                action('decide',{**review,'stage':'video','sha256':v1['sha256'],'changes_plan':True})
+            else:
+                action('decide',review)
             second=action('collaboration-run',{})['flow']['plan_versions'][-1]
             self.assertEqual(second['previous_plan_sha256'],first['sha256'])
             self.assertNotEqual(second['script']['transcript'],first['script']['transcript'])
@@ -180,3 +238,79 @@ class CollaborationHandoffTests(TestCase):
         self.assertTrue(any(phase=='execute' and role=='writer' for phase,role,_ in calls))
         self.assertTrue(any(phase=='review' and role=='editor' for phase,role,_ in calls))
         self.assertEqual(flow['plan_versions'][0],first)
+
+        if not reuse:
+            return
+        v2=self.render_preview(action,second)
+        for video in (v1,v2):
+            self.assertTrue(video['qa']['full_decode'])
+            self.assertEqual(video['qa']['perceptual_quality'],'unassessed')
+            self.assertEqual(http(video['url'],expected=206,headers={'Range':'bytes=4-7'}),b'ftyp')
+        self.assertNotEqual(v1['artifact_sha256'],v2['artifact_sha256'])
+        approval=dict(stage='video',version=2,sha256=v2['sha256'],action='approve',feedback='',changes_plan=False)
+        route=f'/api/project/workspace/{pid}'
+        self.assertEqual(http(route+'/decide',approval,expected=409)['code'],'technical_preview_not_approvable')
+        save=dict(stage='video',version=2,sha256=v2['sha256'],category='captions',
+                  preference='자막은 핵심 단어 위주로 짧게 적습니다.',confirmed=True,replaces=None)
+        self.assertEqual(http(route+'/experience-save',{**save,'sha256':v1['sha256']},expected=409)['code'],
+                         'stale_representative_report')
+        reviewed=action('experience-save',save)
+        record,=reviewed['flow']['experiences']
+        self.assertTrue(record['fixture'])
+        self.assertLess(record['measurements']['max_caption_chars_after'],record['measurements']['max_caption_chars_before'])
+        self.assertEqual(record['comparison']['before']['artifact_sha256'],v1['artifact_sha256'])
+        self.assertEqual(record['comparison']['after']['artifact_sha256'],v2['artifact_sha256'])
+        self.assertEqual(http(route+'/experience-save',save,expected=409)['code'],
+                         'experience_duplicate_or_replacement_required')
+        origin=pid
+        pid=create('다른 대상')
+        different=http(f'/api/project/workspace/{pid}')['flow']['experience_selection']
+        self.assertEqual(different['selected'],[])
+        self.assertEqual(different['excluded'][0]['reason'],'work_scope')
+        normal=RepresentativeVideoWorkflow(studio.workflow.store)
+        normal_pid=normal.create('운영 경로의 가상 과제',audience=AUDIENCE, constraints=dict(
+            language='한국어',platform='YouTube Shorts',duration_seconds=60))
+        self.assertEqual(normal.selected_experiences(normal.store.load(normal_pid))['excluded'][0]['reason'],'provenance')
+
+        pid=create(AUDIENCE)
+        next_research=prepare_research(pid)
+        state=action('research-plan-handoff',{**choice,'sha256':next_research['sha256']})['collaboration']
+        expected_experiences=state['experience_inputs']
+        self.assertEqual([row['record_hash'] for row in expected_experiences],[record['record_hash']])
+        self.assertEqual(state['proposal']['experiences_sha256'],digest(expected_experiences))
+        action('collaboration-scope-approve',dict(confirmed=True,review_hash=state['review_hash']))
+        with patch('collaboration_handoff.send_once',side_effect=send):
+            next_plan=action('collaboration-run',{})['flow']['plan_versions'][-1]
+        self.assertEqual(next_plan['experience_input_hashes'],[record['record_hash']])
+        self.assertEqual(next_plan['script']['narrative_beats'][0]['caption'],'날짜·장소')
+        self.assertEqual(next_plan['provenance'],'offline_http_fixture')
+        from representative_experience import select
+        conflict={**record,'id':'experience-conflict','positive_preference':'자막은 완전한 문장으로 씁니다.'}
+        with patch('representative_experience.candidates',return_value=[record,conflict]):
+            eligible=select(studio.workflow.store,studio.workflow.store.load(pid)['representative'],fixture=True)
+        self.assertEqual(eligible['selected'],[])
+        self.assertEqual([row['reason'] for row in eligible['excluded']],['conflict','conflict'])
+
+        # A pending signed scope cannot silently change after the source preference is replaced.
+        pending=create(AUDIENCE)
+        pid=pending
+        next_research=prepare_research(pid)
+        state=action('research-plan-handoff',{**choice,'sha256':next_research['sha256']})['collaboration']
+        action('collaboration-scope-approve',dict(confirmed=True,review_hash=state['review_hash']))
+        replaced=http(f'/api/project/workspace/{origin}/experience-save',{**save,'replaces':record['id'],
+                      'use_measured_limit':True})['flow']['experiences'][-1]
+        self.assertEqual(replaced['measured_lesson'],'max_caption_chars')
+        with patch('collaboration_handoff.send_once') as transport:
+            with self.assertRaisesRegex(CompanyError,'owner_policy_scope_changed'):
+                action('collaboration-run',{})
+            transport.assert_not_called()
+        http(f'/api/project/workspace/{origin}/experience-withdraw',dict(id=replaced['id'],
+             record_hash=replaced['record_hash'],reason='검증용 선호 철회'))
+        excluded=http(f'/api/project/workspace/{pending}')['flow']['experience_selection']
+        self.assertEqual(excluded['selected'],[])
+        self.assertEqual(excluded['excluded'][0]['reason'],'inactive')
+
+    @staticmethod
+    def render_preview(action,plan):
+        return action('mission-preview',dict(version=plan['version'],sha256=plan['sha256'],
+                      audio_mode='none'))['flow']['video_versions'][-1]

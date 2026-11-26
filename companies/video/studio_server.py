@@ -14,6 +14,7 @@ from urllib.parse import urlsplit
 from autonomous_company import CompanyError, Store, exact, require, digest, now
 from representative_workflow import RepresentativeVideoWorkflow, _file_hash
 from collaboration_handoff import ACTIONS as COLLABORATION_ACTIONS
+import representative_experience as experience
 
 ASSETS = Path(__file__).with_name('studio')
 ROOT = Path('data/video_representative_workflow')
@@ -139,6 +140,9 @@ ERRORS = {
     'budget_review_changed': '검토한 예산 요청이 변경됐습니다. 새로고침 후 확인해 주세요.',
     'budget_or_consent_expired': '예산 요청 또는 외부 전송 동의가 만료됐습니다.',
     'budget_decision_replay': '이미 처리했거나 유효하지 않은 예산 요청입니다.',
+    'experience_review_required': '최신 수정본과 이전 버전을 비교한 후 대상과 보존할 선호를 확인해 주세요.',
+    'experience_record_changed': '경험 기록이 변경됐습니다. 새로고침해 주세요.',
+    'experience_duplicate_or_replacement_required': '이미 보존된 선호입니다. 내용이 다른 경우 기존 기록을 대체해 주세요.',
     'representative_stage_mismatch': '현재 단계에서는 실행할 수 없습니다. 최신 상태를 확인해 주세요.',
     'stale_representative_report': '검토한 버전이 최신 보고서와 다릅니다. 새로고침 후 확인해 주세요.',
     'representative_artifact_changed': '파일 또는 검증 기록의 해시가 달라 작업이 차단됐습니다.',
@@ -243,6 +247,17 @@ class Studio:
     def detail(self, key, pid):
         p = self.project(key, pid)
         flow = deepcopy(p['representative'])
+        if key == 'workspace':
+            flow['experience_selection'] = self.workflow.selected_experiences(p)
+        flow['experience_comparisons'] = {}
+        for stage in ('plan', 'video'):
+            reports = flow[f'{stage}_versions']
+            if reports and (comparison := experience.comparison(flow, stage, reports[-1])):
+                flow['experience_comparisons'][stage] = comparison
+        for row in flow.get('experiences', []):
+            if row.get('source') == experience.SOURCE:
+                row['record_hash'] = digest(row)
+        flow.pop('experience_snapshot', None)
         flow.pop('scoped_experiences', None)
         flow.pop('creation_key', None)
         flow.pop('budget_setup', None)
@@ -801,13 +816,15 @@ class Studio:
     def action(self, key, pid, name, body):
         self.project(key, pid)
         require(key == 'workspace', 'readonly_project')
-        if name not in RESEARCH_ACTIONS+COLLABORATION_ACTIONS:
+        if name not in RESEARCH_ACTIONS+COLLABORATION_ACTIONS+experience.ACTIONS:
             from general_research_report import eligible
             current=self.project(key,pid)
             flow=current['representative']
             existing_mission=name=='mission' and flow.get('mission_one_job') and flow['stage']=='research_planning'
             require(existing_mission or not eligible(self.workflow,current),'general_report_only')
-        if name=='rework-quality-decide':
+        if name in experience.ACTIONS:
+            experience.review(self.workflow, pid, name, body)
+        elif name=='rework-quality-decide':
             self.rework_quality_decide(pid,body)
         elif name=='rework-finalize-recover':
             from representative_rework import recover_finalization
@@ -1018,7 +1035,7 @@ def make_server(host, port, studio):
                     project = studio.project('workspace', match[1])
                     plan = matching_plan(project, body['version'], body['sha256'])
                     return self.send_json(200, dict(markdown=plan_markdown(project, plan)))
-                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS+RESEARCH_ACTIONS+COLLABORATION_ACTIONS+ALTERNATIVE_ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
+                if match := re.fullmatch(rf'/api/project/([\w-]+)/({PROJECT})/(planning|mission|{"|".join(MISSION_ACTIONS+PRODUCTION_ACTIONS+RESEARCH_ACTIONS+COLLABORATION_ACTIONS+ALTERNATIVE_ACTIONS+experience.ACTIONS)}|decide|produce|mission-preview|budget-decide|budget-run|budget-prepare|budget-reprepare|budget-consent|budget-revoke|rework-prepare|rework-consent|rework-run|rework-recover|rework-new-prepare|rework-quality-decide|rework-quality-prepare|rework-script-recover-prepare|rework-finalize-recover|rework-cap-prepare)', path):
                     try:
                         result=studio.action(*match.groups(), body)
                     except CompanyError as exc:

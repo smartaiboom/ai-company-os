@@ -126,6 +126,47 @@ function facts(rows) {
 function sourceLink(url) {
   return /^https:\/\//i.test(url) ? `<a href="${h(url)}" target="_blank" rel="noopener noreferrer">출처 열기 ↗</a>` : '';
 }
+const experienceCategories = {tone:'말투', captions:'자막'};
+function experienceComparison(p, stage, report) {
+  const comparison = p.flow.experience_comparisons?.[stage];
+  const versions = p.flow[`${stage}_versions`];
+  if (!comparison || versions.at(-1)?.sha256 !== report.sha256) return '';
+  const before = versions.find(v=>v.sha256===comparison.before.sha256);
+  if (!before) return '';
+  const measures = comparison.measurements;
+  return `<details class="subpanel"><summary>수정 전후 비교 · 보존할 선호</summary>
+    <p>v${h(before.version)} → v${h(report.version)} · ${h(comparison.decision.feedback)}</p>
+    ${stage==='video'? `<video class="player" controls preload="none" src="${h(before.url)}" aria-label="수정 전 영상"></video>`:
+      `<p>수정 전 대본</p><p class="script">${h(before.script.transcript)}</p>
+      <p>수정 전 자막 · ${h(before.script.narrative_beats.map(beat=>beat.caption).join(' / '))}</p>`}
+    <p>최대 대본 자막 길이 ${h(measures.max_caption_chars_before)} → ${h(measures.max_caption_chars_after)}자 · 객관적 품질 미평가</p>
+    ${comparison.fixture?'<p>모의 산출물 비교 · 운영 프로젝트 재사용 제외</p>':''}
+    ${!p.readonly && p.audience!=='미정'?actionButton('experience-save','선호 기록', '', stage):''}
+  </details>`;
+}
+function experiencePanel(p) {
+  const records = (p.flow.experiences || []).filter(row=>row.record_hash);
+  const selection = p.flow.experience_selection;
+  const entered = new Set([...(p.flow.offline_experience_inputs || []),
+    ...p.flow.plan_versions.flatMap(plan=>plan.experience_input_hashes || [])]);
+  if (!records.length && !selection?.selected.length && !selection?.excluded.length) return '';
+  const exclusion = {inactive:'철회·대체', provenance:'출처·검증 기준 불일치', work_scope:'대상·제작 조건 불일치',
+    conflict:'상충하는 선호', duplicate:'중복', changed:'기록 변경'};
+  return `<section class="panel"><h2>경험 기록과 재사용</h2>
+    ${records.map(row=>`<details><summary>${h(experienceCategories[row.category])} · ${h(row.positive_preference)} · ${row.active?'활성':'철회·대체'}</summary>
+      <p>${row.fixture?'모의 기록':'대표 확인 선호'}${row.measured_lesson?' · 비교에서 측정된 자막 길이 기준':''} · 객관적 품질 미평가 · ${h(row.target_segment)}</p>
+      <p>수정 의견 · ${h(row.original_text)}</p>
+      <p>수정 전 v${h(row.comparison.before.version)} · 수정 후 v${h(row.comparison.after.version)}</p>
+      <p class="mono">${h(row.comparison.before.sha256)} → ${h(row.comparison.after.sha256)}</p>
+      <p class="mono">기록 SHA-256 ${h(row.record_hash)}</p>
+      ${!p.readonly && row.active?actionButton('experience-withdraw','경험 철회','',row.id):''}</details>`).join('')}
+    ${(selection?.selected || []).map(row=>`<p>${h(row.positive_preference)} · 같은 대상과 제작 조건 ·
+      ${entered.has(row.record_hash)?'업무 입력 연결 기록 있음':'업무 입력 대기'}</p><p class="mono">${h(row.record_hash)}</p>`).join('')}
+    ${(selection?.excluded || []).length?`<details><summary>제외된 경험</summary>${selection.excluded.map(row=>
+      `<p>${h(exclusion[row.reason] || row.reason)} · ${entered.has(row.record_hash)?'이전 업무 입력 이력 있음 · ':''}${h(row.record_hash)}</p>`).join('')}</details>`:''}
+  </section>`;
+}
+
 function planPanel(p, plan, previous) {
   if (!plan) return `<section class="panel"><h2>기획·대본</h2><p class="muted">검토할 보고서가 없습니다. 조사·기획 작업에서 보고서를 제출하면 여기에 표시됩니다.</p></section>`;
   const script = plan.script;
@@ -152,6 +193,9 @@ function planPanel(p, plan, previous) {
     <details class="subpanel"><summary>변경사항·보고서 해시</summary><p>${h(plan.changes)}</p><p class="mono">${h(plan.sha256)}</p>
       ${previous ? `<p class="muted">이전 기획 v${previous.version} 대본</p><p class="script">${h(previous.script.transcript)}</p>` : ''}
       <p class="muted">내부 검토 ${plan.internal_reviews.length}건 · ${h(plan.internal_reviews.map(r=>r.action==='accept'?'수락':r.action==='revise'?'수정':'보류').join(' → '))}</p></details>
+    ${plan.experience_input_hashes?.length?`<details class="subpanel"><summary>기획과 직원 업무에 연결된 경험</summary>
+      ${plan.experience_input_hashes.map(hash=>`<p class="mono">${h(hash)}</p>`).join('')}</details>`:''}
+    ${experienceComparison(p,'plan',plan)}
     ${p.readonly ? '' : '<button class="button ghost" data-action="plan-markdown">대표 검토 Markdown 내려받기</button>'}
 
   </section>`;
@@ -196,7 +240,7 @@ function videoPanel(p, video) {
       ${r.editing_sha256?`<p>편집 직원의 검토 기준 · ${h(r.editing_review_criteria)}</p>
         ${r.review_material.map((shot,i)=>`<p>장면 ${i+1} · 소스 시작 ${h(shot.source_start_frames)} 프레임 ·
           ${h(shot.framing)} · ${h(shot.caption_position)} · ${h(shot.editing_note)}</p>`).join('')}`:''}</details>`:''}
-    </section>`;
+    ${experienceComparison(p,'video',video)}</section>`;
 }
 function missionProposal(proposal) {
   return `${facts([
@@ -449,7 +493,7 @@ function collaborationPanel(p) {
   return `<section class="subpanel"><h3>조사에서 기획·대본으로</h3>
     <p>조사 v${h(state.handoff.report_version)} · ${h(state.handoff.topic?.title||state.handoff.direction)}</p>
     <p>${h(state.handoff.limits)}</p>
-    ${action?actionButton(action[0],action[1]):`<p>${h(state.current?.reason||state.status)}</p>`}
+    ${action?actionButton(action[0],action[1]):`<p>${h(state.current?.reason||(state.status==='owner_policy_scope_changed'?'승인 당시 경험 범위와 현재 선택이 달라 전송이 차단됐습니다.':state.status))}</p>`}
     ${state.groq_offer?actionButton('collaboration-scope-approve','Groq 무료 범위 승인','','groq'):''}
     ${state.proposal.provider==='groq'?'<p>Groq · Personal / Default Project · GPT-OSS 20B</p>':''}
     ${state.status==='ready'?actionButton('collaboration-scope-revoke','기획 범위 철회'):''}</section>`;
@@ -1109,7 +1153,7 @@ function projectPage(p, chosen={}) {
   <h1>${h(p.goal)}</h1><p class="muted">${h(s[1])} · ${h(time(p.updated_at))}</p></section>
   <section class="panel next-work" id="next-work" aria-labelledby="next-heading"></section>
   <nav class="stepper" aria-label="업무 단계">${steps.map(([label,symbol],i)=>`<div class="step ${i===stepIndex?'current':i<stepIndex?'done':''}" ${i===stepIndex?'aria-current="step"':''}>${icon(i<stepIndex?'check':symbol)}${label}</div>`).join('')}</nav>
-  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${researchPanel(p)}${alternativePanel(p)}${productionPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}</div>
+  <div class="detail-grid"><div class="stack">${budgetSetupPanel(p)}${budgetPanel(p)}${researchPanel(p)}${alternativePanel(p)}${productionPanel(p)}${videoPanel(p,video)}${planPanel(p,plan,prior)}${experiencePanel(p)}</div>
   <aside class="stack"><section class="panel" id="work-detail"><h2>${icon('user')} 현재 업무</h2>${facts([['담당',s[1]],['대상',p.audience],['언어',f.constraints.language||'미정'],['플랫폼',f.constraints.platform||'미정'],['길이',f.constraints.duration_seconds?f.constraints.duration_seconds+'초':'미정'],['제약',f.constraints.notes||'미정']])}
   ${operations(p)}${p.stage!=='plan_revision'?reworkPanel(p):''}${p.rework&&p.mission?`<details class="subpanel"><summary>이전 미션 기획 보존 · 참고용 (최신 재작업 아님)</summary><p>아래 내부 수락은 이전 버전의 기록입니다. 최신 진행 상황은 위 AI 재작업 현황을 확인하세요.</p>${missionStatus(p.mission)}</details>`:missionStatus(p.mission)}${p.jobs.at(-1)?.assignments.length ? `<div class="subpanel"><h3>직원 인수 상태</h3>${p.jobs.at(-1).assignments.map(t=>`<p class="muted">${icon(t.role==='writer'?'script':t.role==='qa'?'shield':'film')} ${h(eventRoles[t.role] || t.role)} · ${t.state==='accepted_by_ai_manager'?'내부 검토 수락':'작업 또는 검토 대기'} · v${t.versions}</p>`).join('')}</div>` : ''}</section>
   <section class="panel"><h2>${icon('revision')} 대표 결정 이력</h2><ol class="timeline">${[...f.decisions].reverse().map(d=>`<li><strong>${d.stage==='plan'?'기획':'영상'} v${d.version} · ${d.action==='approve'?'승인':'수정 요청'}</strong><p class="muted">${h(time(d.at))}${d.changes_plan?' · 기획 재승인 필요':''}</p><p>${h(d.feedback)}</p></li>`).join('') || '<li>등록된 대표 결정이 없습니다.</li>'}</ol></section>
@@ -1685,6 +1729,32 @@ main.addEventListener('click',async event=>{
     main.innerHTML=dashboard(location.hash==='#projects'?'projects':'dashboard');
     if (filter) main.querySelector(`[data-filter="${filter}"]`)?.focus();
   } else if (button.dataset.action==='create') createProject();
+  else if (button.dataset.action==='experience-save') {
+    const p=detail, stage=button.dataset.scene, report=p.flow[`${stage}_versions`].at(-1);
+    const {fixture,measurements}=p.flow.experience_comparisons[stage];
+    const shorter=measurements.max_caption_chars_after>0 && measurements.max_caption_chars_after<measurements.max_caption_chars_before;
+    modal('비교한 수정본에서 선호 기록',
+      `<label>항목<select name="category"><option value="tone">말투</option><option value="captions">자막</option></select></label>
+      <label>같은 대상과 제작 조건에 적용할 선호<textarea name="preference" maxlength="500"></textarea></label>
+      ${shorter?`<label class="check"><input type="checkbox" name="measured">대신 측정된 자막 최대 ${h(measurements.max_caption_chars_after)}자 기준 보존</label>`:''}
+      <label class="check"><input type="checkbox" name="replace">이 항목의 활성 기록이 있으면 대체</label>
+      <label class="check"><input type="checkbox" name="confirmed" required>수정 전후를 비교했고 이 선호를 보존합니다.</label>`,
+      '선호 저장',async data=>{
+        const category=data.get('category');
+        const previous=p.flow.experiences.find(row=>row.category===category && row.fixture===fixture && row.active);
+        await api(detailApi(p)+'/experience-save',{stage,version:report.version,sha256:report.sha256,
+          category,preference:data.get('preference'),confirmed:data.has('confirmed'),use_measured_limit:data.has('measured'),
+          replaces:data.has('replace')?previous?.id || null:null});
+        return {message:'수정본에 연결된 선호를 저장했습니다.'};
+      });
+  } else if (button.dataset.action==='experience-withdraw') {
+    const p=detail, row=p.flow.experiences.find(record=>record.id===button.dataset.scene);
+    modal('경험 철회',`<p>${h(row.positive_preference)}</p><label>철회 이유<textarea name="reason" required maxlength="1000"></textarea></label>`,
+      '철회',async data=>{
+        await api(detailApi(p)+'/experience-withdraw',{id:row.id,record_hash:row.record_hash,reason:data.get('reason')});
+        return {message:'이후 업무의 경험 선택에서 제외했습니다.'};
+      });
+  }
   else if (button.dataset.action?.startsWith('collaboration-')) {
     const p=detail, action=button.dataset.action, approve=action==='collaboration-scope-approve', revoke=action==='collaboration-scope-revoke';
     const groq=approve && button.dataset.scene==='groq';
@@ -1692,6 +1762,9 @@ main.addEventListener('click',async event=>{
     modal(approve?'기획·대본 무료 범위 승인':revoke?'기획 범위 철회':'기획·대본 작업 시작',approve?
       `<p>${groq?'Groq GPT-OSS 20B':'Gemini 3.5 Flash-Lite'} · ${h(scope.proposal.provider_project)} · 24시간 · 무료 전용 $0</p>
       <p>목표, 대표 선택, 공개 조사 근거·한계, 기획·대본, 수정 의견과 역할별 검토 자료${groq?'를 Groq에 전송합니다. 운영 자료·개인정보·영상·음성·실측값은 제외합니다.':' 및 로컬 검토 영상의 해시·길이 측정값을 Gemini에 전송합니다.'} 같은 범위의 기획 재작업을 포함합니다.</p>
+      ${scope.proposal.experiences_sha256?`<p>같은 대상과 제작 조건에서 가져온 대표 선호, 수정 방향과 기록 해시를 함께 전송합니다.</p>
+        <ul>${p.collaboration.experience_inputs.map(row=>`<li>${h(row.positive_preference)} · <span class="mono">${h(row.record_hash)}</span></li>`).join('')}</ul>
+        <p class="mono">전송 경험 SHA-256 ${h(scope.proposal.experiences_sha256)}</p>`:''}
       <label class="check"><input type="checkbox" name="confirmed" required>무료 프로젝트와 전송 범위를 확인했습니다.</label>`:
       revoke?'<p>이후 기획·대본 전송을 중단합니다.</p>':'<p>관리자 기획과 직원 대본·장면표를 대표 검토용으로 작성합니다.</p>',
       approve?'승인':revoke?'철회':'작업 시작',async data=>{

@@ -9,6 +9,7 @@ from autonomous_company import CompanyError, Store, digest, exact, now, parse, r
 from local_artifacts import run_command
 from production_video import PORTRAIT_TOOL, portrait_font, render, validate, validate_portrait
 from quality_feedback import bind_context, select_experiences
+import representative_experience as experience
 from script_quality import SCRIPT_CONTRACT, validate_script_editor
 
 
@@ -44,9 +45,10 @@ def portrait_script_spec(script, board, audio_mode):
 class RepresentativeVideoWorkflow:
     """Python entry point. The two decisions are local business approvals only."""
 
-    def __init__(self, store):
+    def __init__(self, store, *, fixture_experiences=False):
         require(type(store) is Store, 'representative_local_store_required')
         self.store = store
+        self.fixture_experiences = fixture_experiences
 
     def create(self, goal, *, audience='미정', constraints=None, experiences=(), creation_key=None):
         constraints = {} if constraints is None else constraints
@@ -61,10 +63,15 @@ class RepresentativeVideoWorkflow:
                 constraints=deepcopy(constraints), plan_versions=[], video_versions=[],
                 decisions=[], planning_jobs=[], render_attempts=[], events=[], experiences=[],
                 scoped_experiences=select_experiences(experiences, domain='video', target_segment=audience))
+            project['representative']['experience_snapshot'] = experience.select(
+                self.store, project['representative'], omit=project['id'], fixture=self.fixture_experiences)
             if creation_key is not None:
                 project['representative']['creation_key'] = creation_key
             self._transition(project, 'goal_submitted')
         return project['id']
+
+    def selected_experiences(self, project):
+        return experience.current_selection(self.store, project, fixture=self.fixture_experiences)
 
     def _transition(self, project, stage):
         flow = project['representative']
@@ -82,6 +89,8 @@ class RepresentativeVideoWorkflow:
                 return flow['planning_jobs'][-1]
             require(flow['stage'] in ('goal_submitted', 'plan_revision'), 'representative_stage_mismatch')
             job = self.store.create(p['goal'], opt_in=True)
+            selection = self.selected_experiences(p)
+            legacy = flow['scoped_experiences']
             feedback = flow['decisions'][-1] if flow['decisions'] else None
             prior = flow['plan_versions'][-1] if flow['plan_versions'] else None
             bind_context(self.store, job['id'], dict(
@@ -89,7 +98,8 @@ class RepresentativeVideoWorkflow:
                     previous_plan=prior and dict(version=prior['version'], sha256=prior['sha256'],
                         script=prior['script'], summary=prior['summary'])),
                 constraints=flow['constraints'], capabilities={'script_contract': SCRIPT_CONTRACT},
-                experiences=flow['scoped_experiences'], permissions=dict(external_calls=False, cost_limit=0)))
+                experiences={**legacy, 'selected': legacy['selected'] + selection['selected']}, permissions=dict(external_calls=False, cost_limit=0)))
+            flow['offline_experience_inputs'] = [item['record_hash'] for item in selection['selected']]
             flow['planning_jobs'].append(job['id'])
             self._transition(p, 'research_planning')
             return job['id']
@@ -462,7 +472,7 @@ class RepresentativeVideoWorkflow:
                 next_stage = 'production'
             else:
                 flow['final_video'] = deepcopy(report)
-                flow['experiences'].append(dict(id='experience-1', domain='video', target_segment=flow['audience'],
+                flow['experiences'].append(dict(id='experience-'+str(len(flow['experiences'])+1), domain='video', target_segment=flow['audience'],
                     active=True, source='representative_workflow', extraction_source=provenance,
                     verification='verified' if provenance == 'user_structured' else 'hypothesis', original_text=feedback, issue='',
                     positive_preference='대표가 해당 영상 버전을 승인', proposed_correction='',

@@ -93,7 +93,7 @@ def versions(workflow,project,*,through=None):
                         store=research_store(workflow.store.root,project,base)
         transition=store.read('continuation.json')
         while recovery := store.read('provider-recovery.json') or (
-                transition if transition and transition['route'] in ('collect','report') else None):
+                transition if transition and transition['route'] in ('collect','report','contract_repair') else None):
             transition=recovery
             saved=transition['checkpoint']
             require(digest(saved)==transition['checkpoint_sha256'],'general_report_changed')
@@ -101,6 +101,8 @@ def versions(workflow,project,*,through=None):
                 excluded_units=saved['excluded_units'], excluded_payloads=saved['excluded_payloads'])}
             if transition['route'] in ('report','provider_recovery'):
                 base['continuation']['report_only']=True
+            if transition['route']=='contract_repair':
+                base['continuation']['contract_repair']=True
             if transition['route']=='provider_recovery':
                 base['continuation']['provider_recovery']=transition['recovery']
             base.pop('work_anchor',None)

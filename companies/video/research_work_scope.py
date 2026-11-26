@@ -26,7 +26,7 @@ def envelope(source,base,anchor=None):
             {field:base[field] for field in ('mission','target','audience','constraints','output')})))
 
 
-def proposal(work,stage):
+def proposal(work,stage,*,budget=None):
     units=[]
     limits={}
     allowed={}
@@ -39,6 +39,10 @@ def proposal(work,stage):
     # Up to one additional staff report and manager review. No additional searches are implied.
     if not stage.get('continuation_sha256'):
         limits['gemini']+=2
+    if budget is not None:
+        required={kind:sum(operation_kind(row)==kind for row in stage['units']) for kind in limits}
+        require(all(required[kind]<=budget.get(kind,0) for kind in required),'owner_policy_exhausted')
+        limits={kind:min(count,budget[kind]) for kind,count in limits.items()}
     for kind,count in limits.items():
         units.extend(dict(id=f'{kind}-{i}',provider=kind,max_cost_usd=0) for i in range(count))
     phases=['approved_collection','staff_report','manager_review','owner_feedback_rewrite']

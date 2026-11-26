@@ -236,7 +236,9 @@ class GeneralResearchTests(TestCase):
         base=dict(mode='general_research_report_v1',target='Research')
         worker=step_worker(store,base,{},10,observations,rounds=11)
         wire=worker._payload(None)['generationConfig']['responseJsonSchema']
-        citations=wire['properties']['decision']['properties']['claims']['items']['properties']['citations']
+        properties=wire['properties']['decision']['properties']
+        self.assertEqual(properties['option']['enum'],[''])
+        citations=properties['claims']['items']['properties']['citations']
         self.assertEqual(citations['items'],{'type':'string'})
         value=dict(decision=dict(tool='finish',option='',feasibility='권리 확인 필요',
                                  claims=[dict(statement='검증 전',assessment='unverified',
@@ -271,6 +273,11 @@ class GeneralResearchTests(TestCase):
         base=dict(mode='general_research_report_v1',target='Research',revision_plan={'route':'collect'})
         worker=step_worker(store,base,{tool.name:tool},1,prior)
         self.assertEqual(worker.contract['schema']['properties']['decision']['properties']['tool']['enum'],['youtube_sample'])
+        wire=worker._payload(None)['generationConfig']['responseJsonSchema']
+        self.assertEqual(wire['properties']['decision']['properties']['option']['enum'],['sample'])
+        with self.assertRaisesRegex(CompanyError,'research_step_invalid') as invalid:
+            worker.validate_response(dict(decision=dict(tool=tool.name,option='mobile games',claims=[],feasibility='')))
+        self.assertEqual(invalid.exception.rule,'option_not_allowed')
         finish=dict(decision=dict(tool='finish',option='',claims=[
             dict(statement='New evidence missing',assessment='unverified',citations=[])],feasibility='Rights unknown'))
         with self.assertRaisesRegex(CompanyError,'research_new_evidence_required'):

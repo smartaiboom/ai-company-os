@@ -449,9 +449,11 @@ def step_worker(store, base, tools, index, observations, feedback=None, *, round
          if base.get('revision_plan') else '')))
     if base.get('mode'):
         choices=[tool['name'] for tool in context['tools']]
+        options=list(dict.fromkeys(option for tool in context['tools'] for option in tool['options']))
         if not collection_required:
             choices.append('finish')
-        worker.contract['wire_schema']=obj(decision=obj(tool=enum(*choices), option=S,
+            options.append('')
+        worker.contract['wire_schema']=obj(decision=obj(tool=enum(*choices), option=enum(*options),
             claims=arr(obj(statement=S,assessment=enum('supported','conflicting','unverified'),citations=arr(S))),
             feasibility=S))
     if feedback:

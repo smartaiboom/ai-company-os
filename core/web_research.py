@@ -179,9 +179,14 @@ STEP_RULES = {
 }
 
 
+def evidence_assessments(catalog):
+    eligible = [row for row in catalog.values() if row['scope'] in ('public_page', 'api_metric')]
+    return ('supported', 'conflicting', 'unverified') if independent_sources(eligible) else ('unverified',)
+
+
 def step_schema(context, *, supervised=False, collection_required=False):
     catalog = context['evidence_catalog']
-    assessments = ('supported', 'conflicting', 'unverified') if independent_sources(list(catalog.values())) else ('unverified',)
+    assessments = evidence_assessments(catalog)
     references = {**arr(enum(*catalog) if catalog else S), 'maxItems': min(4, len(catalog))}
     claims = arr(obj(statement=S, assessment=enum(*assessments), citations=references))
     finish = obj(tool=enum('finish'), option=enum(''), claims={**claims, 'minItems': 1, 'maxItems': 5},

@@ -11,7 +11,7 @@ from mission_production import ProductionManager, approved_manager_result, canon
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import delegated_call, run_worker, unit
 from role_json_schema import S, arr, enum, matches, obj
-from web_research import (EVIDENCE_CONTRACT, STEP_RULES, TAVILY, Tool, evidence, evidence_catalog,
+from web_research import (EVIDENCE_CONTRACT, STEP_RULES, TAVILY, Tool, evidence, evidence_assessments, evidence_catalog,
                           collect_observation, has_reviewable_claim, research_report, run, step_context, step_schema,
                           tavily_search, validate_step, normalize_collection_step)
 
@@ -468,7 +468,7 @@ def step_worker(store, base, tools, index, observations, feedback=None, *, round
          'collect new video metadata when necessary and available, then report precise scope and limitations.'
          if base.get('revision_plan') else '')))
     if base.get('mode'):
-        claims=arr(obj(statement=S,assessment=enum('supported','conflicting','unverified'),citations=arr(S)))
+        claims=arr(obj(statement=S,assessment=enum(*evidence_assessments(context['evidence_catalog'])),citations=arr(S)))
         choices=[tool['name'] for tool in context['tools']]
         options=list(dict.fromkeys(option for tool in context['tools'] for option in tool['options']))
         worker.contract['separate_collection_fields']=True

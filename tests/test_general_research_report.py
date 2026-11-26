@@ -351,6 +351,23 @@ class GeneralResearchTests(TestCase):
         with self.assertRaisesRegex(CompanyError,'research_evidence_invalid'):
             worker.validate_response(value)
 
+    def test_summary_wire_requires_unverified_for_search_leads(self):
+        from types import SimpleNamespace
+        from research_workflow import step_worker
+        from web_research import evidence
+
+        leads=[evidence(f'https://{host}.example/item','Lead','Snippet','search_lead',host)
+               for host in ('publisher','press')]
+        sources=[evidence(f'https://{host}.example/item','Source','Observation','public_page',host)
+                 for host in ('publisher','press')]
+        for rows,expected in [(leads,['unverified']),(sources,['supported','conflicting','unverified'])]:
+            worker=step_worker(SimpleNamespace(root=Path('/tmp/offline-assessments')),
+                dict(mode='general_research_report_v1',target='Research'),{},3,
+                [dict(tool='saved',option='saved',status='preserved',sources=rows)])
+            props=worker._payload(None)['generationConfig']['responseJsonSchema']['properties']
+            assessment=props['decision']['properties']['claims']['items']['properties']['assessment']
+            self.assertEqual(assessment['enum'],expected)
+
     def test_branch_distinguishes_missing_evidence_from_rewording(self):
         from general_research_report import evidence_branch, manager_schema
         from web_research import evidence

@@ -14,7 +14,7 @@ import json
 
 from autonomous_company import CompanyError, digest, now
 from autonomous_gemini35 import ENDPOINT, MODEL
-from collaboration_handoff import GROQ_ENDPOINT, GROQ_MODEL, HandoffCompany, GroqHandoffCompany, GroqHandoffStore, publish_plan
+from collaboration_handoff import GROQ_ENDPOINT, GROQ_MODEL, HandoffCompany, GroqHandoffCompany, GroqHandoffStore, publish_plan, scope as owner_scope
 from general_research_report import base_for
 from research_workflow import research_store
 from studio_server import Studio, make_server
@@ -42,10 +42,20 @@ class CollaborationHandoffTests(TestCase):
             with self.subTest(code=code):
                 self.exercise_handoff('groq',reject=code)
 
+    def test_signed_development_scope_accumulates_across_revisions(self):
+        self.exercise_handoff('gemini',development=True)
+        with patch.object(GroqHandoffCompany,'source','offline_http_fixture'):
+            self.exercise_handoff('groq',development=True)
+
+    def test_development_provider_failure_blocks_further_execution(self):
+        for failure in (503, 429, 'timeout'):
+            with self.subTest(failure=failure):
+                self.exercise_handoff('gemini',reject=failure,development=True)
+
     def test_cutroom_feedback_reuse(self):
         self.exercise_handoff('gemini',reuse=True)
 
-    def exercise_handoff(self,provider,*,reject=False,reuse=False):
+    def exercise_handoff(self,provider,*,reject=False,reuse=False,development=False):
         groq=provider=='groq'
         model,endpoint=(GROQ_MODEL,GROQ_ENDPOINT) if groq else (MODEL,ENDPOINT)
         root=Path(self.enterContext(TemporaryDirectory()))
@@ -135,11 +145,40 @@ class CollaborationHandoffTests(TestCase):
                 action('collaboration-scope-approve',dict(confirmed=True,provider='groq',review_hash=scope['review_hash']))
             scope=scope['groq_offer']
             self.assertNotIn('local_render_measurements',scope['proposal']['units'][0]['data_types'])
-        action('collaboration-scope-approve',dict(confirmed=True,provider=provider,review_hash=scope['review_hash']))
+        approval=dict(confirmed=True,provider=provider,review_hash=scope['review_hash'])
+        policy=owner_scope(root,studio.workflow.store.load(pid))
+        if development:
+            offer=studio.detail('workspace',pid)['collaboration']['development_offers'][provider]
+            self.assertEqual(offer['proposal']['units'][0]['endpoint'],endpoint)
+            self.assertEqual(offer['proposal']['mode'],'development_scope')
+            self.assertNotIn('limits',offer['proposal'])
+            approval['mode']='development_scope'
+            with self.assertRaisesRegex(CompanyError,'owner_policy_scope_changed'):
+                action('collaboration-scope-approve',approval)
+            approval['review_hash']=offer['review_hash']
+        action('collaboration-scope-approve',approval)
+        if development:
+            with patch('owner_operating_policy.now',return_value='2099-01-01T00:00:00+09:00'):
+                with self.assertRaisesRegex(CompanyError,'owner_policy_expired'):
+                    action('collaboration-run',{})
+            self.assertEqual(policy.attempts(),{})
         if groq:
             with patch.dict('os.environ',GROQ_API_KEY='different-test-key'):
                 with self.assertRaisesRegex(CompanyError,'owner_policy_key_changed'):
                     action('collaboration-run',{})
+
+        if development and reject:
+            code = {503:'provider_unavailable',429:'provider_rate_limit','timeout':'free_request_failed'}[reject]
+            failure = TimeoutError() if reject=='timeout' else HTTPError(endpoint,reject,'Rejected',{},BytesIO())
+            with patch('collaboration_handoff.send_once',side_effect=failure) as transport:
+                with self.assertRaisesRegex(CompanyError,code):
+                    action('collaboration-run',{})
+                with self.assertRaisesRegex(CompanyError,'collaboration_duplicate'):
+                    action('collaboration-run',{})
+                transport.assert_called_once()
+            failed,=policy.attempts().values()
+            self.assertEqual(failed['result']['status'],'failed_or_uncertain')
+            return
 
         if reject:
             rejected=HTTPError(endpoint,403,'Rejected',{'Via':'synthetic-header-value'},
@@ -168,6 +207,10 @@ class CollaborationHandoffTests(TestCase):
         expected_experiences=[]
         def send(request,timeout):
             wire=json.loads(request.data)
+            if development:
+                reservation=policy.attempts()[f'planning:{len(calls)+1}']
+                self.assertIsNone(reservation['result'])
+                self.assertEqual(reservation['reservation']['payload_sha256'],digest(wire))
             self.assertEqual(request.full_url,endpoint)
             self.assertNotIn(key,request.data.decode())
             if groq:
@@ -239,6 +282,21 @@ class CollaborationHandoffTests(TestCase):
         self.assertTrue(any(phase=='review' and role=='editor' for phase,role,_ in calls))
         self.assertEqual(flow['plan_versions'][0],first)
 
+        if development:
+            self.assertEqual(len(policy.attempts()),len(calls))
+            self.assertGreater(len(calls),10)
+            ledger = policy.attempts()
+            self.assertTrue(all(row['result']['status']=='completed' for row in ledger.values()))
+            from video_mission_one import _binding
+            first = ledger['planning:1']['reservation']
+            with self.assertRaisesRegex(CompanyError,'owner_policy_replay'):
+                policy.reserve(_binding(pid,key),{**first['unit'],'id':f'planning:{len(calls)+1}'},first['payload_sha256'])
+            action('collaboration-scope-revoke',{})
+            with self.assertRaisesRegex(CompanyError,'owner_policy_revoked'):
+                policy.active(_binding(pid,key))
+            self.assertEqual(policy.attempts(),ledger)
+        else:
+            self.assertEqual(policy.attempts(),{})
         if not reuse:
             return
         v2=self.render_preview(action,second)

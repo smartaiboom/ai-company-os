@@ -495,6 +495,10 @@ function collaborationPanel(p) {
     <p>${h(state.handoff.limits)}</p>
     ${action?actionButton(action[0],action[1]):`<p>${h(state.current?.reason||(state.status==='owner_policy_scope_changed'?'승인 당시 경험 범위와 현재 선택이 달라 전송이 차단됐습니다.':state.status))}</p>`}
     ${state.groq_offer?actionButton('collaboration-scope-approve','Groq 무료 범위 승인','','groq'):''}
+    ${Object.entries(state.development_offers || {}).map(([provider])=>actionButton('collaboration-scope-approve',
+      provider==='groq'?'Groq 개발 검증 범위 승인':'Gemini 개발 검증 범위 승인','',`development-${provider}`)).join('')}
+    ${state.development_requests!==null && state.development_requests!==undefined?
+      `<p>개발 검증 범위 · 누적 예약 ${h(state.development_requests)}건 · 공급자 잔량과 청구 미확인</p>`:''}
     ${state.proposal.provider==='groq'?'<p>Groq · Personal / Default Project · GPT-OSS 20B</p>':''}
     ${state.status==='ready'?actionButton('collaboration-scope-revoke','기획 범위 철회'):''}</section>`;
 }
@@ -1424,7 +1428,8 @@ function showDetail() {
     ${work.reason?`<p class="warning" id="next-reason">${h(work.reason)}</p>`:''}
     ${overrun.length?`<p class="warning">${h(overrun.map(([scene])=>scene).join(', '))} · 승인 길이 초과로 합성 차단. 제작 상세에서 음성을 검토하세요.</p>`:''}
     <div class="actions">${work.buttons||''}${work.target?`<button class="button ghost" data-jump="${work.target}">관련 상세 보기</button>`:''}</div>`;
-  const signature=button=>JSON.stringify([button.dataset.action,button.dataset.consent,button.dataset.budgetDecision,button.dataset.request]);
+  const signature=button=>JSON.stringify([button.dataset.action,button.dataset.consent,button.dataset.budgetDecision,button.dataset.request,
+    button.dataset.action==='collaboration-scope-approve'?button.dataset.scene:null]);
   const promoted=new Set([...next.querySelectorAll('[data-action], [data-consent], [data-budget-decision]')].map(signature));
   main.querySelectorAll('[data-action], [data-consent], [data-budget-decision]').forEach(control=>{
     if (!next.contains(control) && promoted.has(signature(control))) control.remove();
@@ -1757,18 +1762,26 @@ main.addEventListener('click',async event=>{
   }
   else if (button.dataset.action?.startsWith('collaboration-')) {
     const p=detail, action=button.dataset.action, approve=action==='collaboration-scope-approve', revoke=action==='collaboration-scope-revoke';
-    const groq=approve && button.dataset.scene==='groq';
-    const scope=groq?p.collaboration.groq_offer:p.collaboration;
-    modal(approve?'기획·대본 무료 범위 승인':revoke?'기획 범위 철회':'기획·대본 작업 시작',approve?
+    const development=approve && button.dataset.scene?.startsWith('development-');
+    const groq=approve && ['groq','development-groq'].includes(button.dataset.scene);
+    const scope=development?p.collaboration.development_offers[groq?'groq':'gemini']:
+      groq?p.collaboration.groq_offer:p.collaboration;
+    modal(approve?(development?'기획·대본 개발 검증 범위 승인':'기획·대본 무료 범위 승인'):revoke?'기획 범위 철회':'기획·대본 작업 시작',approve?
       `<p>${groq?'Groq GPT-OSS 20B':'Gemini 3.5 Flash-Lite'} · ${h(scope.proposal.provider_project)} · 24시간 · 무료 전용 $0</p>
       <p>목표, 대표 선택, 공개 조사 근거·한계, 기획·대본, 수정 의견과 역할별 검토 자료${groq?'를 Groq에 전송합니다. 운영 자료·개인정보·영상·음성·실측값은 제외합니다.':' 및 로컬 검토 영상의 해시·길이 측정값을 Gemini에 전송합니다.'} 같은 범위의 기획 재작업을 포함합니다.</p>
+      ${development?`<p>검증 목적 · 조사 인계와 관리자 기획·직원 대본·장면표 및 검토 계약 검증</p>
+        <p>대상 프로젝트 · ${h(p.goal)} · <span class="mono">${h(scope.proposal.binding.project)}</span></p>
+        <p>전송 목적지 · ${h(scope.proposal.units[0].endpoint)}</p>
+        <p>전송 데이터 · ${h(scope.proposal.units[0].data_types.join(', '))}</p>
+        <p>신규 요청을 예약별로 기록합니다. 공급자 속도·쿼터와 작업별 수정 한도를 적용합니다.
+        무료 잔량과 청구는 독립 확인되지 않았습니다.</p>`:''}
       ${scope.proposal.experiences_sha256?`<p>같은 대상과 제작 조건에서 가져온 대표 선호, 수정 방향과 기록 해시를 함께 전송합니다.</p>
         <ul>${p.collaboration.experience_inputs.map(row=>`<li>${h(row.positive_preference)} · <span class="mono">${h(row.record_hash)}</span></li>`).join('')}</ul>
         <p class="mono">전송 경험 SHA-256 ${h(scope.proposal.experiences_sha256)}</p>`:''}
       <label class="check"><input type="checkbox" name="confirmed" required>무료 프로젝트와 전송 범위를 확인했습니다.</label>`:
       revoke?'<p>이후 기획·대본 전송을 중단합니다.</p>':'<p>관리자 기획과 직원 대본·장면표를 대표 검토용으로 작성합니다.</p>',
       approve?'승인':revoke?'철회':'작업 시작',async data=>{
-        await api(detailApi(p)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:scope.review_hash,...(groq?{provider:'groq'}:{})}:{});
+        await api(detailApi(p)+'/'+action,approve?{confirmed:data.has('confirmed'),review_hash:scope.review_hash,...(groq?{provider:'groq'}:{}),...(development?{mode:'development_scope'}:{})}:{});
         return {message:'기획·대본 작업 상태를 갱신했습니다.'};
       });
   }

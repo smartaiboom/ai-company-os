@@ -8,6 +8,7 @@ from urllib.error import HTTPError
 from autonomous_company import CompanyError, Store, digest, exact, now, parse, require
 from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config, Gemini35Store
 from autonomous_live import LiveEmployeeProvider, LiveManagerProvider
+from decision_recovery import delegated_call
 from goal_dialogue import safe_text
 from goal_dialogue_live import send_once
 from groq_provider import (MODEL as GROQ_MODEL, ENDPOINT as GROQ_BASE, COST_POLICY as GROQ_COST,
@@ -85,9 +86,11 @@ def scope(root, project):
 RENDER_MEASUREMENTS='local_render_measurements'
 GROQ_ENDPOINT=GROQ_BASE+'/chat/completions'
 GROQ_PROJECT='Personal / Default Project'
+DEVELOPMENT_SCOPE='development_scope'
+DEVELOPMENT_PURPOSE='verify_research_handoff_manager_writer_editor'
 
 
-def offer(policy, *, include_render_measurements=True, provider='gemini', experiences=()):
+def offer(policy, *, include_render_measurements=True, provider='gemini', experiences=(), development=False):
     require(provider in ('gemini','groq'),'collaboration_provider_invalid')
     data=['goal','owner_selection','public_research_evidence','research_limits','planning_and_script','owner_revision_feedback']
     fields = {'provider': 'groq'} if provider == 'groq' else {}
@@ -98,6 +101,8 @@ def offer(policy, *, include_render_measurements=True, provider='gemini', experi
         data.append(RENDER_MEASUREMENTS)
     model, endpoint, account = ((GROQ_MODEL,GROQ_ENDPOINT,GROQ_PROJECT) if provider=='groq'
                                 else (MODEL,ENDPOINT,MISSION_ACCOUNT))
+    if development:
+        fields.update(mode=DEVELOPMENT_SCOPE, provider=provider, verification_purpose=DEVELOPMENT_PURPOSE)
     return dict(policy.proposal([unit('planning',model,endpoint,data)]),
         purpose='research_to_script_handoff',provider_project=account,
         includes_plan_revisions=True,account_evidence='owner_attested_free_only_provider_status_unverified',
@@ -144,12 +149,33 @@ class HandoffCompany(VideoProviderQualityCompany):
         self.policy=policy
         self.parent_key=parent_key
 
+    def _request_json(self, p, **kwargs):
+        grant = self.policy.active(self.parent_key)
+        if grant['proposal'].get('mode') != DEVELOPMENT_SCOPE:
+            return super()._request_json(p, **kwargs)
+
+        operation, = grant['proposal']['units']
+        require((operation['model'], operation['endpoint']) == (kwargs['model'], kwargs['base_url']),
+                'owner_policy_scope_changed')
+        operation = {**operation, 'id': 'planning:'+str(len(self.policy.attempts())+1)}
+        response = None
+
+        def run(policy_hash, check):
+            nonlocal response
+            require(policy_hash == digest(grant), 'owner_policy_scope_changed')
+            check()
+            response = super(HandoffCompany, self)._request_json(p, **kwargs)
+
+        delegated_call(self.policy, self.parent_key, operation, digest(parse(kwargs['body'].decode())), run)
+        return response
+
     def _quality_transport_allowed(self,p):
         active=self.policy.active(self.parent_key)
         grant=self.store.grant(p)['body']
         experiences = p['quality_inputs']['experiences']
         require(active['proposal']==offer(self.policy,include_render_measurements=includes_render_measurements(active),
-                                          provider=self.store.provider_id,experiences=experiences)
+                                          provider=self.store.provider_id,experiences=experiences,
+                                          development=active['proposal'].get('mode')==DEVELOPMENT_SCOPE)
                 and p['quality_inputs']['answers']['scope_sha256']==digest(active)
                 and grant['expires_at']<=active['expires_at']
                 and hmac.compare_digest(self.parent_key,_binding(self.policy.binding['project'],self.config.api_key)),
@@ -251,15 +277,23 @@ def state(workflow,project):
             config=provider_config(provider)
             policy.active(_binding(project['id'],config.api_key))
             require(proposal==offer(policy,provider=provider,include_render_measurements=includes_render_measurements(grant),
-                                    experiences=experiences),'owner_policy_scope_changed')
+                                    experiences=experiences,development=proposal.get('mode')==DEVELOPMENT_SCOPE),
+                    'owner_policy_scope_changed')
     except CompanyError as exc:
         status=exc.code
     if current:
         status=current['status']
+    development_offers = {}
+    if not grant and not jobs:
+        for name in ('gemini', 'groq') if os.getenv('GROQ_API_KEY') else ('gemini',):
+            proposed = offer(policy,provider=name,experiences=experiences,development=True)
+            development_offers[name] = dict(proposal=proposed,review_hash=digest(proposed))
     groq_offer=offer(policy,provider='groq',experiences=experiences) if not grant and os.getenv('GROQ_API_KEY') else None
     return dict(status=status,proposal=proposal,review_hash=digest(proposal),
                 groq_offer=dict(proposal=groq_offer,review_hash=digest(groq_offer)) if groq_offer else None,
-                handoff=flow['research_handoff'], current=current, experience_inputs=experiences)
+                handoff=flow['research_handoff'], current=current, experience_inputs=experiences,
+                development_offers=development_offers,
+                development_requests=len(policy.attempts()) if proposal.get('mode')==DEVELOPMENT_SCOPE else None)
 
 
 def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=False):
@@ -281,9 +315,13 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
                 allow_fixture and company_type.source=='offline_http_fixture'),
                 'collaboration_fixture_forbidden')
         if name=='collaboration-scope-approve':
-            exact(body,('confirmed','review_hash','provider') if 'provider' in body else ('confirmed','review_hash'))
+            fields = ('confirmed', 'review_hash')
+            exact(body, fields + tuple(key for key in ('provider', 'mode') if key in body))
+            require('mode' not in body or body['mode']==DEVELOPMENT_SCOPE, 'owner_policy_scope_changed')
+            development = body.get('mode') == DEVELOPMENT_SCOPE
+            require(not development or not flow.get('collaboration_jobs'), 'collaboration_provider_stopped')
             provider=body.get('provider','gemini')
-            proposal=offer(policy,provider=provider,experiences=experiences)
+            proposal=offer(policy,provider=provider,experiences=experiences,development=development)
             config=provider_config(provider)
             if provider=='groq':
                 GroqFreeAdapter().build_request(b'{}',config.api_key)
@@ -299,7 +337,9 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
         credential=_binding(pid,config.api_key)
         grant=policy.active(credential)
         measurements=includes_render_measurements(grant)
-        require(grant['proposal']==offer(policy,include_render_measurements=measurements,provider=provider,experiences=experiences),
+        development = grant['proposal'].get('mode') == DEVELOPMENT_SCOPE
+        require(grant['proposal']==offer(policy,include_render_measurements=measurements,provider=provider,
+                                        experiences=experiences,development=development),
                 'owner_policy_scope_changed')
         if provider=='gemini':
             require((config.model,config.endpoint)==(MODEL,ENDPOINT),'gemini_provider_binding')
@@ -325,8 +365,11 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
         revision_hash=digest(revision) if revision else None
         jobs=flow.setdefault('collaboration_jobs',[])
         require(not any(job['revision_sha256']==revision_hash for job in jobs),'collaboration_duplicate')
-        if provider=='groq':
+        if provider=='groq' or development:
             require(all(job['status']=='completed' for job in jobs),'collaboration_provider_stopped')
+        if development:
+            require(all(row['result'] and row['result']['status']=='completed' for row in policy.attempts().values()),
+                    'owner_policy_unresolved_attempt')
         store=company_type.store_type(workflow.store.root/'research_plan_handoff'/pid)
         require(not any(job.stem not in {row['id'] for row in jobs}
                         for job in store.root.glob('qualityprovider-*.json') if '.' not in job.stem),
@@ -340,7 +383,7 @@ def execute(workflow,pid,name,body,*,company_type=HandoffCompany,allow_fixture=F
             capabilities=dict(script_contract=SCRIPT_CONTRACT), experiences=experiences,
             feedback_text=revision['feedback'] if revision else flow['research_handoff']['direction'])
         job=store.create(project['goal'],inputs=inputs,max_calls=None,max_total_revisions=1)
-        if provider=='groq' and jobs:
+        if (provider=='groq' or development) and jobs:
             job['next_request_at']=store.load(jobs[-1]['id'])['next_request_at']
             store.save(job)
         consent=store.prepare(job['id'],confirm_free_account=True)

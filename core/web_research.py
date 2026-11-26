@@ -254,6 +254,26 @@ def validate_step(step, tools, used, observations, final=False):
                        'insufficient_independent_evidence', 'research_evidence_invalid')
 
 
+def normalize_collection_step(step, tools, used, observations, final=False):
+    """Separate inert report text only after the collection choice is independently valid."""
+    try:
+        validate_step(step, tools, used, observations, final)
+        return step, None
+    except DecisionViolation as exc:
+        if exc.rule != 'mixed_tool_and_report':
+            raise
+    check_step(isinstance(step['feasibility'], str), 'invalid_step_fields')
+    if step['feasibility']:
+        report_text(step['feasibility'], 460)
+    if step['claims']:
+        # The discarded fields must still satisfy evidence and secret checks.
+        validate_step({'tool':'finish', 'option':'', 'claims':step['claims'],
+                       'feasibility':step['feasibility'] or 'Collection response validation'},
+                      tools, used, observations, final)
+    normalized = {**step, 'claims':[], 'feasibility':''}
+    return normalized, 'separated_collection_report_fields'
+
+
 def validate_supervised_step(step, tools, used, observations, final):
     if isinstance(step, dict) and step.get('tool') == 'batch':
         check_step(set(step) == {'tool','option','claims','feasibility','selections'} and step['option'] == ''

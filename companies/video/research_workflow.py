@@ -6,14 +6,14 @@ import re
 
 from autonomous_company import CompanyError, digest, exact, now, parse, require
 from autonomous_gemini35 import ENDPOINT, MODEL, Gemini35Config
-from decision_recovery import correction_call, correction_feedback, failure_kind, gemini_failure_type
+from decision_recovery import correction_call, correction_feedback, failure_kind, gemini_failure_type, received_contract_stop
 from mission_production import ProductionManager, approved_manager_result, canonical_bytes, draft_id, production_keys
 from owner_operating_policy import OwnerOperatingPolicy
 from production_operating import delegated_call, run_worker, unit
 from role_json_schema import S, arr, enum, matches, obj
 from web_research import (EVIDENCE_CONTRACT, STEP_RULES, TAVILY, Tool, evidence, evidence_catalog,
                           collect_observation, has_reviewable_claim, research_report, run, step_context, step_schema,
-                          tavily_search, validate_step)
+                          tavily_search, validate_step, normalize_collection_step)
 
 ROUNDS=4
 REVIEW_SCHEMA=obj(action=enum('use_with_limits','hold'),note=S)
@@ -54,6 +54,20 @@ class ResearchStep(ResearchManager):
         # Report the specific local rule even when the provider missed a schema constraint.
         self.validate_plan(value)
         require(matches(value, self.contract['schema']), 'invalid_manager_plan_schema')
+
+    def _accept_proposal(self, p, value, provider_name):
+        if self.contract.get('separate_collection_fields') and isinstance(value,dict) and set(value)=={'decision'}:
+            decision, reason = normalize_collection_step(value['decision'], *self.runtime)
+            if reason:
+                normalized = {'decision':decision}
+                attempt = p['real_ai']['attempts'][-1]
+                original_hash=attempt['response_hash']
+                normalized_hash=digest(normalized)
+                attempt['decision_normalization'] = dict(reason=reason, original=value, normalized=normalized,
+                    original_sha256=original_hash, normalized_sha256=normalized_hash)
+                attempt.update(received_response_hash=original_hash,response_hash=normalized_hash)
+                value = normalized
+        return super()._accept_proposal(p,value,provider_name)
 
     def validate_plan(self, value):
         decision = value.get('decision') if isinstance(value, dict) and set(value) == {'decision'} else None
@@ -277,7 +291,7 @@ def available(workflow,project,inputs,search_key=None,*,history=()):
     if extras:
         scope['max_youtube_requests']=len(extras)
     continuation=base.get('continuation')
-    if continuation and not continuation.get('contract_repair'):
+    if continuation and not (continuation.get('contract_repair') or continuation.get('development_contract')):
         tools={} if continuation.get('report_only') else unused_collection(tools,continuation)
         collection_units=[operation for tool in tools.values()
                           for operation in (tool.requests or (tool.operation,))]
@@ -293,6 +307,10 @@ def available(workflow,project,inputs,search_key=None,*,history=()):
             scope['provider_recovery']=recovery
             if recovery['phase']=='manager':
                 scope.update(units=[model[-1]],max_model_calls=1)
+    if continuation and continuation.get('development_contract'):
+        from research_work_scope import CORRECTABLE_RULES
+        scope['units'] += [{**operation,'id':'correct-'+operation['id']} for operation in model[:-1]]
+        scope['response_contract_correction']=list(CORRECTABLE_RULES)
     return store,tools,model,scope
 
 
@@ -347,7 +365,7 @@ def linked_attempt(store, name, row):
         match = re.fullmatch(r'(?:correct-)?research-(\d+)', name)
         if not match:
             return None
-        worker = ResearchStep(store.root/('step-'+match[1]), {})
+        worker = ResearchStep(store.root/(('correct-step-' if name.startswith('correct-') and store.read('policy.json')['proposal'].get('response_contract_correction') else 'step-')+match[1]), {})
     try:
         jid = draft_id(worker)
         if not jid:
@@ -420,7 +438,7 @@ def research_diagnostics(store, ledger):
     return dict(providers=providers, failure=failure)
 
 
-def step_worker(store, base, tools, index, observations, feedback=None, *, rounds=ROUNDS):
+def step_worker(store, base, tools, index, observations, feedback=None, *, rounds=ROUNDS, corrected=False):
     diverse=base.get('diverse_games')
     if diverse:
         from mobile_game_evidence import game_evidence
@@ -443,7 +461,7 @@ def step_worker(store, base, tools, index, observations, feedback=None, *, round
     context['observations'] = [
         {**row, 'sources': [source['id'] for source in row['sources']]} for row in observations
     ]
-    worker = ResearchStep(store.root/f'step-{index}', dict(input={**{k:v for k,v in base.items() if k!='continuation'}, **context,
+    worker = ResearchStep(store.root/(f'correct-step-{index}' if corrected else f'step-{index}'), dict(input={**{k:v for k,v in base.items() if k!='continuation'}, **context,
         'goal':base['target'] if base.get('mode') else 'Video research decision'}, schema=obj(decision=step_schema(context,collection_required=collection_required)),
         system=SYSTEM + ' Put the tool choice or finish report inside the decision field.'+
         (' Compare the saved feedback with the preserved observations. Prior samples are historical; '
@@ -453,6 +471,7 @@ def step_worker(store, base, tools, index, observations, feedback=None, *, round
         claims=arr(obj(statement=S,assessment=enum('supported','conflicting','unverified'),citations=arr(S)))
         choices=[tool['name'] for tool in context['tools']]
         options=list(dict.fromkeys(option for tool in context['tools'] for option in tool['options']))
+        worker.contract['separate_collection_fields']=True
         feasibility=S
         if collection_required:
             claims={**claims,'maxItems':0}
@@ -579,7 +598,7 @@ def research_credentials():
 
 
 def work_status(store,base,scope):
-    from research_work_scope import envelope, inherited, proposal, check_stage
+    from research_work_scope import envelope, inherited, proposal, check_stage, development_proposal
     work=envelope(store,base)
     current=work.read('policy.json')
     parent=inherited(store,base)
@@ -602,6 +621,13 @@ def work_status(store,base,scope):
             if current or blocked=='owner_policy_unresolved_attempt':
                 return dict(status='stopped',scope_blocker=blocked)
     offer=proposal(work,scope)
+    if base.get('continuation',{}).get('development_contract'):
+        from general_research_continuation import checked_development_contract
+        try:
+            checked_development_contract(store,base,scope)
+            offer=development_proposal(work,scope)
+        except CompanyError as exc:
+            return dict(status='stopped',scope_blocker=exc.code)
     if base.get('continuation',{}).get('contract_repair'):
         from general_research_continuation import checked_contract_repair
         try:
@@ -638,7 +664,8 @@ def parent_store(store,continuation):
 def continuation_source(store,continuation):
     source=parent_store(store,continuation)
     transition=source.read('continuation.json')
-    route='contract_repair' if continuation.get('contract_repair') else 'report' if continuation.get('report_only') else 'collect'
+    route=next((kind for kind in ('development_contract','contract_repair') if continuation.get(kind)),
+               'report' if continuation.get('report_only') else 'collect')
     require(transition and transition['route']==route and not source.read('revoked.json')
             and digest(transition['checkpoint'])==continuation['checkpoint_sha256']
             and digest(source.attempts())==transition['checkpoint']['ledger_sha256'],
@@ -814,7 +841,7 @@ def status(workflow,project):
     ledger=store.attempts()
     observations=[store.read(path.name) for path in sorted(store.root.glob('observation-*.json'))]
     if general:
-        from research_work_scope import envelope, inherited, remaining
+        from research_work_scope import envelope, inherited, remaining, unresolved
         own=envelope(store,base)
         work=own if own.read('policy.json') else inherited(store,base)
         if work:
@@ -822,19 +849,24 @@ def status(workflow,project):
                 gemini,search=research_credentials()
                 key=digest([gemini,search,os.getenv('YOUTUBE_DATA_API_KEY','')])
                 approved_work=work.active(key)
-                general['limits']=approved_work['proposal']['limits']
                 general['expires_at']=approved_work['expires_at']
-                general['remaining']=remaining(work,approved_work)
+                if approved_work['proposal'].get('mode')=='development_scope':
+                    general['development_requests']=len(work.attempts())
+                    require(not unresolved(work.attempts()),'owner_policy_unresolved_attempt')
+                else:
+                    general['limits']=approved_work['proposal']['limits']
+                    general['remaining']=remaining(work,approved_work)
             except CompanyError as exc:
                 general['scope_blocker']=exc.code
     if general and ledger and not review:
-        from general_research_continuation import checkpoint, contract_repair_offer
+        from general_research_continuation import checkpoint, contract_repair_offer, development_contract_offer
         saved=store.read('continuation.json')
         state=saved['checkpoint'] if saved else checkpoint(store,ledger)
         if state:
             general['continuation_state']={
                 **{field:state[field] for field in ('completed','failed','sources','response','observations')},
                 'route':saved['route'] if saved else None, 'at':saved['at'] if saved else None,
+                'can_development_contract':not saved and bool(development_contract_offer(store,base,state,ledger)),
                 'can_contract_repair':not saved and bool(
                     contract_repair_offer(store,base,state,ledger)),
                 'can_report':not saved and not store.read('revoked.json') and can_resume_report(base,grant,state),
@@ -894,12 +926,16 @@ def status(workflow,project):
 def execute_research(store, credential, gemini, base, tools, model, *, history=(), proposal=None, preflight=None,
                      provenance='provider_model_claim',work=None, preserved_result=None):
     rounds=len(model)-1 if base.get('adaptive_sample') else ROUNDS
+    continuation = base.get('continuation', {})
+    development = continuation.get('development_contract')
+    initial_rule = (continuation_source(store,continuation)['development_contract']['rule']
+                    if development else 'option_not_allowed' if continuation.get('contract_repair') else None)
     def check_before_send(check):
         check()
         if preflight:
             preflight()
 
-    def accounted(operation,payload,execute):
+    def accounted(operation,payload,execute,*,replaces=None):
         if continuation := base.get('continuation'):
             recovery=continuation.get('provider_recovery')
             verified_replay=bool(recovery and operation['id']==recovery['operation'])
@@ -912,7 +948,8 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
         from research_work_scope import charge
         return charge(work,credential,operation,payload,lambda cap:
             delegated_call(store,credential,operation,payload,
-                lambda proof,check:execute(proof,lambda:(cap(),check()))))
+                lambda proof,check:execute(proof,lambda:(cap(),check())),
+                replaces=replaces[0]['id'] if replaces else None),replaces=replaces)
 
     def invoke(operation, payload, collect):
         accounted(operation, payload, lambda proof, check: collect(lambda: check_before_send(check)))
@@ -920,8 +957,9 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
     def decide(index, context):
         feedback = proposal['feedback'] if proposal and index == len(history) else None
         worker = step_worker(store, base, tools, index, context['observations'], feedback, rounds=rounds)
-        if index==0 and base.get('continuation',{}).get('contract_repair'):
-            worker.contract['input']['decision_correction'] = STEP_RULES['option_not_allowed']
+        if index==0 and initial_rule:
+            worker.contract['input']['decision_correction'] = (
+                dict(rule=initial_rule,instruction=STEP_RULES[initial_rule]) if development else STEP_RULES[initial_rule])
         payload = digest(worker._payload(None))
 
         def execute(proof, check):
@@ -930,7 +968,27 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
         if feedback:
             correction_call(store, credential, proposal['units'][0], payload, feedback, execute)
         else:
-            accounted(model[index],payload,execute)
+            operation=model[index]
+            try:
+                accounted(operation,payload,execute)
+            except CompanyError:
+                from research_work_scope import CORRECTABLE_RULES
+                row=store.attempts().get(operation['id'])
+                attempt=linked_attempt(store,operation['id'],row) if row else None
+                receipt=received_contract_stop(row,attempt) if row else None
+                if not development or not receipt or receipt['rule'] not in CORRECTABLE_RULES:
+                    raise
+                verified=correction_feedback(attempt,row['reservation'],STEP_RULES,context['tools'])
+                feedback=dict(rule=verified['rule'],
+                    instruction='The immediately preceding decision was rejected before any tool ran. '
+                                +verified['instruction'])
+                worker=step_worker(store,base,tools,index,context['observations'],feedback,
+                                   rounds=rounds,corrected=True)
+                previous_payload=payload
+                payload=digest(worker._payload(None))
+                require(payload!=previous_payload,'research_continuation_blocked')
+                corrected={**operation,'id':'correct-'+operation['id']}
+                accounted(corrected,payload,execute,replaces=(operation,previous_payload))
         return approved_manager_result(worker)['decision']
 
     if base.get('revision_plan') and not base.get('continuation',{}).get('report_only'):
@@ -938,7 +996,7 @@ def execute_research(store, credential, gemini, base, tools, model, *, history=(
     if preserved_result is not None:
         result=preserved_result
         store.write('research-result.json',result)
-    elif base.get('continuation') and not base['continuation'].get('contract_repair'):
+    elif base.get('continuation') and not (base['continuation'].get('contract_repair') or base['continuation'].get('development_contract')):
         # Collect only approved unused options. Report-only scopes have no collection tools.
         observations=list(history)
         if base.get('diverse_games') or base.get('verified_mobile_report'):
@@ -1051,7 +1109,7 @@ def action(workflow,pid,name,body):
             if base.get('supplement_of'):
                 require(name=='research-report-review','research_scope_invalid')
             if name=='research-checkpoint':
-                from general_research_continuation import checkpoint, choose, contract_repair_offer
+                from general_research_continuation import checkpoint, choose, contract_repair_offer, development_contract_offer
                 route=body.get('route')
                 exact(body,('route','review_hash','source','reference','confirmed') if route=='provider_recovery' else ('route',))
                 source=research_store(workflow.store.root,project,base)
@@ -1075,6 +1133,12 @@ def action(workflow,pid,name,body):
                     source.write('provider-recovery.json',dict(route=route,checkpoint=snapshot,
                         checkpoint_sha256=digest(snapshot),recovery=record))
                     return
+                if route=='development_contract':
+                    proof=development_contract_offer(source,base,state,ledger)
+                    require(proof is not None,'research_continuation_blocked')
+                    excluded=base.get('continuation',{}).get('excluded_payloads',[])
+                    return choose(source,{**state,'development_contract':proof,
+                                  'excluded_payloads':sorted(set(state['excluded_payloads']+excluded))},route)
                 if route=='contract_repair':
                     repair=contract_repair_offer(source,base,state,ledger)
                     require(repair is not None,'research_continuation_blocked')
@@ -1130,6 +1194,10 @@ def action(workflow,pid,name,body):
             return replan_action(store, base, tools, model, scope, name, body, credential, gemini)
         provider_recovery=base.get('continuation',{}).get('provider_recovery')
         contract_repair=base.get('continuation',{}).get('contract_repair')
+        development_contract=base.get('continuation',{}).get('development_contract')
+        if development_contract:
+            from general_research_continuation import checked_development_contract
+            checked_development_contract(store,base,scope,credential)
         if contract_repair:
             from general_research_continuation import checked_contract_repair
         if name=='research-approve':
@@ -1175,6 +1243,8 @@ def action(workflow,pid,name,body):
         require(name == 'research-run', 'research_scope_invalid')
         preflight=None
         recovery_inputs=None
+        if development_contract:
+            preflight=lambda:checked_development_contract(store,base,scope,credential)
         if contract_repair:
             preflight=lambda:checked_contract_repair(store,base,credential,scope=scope)
             preflight()

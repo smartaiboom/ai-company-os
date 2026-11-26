@@ -104,20 +104,42 @@ class OwnerOperatingPolicy:
         identifier = re.fullmatch(r'([a-z][a-z-]*):[1-9][0-9]*', unit['id'])
         return bool(identifier and {**unit, 'id': identifier[1]} in proposal['units'])
 
-    def reserve(self, key, unit, payload_hash):
+    def reserve(self, key, unit, payload_hash, *, replaces=None):
         with self.control_lock():
             grant=self.active(key)
             ledger=self.attempts()
-            require(all(item['result'] and item['result']['status']=='completed' for item in ledger.values()),
-                    'owner_policy_unresolved_attempt')
+            permit = grant['proposal'].get('response_contract_correction')
+            repaired = {item['reservation'].get('replaces') for item in ledger.values()
+                        if item['result'] and item['result']['status']=='completed'} if permit else set()
+            unresolved = {name for name,item in ledger.items() if name not in repaired
+                          and (not item['result'] or item['result']['status']!='completed')}
+            require(unresolved == ({replaces} if replaces else set()), 'owner_policy_unresolved_attempt')
+            if replaces:
+                predecessor=ledger[replaces]
+                previous_unit=predecessor['reservation']['unit']
+                diagnostics=(predecessor['result'] or {}).get('diagnostics', {})
+                receipt=diagnostics.get('decision_receipt', {})
+                require(permit and predecessor['result'] and predecessor['result']['status']=='failed_or_uncertain'
+                        and receipt.get('rule') in permit
+                        and diagnostics.get('failure_type')=='local_validation_failed'
+                        and not diagnostics.get('provider_response')
+                        and {**previous_unit,'id':unit['id']}==unit
+                        and (unit['id']=='correct-'+replaces
+                             or ':' in replaces and unit['id'].split(':')[0]==replaces.split(':')[0])
+                        and not predecessor['reservation'].get('replaces')
+                        and not any(item['reservation'].get('replaces')==replaces for item in ledger.values())
+                        and payload_hash!=predecessor['reservation']['payload_sha256'],
+                        'owner_policy_unresolved_attempt')
             require(self.allows(grant['proposal'], unit) and unit['max_cost_usd']==0, 'owner_policy_scope_changed')
             require(unit.get('payload_sha256',payload_hash)==payload_hash,'owner_policy_scope_changed')
             require(unit['id'] not in ledger, 'owner_policy_exhausted')
-            if grant['proposal'].get('mode') == 'development_scope':
+            if grant['proposal'].get('mode') == 'development_scope' or permit:
                 require(re.fullmatch(r'[a-f0-9]{64}', payload_hash) and all(
                     row['reservation']['payload_sha256'] != payload_hash for row in ledger.values()),
                     'owner_policy_replay')
             reservation=dict(policy_hash=digest(grant),unit=unit,payload_sha256=payload_hash,at=now())
+            if replaces:
+                reservation['replaces']=replaces
             self.write('reserve-'+digest(unit['id'])+'.json',reservation)
             return reservation
 

@@ -41,7 +41,8 @@ def checkpoint(store, ledger):
 def choose(store, state, route):
     require(state and not store.read('continuation.json') and
             (route == 'hold' or route in ('collect', 'report') and state['eligible']
-             or route == 'contract_repair' and state.get('contract_repair')), 'research_continuation_blocked')
+             or route == 'contract_repair' and state.get('contract_repair')
+             or route == 'development_contract' and state.get('development_contract')), 'research_continuation_blocked')
     record = dict(route=route, checkpoint=state, checkpoint_sha256=digest(state), at=now())
     store.write('continuation.json', record)
     return record
@@ -110,3 +111,59 @@ def checked_contract_repair(store, base, credential=None, *, scope):
         repair['work'].active(credential)
         source.active(credential)
     return repair['receipt']
+
+def development_contract_offer(source, base, state, ledger):
+    from decision_recovery import received_contract_stop
+    from research_work_scope import CORRECTABLE_RULES, envelope
+    from research_workflow import ENDPOINT, MODEL, linked_attempt
+
+    prior = base.get('continuation', {})
+    if (not state or state['observations'] or base.get('previous')
+            or prior and not prior.get('contract_repair') or set(ledger) != {'research-0'}
+            or source.read('revoked.json') or source.read('research-result.json') or source.read('manager-review.json')):
+        return None
+    row = ledger['research-0']
+    proof = received_contract_stop(row, linked_attempt(source, 'research-0', row))
+    if not proof or proof['rule'] not in CORRECTABLE_RULES:
+        return None
+    work = envelope(source, base)
+    stage, policy = source.read('policy.json'), work.read('policy.json')
+    charges = work.attempts()
+    if not stage or not policy or work.read('revoked.json') or set(charges) != {'gemini-0'}:
+        return None
+    reservation = row['reservation']
+    operation = reservation['unit']
+    charge = charges['gemini-0']
+    if ((operation['model'], operation['endpoint']) != (MODEL, ENDPOINT) or operation not in stage['proposal']['units']
+            or reservation['policy_hash'] != digest(stage)
+            or policy['proposal']['initial_stage_sha256'] != digest(stage['proposal'])
+            or charge['reservation']['policy_hash'] != digest(policy)
+            or charge['reservation']['payload_sha256'] != digest(dict(operation=operation,payload_hash=proof['failed_payload_sha256']))
+            or not charge['result'] or charge['result']['status'] != 'failed_or_uncertain'
+            or charge['result'].get('diagnostics') != row['result'].get('diagnostics')):
+        return None
+    return dict(stage_grant=digest(stage),work_grant=digest(policy),work_ledger=digest(charges),
+                prior_continuation=prior,rule=proof['rule'])
+
+
+def checked_development_contract(store, base, scope, credential=None):
+    from research_workflow import continuation_source, parent_store
+    from research_work_scope import envelope
+
+    continuation=base['continuation']
+    source=parent_store(store,continuation)
+    snapshot=continuation_source(store,continuation)
+    parent={key:value for key,value in base.items() if key!='continuation'}
+    prior=snapshot['development_contract']['prior_continuation']
+    if prior:
+        parent['continuation']=prior
+    proof=development_contract_offer(source,parent,snapshot,source.attempts())
+    require(proof and proof==snapshot['development_contract'],'research_continuation_blocked')
+    stage=source.read('policy.json')
+    require([unit for unit in scope['units'] if not unit['id'].startswith('correct-')]==stage['proposal']['units'],
+            'owner_policy_scope_changed')
+    if credential is not None:
+        work=envelope(source,parent)
+        work.check_credential(work.read('policy.json'),credential)
+        source.check_credential(stage,credential)
+    return proof

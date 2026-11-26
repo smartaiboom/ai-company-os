@@ -25,6 +25,33 @@ class Reply(BytesIO):
 
 
 class ResearchTests(TestCase):
+    def test_collection_normalization_preserves_rejections_and_report_contract(self):
+        from decision_recovery import DecisionViolation
+        from web_research import Tool, normalize_collection_step
+
+        tools = {'search':Tool('search','Public search',{'one':'Public query'},lambda _:[])}
+        original = dict(tool='search',option='one',claims=[],feasibility='Rights remain unknown')
+        clean,reason=normalize_collection_step(original,tools,set(),[])
+        self.assertEqual(reason,'separated_collection_report_fields')
+        self.assertEqual(clean,dict(tool='search',option='one',claims=[],feasibility=''))
+        self.assertEqual(original['feasibility'],'Rights remain unknown')
+        claim=dict(statement='Unverified',assessment='unverified',citations=[])
+        report=dict(tool='finish',option='',claims=[claim],feasibility='Rights remain unknown')
+        self.assertEqual(normalize_collection_step(report,tools,set(),[]),(report,None))
+        cases=[
+            ({**original,'tool':'unapproved'},set(),False,'tool_not_allowed'),
+            ({**original,'option':'Public query'},set(),False,'option_not_allowed'),
+            (original,{('search','one')},False,'option_not_allowed'),
+            (original,set(),True,'finish_required'),
+            ({**original,'claims':[dict(claim,citations=['invented'])]},set(),False,'invalid_citation'),
+            ({**original,'claims':[dict(claim,assessment='supported')]},set(),False,'insufficient_independent_evidence'),
+            ({**original,'command':'unrecognized'},set(),False,'invalid_step_fields'),
+        ]
+        for value,used,final,rule in cases:
+            with self.subTest(rule=rule), self.assertRaises(DecisionViolation) as error:
+                normalize_collection_step(value,tools,used,[],final)
+            self.assertEqual(error.exception.rule,rule)
+
     def test_scoped_worker_tool_loop_and_manager(self):
         with TemporaryDirectory() as tmp:
             store=Store(Path(tmp))

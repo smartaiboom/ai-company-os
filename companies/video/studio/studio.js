@@ -880,9 +880,10 @@ function researchPanel(p) {
     ${r.diagnostics?.failure?.code==='research_new_evidence_required'?'<p>직원이 신규 수집 전에 종료를 요청해 보고서 제출을 차단했습니다.</p>':''}
     ${checkpoint?`<p>완료 단계 ${h(checkpoint.completed.join(', ')||'없음')} · 중단 단계 ${h(checkpoint.failed.join(', '))} · 보존 출처 ${h(checkpoint.sources)}건</p>
       ${checkpoint.response.http_status?`<p>HTTP ${h(checkpoint.response.http_status)} ${h(checkpoint.response.status||'')} · 모델 출력·청구 미확인</p>`:''}
-      <p>${checkpoint.route==='hold'?'보류 기록을 저장했습니다.':checkpoint.can_contract_repair?'응답 수신이 확인된 계약 오류입니다. 남은 한도 안에서 수정된 요청의 새 승인 범위를 준비할 수 있습니다.':checkpoint.can_report?'보존 자료로 직원 보고와 관리자 검토 범위를 준비할 수 있습니다.':checkpoint.can_collect?'미사용 조사 범위를 별도로 검토할 수 있습니다.':'현재 단계에서 외부 호출을 이어갈 수 없습니다.'} 기존 예약은 보존됩니다.</p>
+      <p>${checkpoint.route==='hold'?'보류 기록을 저장했습니다.':checkpoint.can_development_contract?'응답 수신이 확인됐습니다. 개발 검증 승인 범위를 준비할 수 있습니다.':checkpoint.can_contract_repair?'응답 수신이 확인된 계약 오류입니다. 남은 한도 안에서 수정된 요청의 새 승인 범위를 준비할 수 있습니다.':checkpoint.can_report?'보존 자료로 직원 보고와 관리자 검토 범위를 준비할 수 있습니다.':checkpoint.can_collect?'미사용 조사 범위를 별도로 검토할 수 있습니다.':'현재 단계에서 외부 호출을 이어갈 수 없습니다.'} 기존 예약은 보존됩니다.</p>
       ${checkpoint.observations.flatMap(o=>o.sources).map(ref=>`<p>${h(ref.title)} · ${sourceLink(ref.url)}</p>`).join('')}
       ${!p.readonly&&!checkpoint.route?`${checkpoint.can_collect?'<button class="button secondary" data-action="research-checkpoint-collect">보존 자료로 후속 조사 범위 준비</button>':''}
+        ${checkpoint.can_development_contract?'<button class="button secondary" data-action="research-checkpoint-development_contract">개발 검증 승인 범위 준비</button>':''}
         ${checkpoint.can_contract_repair?'<button class="button secondary" data-action="research-checkpoint-contract_repair">계약 수정 후 새 조사 승인 범위 준비</button>':''}
         ${checkpoint.can_report?'<button class="button secondary" data-action="research-checkpoint-report">보존 자료로 보고서 작성 범위 준비</button>':''}
         <button class="button ghost" data-action="research-checkpoint-hold">보류 기록 저장</button>`:''}`:''}
@@ -1055,7 +1056,7 @@ function researchCommand(action) {
   }
   if (action.startsWith('research-checkpoint-')) {
     const route=action.slice('research-checkpoint-'.length);
-    const title={collect:'후속 조사 범위 준비',contract_repair:'계약 수정 후 새 조사 승인 범위 준비',report:'보존 자료 보고서 작성 범위 준비',hold:'보류 기록 저장'}[route];
+    const title={collect:'후속 조사 범위 준비',development_contract:'개발 검증 승인 범위 준비',contract_repair:'계약 수정 후 새 조사 승인 범위 준비',report:'보존 자료 보고서 작성 범위 준비',hold:'보류 기록 저장'}[route];
     return modal(title,'<p>완료된 자료와 중단 상태를 로컬에 저장합니다. 외부 호출은 발생하지 않습니다.</p>',title,async ()=>{
       await api(detailApi(p)+'/research-checkpoint',{route});
       return {message:'조사 상태를 갱신했습니다.'};
@@ -1099,8 +1100,9 @@ function researchCommand(action) {
   const offer=recovery?r.recovery:r;
   const proposal=offer.proposal;
   const feedback=proposal?.feedback;
-  const fields=approve?`<p>${r.work_scope?'현재 단계 · ':''}Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>
-    ${r.work_scope?`<p><strong>업무 총한도</strong> · Gemini ${h(r.work_scope.limits.gemini)}회 · Tavily ${h(r.work_scope.limits.tavily||0)}회
+  const development=r.work_scope?.mode==='development_scope';
+  const fields=approve?`${development?'<p>개발 검증 · 업무 총 호출 상한 없이 조사 단계와 공급자 한도 적용 · 24시간 · 무료 전용 $0 · 실제 잔량과 청구 미확인</p>':`<p>${r.work_scope?'현재 단계 · ':''}Tavily 기본 검색 최대 ${h(proposal.max_search_credits)}회 · 무료 Gemini 최대 ${h(proposal.max_model_calls)}회 · 다운로드 0회 · 비용 $0</p>`}
+    ${r.work_scope&&!development?`<p><strong>업무 총한도</strong> · Gemini ${h(r.work_scope.limits.gemini)}회 · Tavily ${h(r.work_scope.limits.tavily||0)}회
       · YouTube GET ${h(r.work_scope.limits.youtube||0)}회 · 무료 전용 $0
       · ${r.work_scope.source_expires_at?`원 승인 만료 ${h(time(r.work_scope.source_expires_at))}까지`:'24시간'}</p>
       <p>${r.provider_recovery_phase==='manager'?'저장된 직원 보고서의 관리자 검토를 승인합니다.':r.checkpoint_report_only?'직원 보고와 관리자 검토를 승인합니다.':'현재 단계와 후속 피드백 재작성 범위를 함께 승인합니다.'} 공급자 잔량과 실제 청구는 미확인입니다.</p>
@@ -1108,6 +1110,11 @@ function researchCommand(action) {
         project:r.work_scope.provider_project,providers:r.work_scope.allowed,gemini_inputs:r.work_scope.gemini_inputs,
         phases:r.work_scope.phases
       },null,2))}</pre></details>`:''}
+    ${development?`<p>프로젝트 · ${h(r.work_scope.binding.project)} · 공통 조사 응답과 공개 근거 검증</p>
+      <p>확인된 내부 계약 오류는 결정당 한 번만 수정된 요청으로 검증합니다. 공급자 장애·미확정 요청은 중단합니다.</p>
+      <details open><summary>공급자·모델·프로젝트·목적지·전송 데이터</summary>
+      <p>Gemini ${h(r.work_scope.provider_project)} · 기존 Tavily Researcher 및 YouTube Data API 키 연결</p>
+      <pre>${h(JSON.stringify({providers:r.work_scope.allowed,gemini_inputs:r.work_scope.gemini_inputs},null,2))}</pre></details>`:''}
     ${proposal.youtube_quota?`<p>YouTube 업무 예산 · 검색 전용 버킷 ${h(proposal.youtube_quota.search_list)}회 ·
       영상 메타데이터 일반 버킷 ${h(proposal.youtube_quota.videos_list)}단위. 실제 잔량은 미확인입니다.</p>`:''}
     ${proposal.revision_plan&&!r.checkpoint_report_only?`<p>신규 직원 작업 · 보존 자료와 수정 지시를 대조하고 공개 영상의 조회수·길이·시점·출처를 확인합니다.

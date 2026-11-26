@@ -87,8 +87,8 @@ def correction_feedback(attempt, reservation, rules, choices, *, legacy=None):
                 response_sha256=rejection['response_sha256'] if rejection else None)
 
 
-def delegated_call(store, key, operation, payload_hash, execute):
-    reservation = store.reserve(key, operation, payload_hash)
+def delegated_call(store, key, operation, payload_hash, execute, *, replaces=None):
+    reservation = store.reserve(key, operation, payload_hash, replaces=replaces)
     try:
         store.active(key)
         execute(reservation['policy_hash'], lambda: store.active(key))

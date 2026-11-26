@@ -54,6 +54,27 @@ def proposal(work,stage,*,budget=None):
                              'prior_report_and_owner_feedback'],'initial_stage_sha256':digest(stage)}
 
 
+CORRECTABLE_RULES = ('option_not_allowed', 'mixed_tool_and_report')
+
+
+def development_proposal(work, stage):
+    standard = proposal(work, stage)
+    units = [dict(id=kind,provider=kind,max_cost_usd=0) for kind in standard['allowed']]
+    standard.pop('limits')
+    return {**standard, 'units':units, 'mode':'development_scope',
+            'purpose':'verify_general_research_response_and_public_evidence',
+            'gemini_inputs':[*standard['gemini_inputs'],'local_validation_rule_and_instruction'],
+            'response_contract_correction':list(CORRECTABLE_RULES),
+            'account_evidence':'owner_attested_free_only_provider_status_unverified'}
+
+
+def unresolved(ledger):
+    repaired = {item['reservation'].get('replaces') for item in ledger.values()
+                if item['result'] and item['result']['status']=='completed'}
+    return {name for name, item in ledger.items() if name not in repaired
+            and (not item['result'] or item['result']['status']!='completed')}
+
+
 def remaining(work,grant):
     ledger=work.attempts()
     require(all(row['result'] and row['result']['status']=='completed' for row in ledger.values()),
@@ -65,6 +86,11 @@ def remaining(work,grant):
 
 def check_stage(work,key,stage):
     grant=work.active(key)
+    if grant['proposal'].get('mode') == 'development_scope':
+        require(not unresolved(work.attempts()), 'owner_policy_unresolved_attempt')
+        require(all(definition(operation) in grant['proposal']['allowed'].get(operation_kind(operation),[])
+                    for operation in stage['units']), 'owner_policy_scope_changed')
+        return grant,None
     left=remaining(work,grant)
     needed={}
     for operation in stage['units']:
@@ -75,10 +101,24 @@ def check_stage(work,key,stage):
     return grant,left
 
 
-def charge(work,key,operation,payload,invoke):
+def charge(work,key,operation,payload,invoke,*,replaces=None):
     grant=work.active(key)
-    left=remaining(work,grant)
     provider=operation_kind(operation)
+    if grant['proposal'].get('mode')=='development_scope':
+        require(definition(operation) in grant['proposal']['allowed'].get(provider,[]),'owner_policy_scope_changed')
+        ledger=work.attempts()
+        unit=dict(id=f'{provider}:{len(ledger)+1}',provider=provider,max_cost_usd=0)
+        replaced=None
+        if replaces is not None:
+            prior_operation, prior_payload=replaces
+            target=digest(dict(operation=prior_operation,payload_hash=prior_payload))
+            matches=[name for name,row in ledger.items() if row['reservation']['payload_sha256']==target]
+            require(len(matches)==1,'owner_policy_unresolved_attempt')
+            replaced=matches[0]
+        return delegated_call(work,key,unit,digest(dict(operation=operation,payload_hash=payload)),
+                             lambda _proof,check:invoke(check),replaces=replaced)
+    require(replaces is None,'owner_policy_scope_changed')
+    left=remaining(work,grant)
     require(left.get(provider,0)>0,'owner_policy_exhausted')
     require(definition(operation) in grant['proposal']['allowed'].get(provider,[]),'owner_policy_scope_changed')
     index=grant['proposal']['limits'][provider]-left[provider]
@@ -91,4 +131,6 @@ def inherited(source,base):
     anchor=base.get('work_anchor')
     if not anchor:
         return None
-    return envelope(source,base,anchor)
+    work=envelope(source,base,anchor)
+    policy=work.read('policy.json')
+    return None if policy and policy['proposal'].get('mode')=='development_scope' else work

@@ -25,7 +25,15 @@ class GeneralResearchTests(TestCase):
     def test_confirmed_option_rejection_requires_new_signed_remaining_scope(self):
         self.exercise_report(repair=True)
 
-    def exercise_report(self, *, repair=False):
+    def test_development_scope_corrects_once_and_retains_normalization(self):
+        self.exercise_report(repair=True, development=True)
+
+    def test_development_scope_stops_at_second_contract_error_or_provider_failure(self):
+        for failure in (503,429,'timeout','repeated'):
+            with self.subTest(failure=failure):
+                self.exercise_report(repair=True, development=True, failure=failure)
+
+    def exercise_report(self, *, repair=False, development=False, failure=None):
         with TemporaryDirectory() as temp:
             studio=Studio(Path(temp)/'studio')
             goal='모바일 게임 쇼츠 주제 3개와 조회수·길이 조사. 승인 후에도 대본과 영상 제작 금지.'
@@ -52,6 +60,11 @@ class GeneralResearchTests(TestCase):
                 wire=json.loads(request.data)
                 context=json.loads(wire['contents'][0]['parts'][0]['text'])
                 payloads.append(request.data)
+                if failure and failure!='repeated' and len(payloads)==2:
+                    if failure=='timeout':
+                        raise TimeoutError
+                    from urllib.error import HTTPError
+                    raise HTTPError(ENDPOINT,failure,'fixture',{},Reply(dict(error=dict(status='UNAVAILABLE'))))
                 self.assertEqual(context['target'],goal)
                 if context['version']==2:
                     self.assertEqual(context['previous']['feedback'],'길이 선정 근거를 명확히 해 주세요.')
@@ -66,8 +79,11 @@ class GeneralResearchTests(TestCase):
                     self.assertIn('sample',options)
                     self.assertNotIn('',options)
                     # 'topic' is a valid key for web search, but not for YouTube.
-                    option='topic' if repair and len(payloads)==1 else 'sample'
-                    value=dict(decision=dict(tool='youtube_sample',option=option,claims=[],feasibility=''))
+                    invalid=repair and (len(payloads)==1 or development and len(payloads)==2
+                                        or failure=='repeated' and len(payloads)==3)
+                    option='topic' if invalid else 'sample'
+                    value=dict(decision=dict(tool='youtube_sample',option=option,claims=[],
+                        feasibility='시연 후보는 후속 확인 필요' if development and not invalid else ''))
                 else:
                     value=dict(decision=dict(tool='finish',option='',feasibility='사용권은 별도 확인',
                         claims=[dict(statement='확인된 표본 범위가 제한적입니다.',assessment='unverified',citations=[])]))
@@ -103,9 +119,13 @@ class GeneralResearchTests(TestCase):
                     with patch('general_research_continuation.now',return_value='2099-01-01T00:00:00+09:00'):
                         with self.assertRaisesRegex(CompanyError,'research_continuation_blocked'):
                             action('research-checkpoint',route='contract_repair')
-                    prepared=action('research-checkpoint',route='contract_repair')
+                    prepared=action('research-checkpoint',route='development_contract' if development else 'contract_repair')
                     self.assertEqual(prepared['status'],'available')
-                    self.assertEqual(prepared['work_scope']['limits'],dict(gemini=6,tavily=1,youtube=2))
+                    if development:
+                        self.assertEqual(prepared['work_scope']['mode'],'development_scope')
+                        self.assertNotIn('limits',prepared['work_scope'])
+                    else:
+                        self.assertEqual(prepared['work_scope']['limits'],dict(gemini=6,tavily=1,youtube=2))
                     with self.assertRaisesRegex(CompanyError,'owner_policy_required'):
                         action('research-run')
                     with self.assertRaisesRegex(CompanyError,'owner_policy_scope_changed'):
@@ -113,14 +133,27 @@ class GeneralResearchTests(TestCase):
                     action('research-approve',confirmed=True,review_hash=prepared['review_hash'])
                     self.assertEqual(ai.call_count,1)
                     child_base,child,_=versions(studio.workflow,before)
-                    self.assertLessEqual(envelope(child,child_base).read('policy.json')['expires_at'],
-                                         ledger_before[2]['expires_at'])
+                    new_work=envelope(child,child_base)
+                    if not development:
+                        self.assertLessEqual(new_work.read('policy.json')['expires_at'],ledger_before[2]['expires_at'])
                     from research_workflow import ResearchStep
                     with patch.object(ResearchStep,'_payload',return_value=json.loads(payloads[0])):
                         with self.assertRaisesRegex(CompanyError,'research_continuation_blocked'):
                             action('research-run')
                     self.assertEqual(ai.call_count,1)
                     self.assertEqual(child.attempts(),{})
+                if failure:
+                    with self.assertRaises(CompanyError):
+                        action('research-run')
+                    count=3 if failure=='repeated' else 2
+                    self.assertEqual(ai.call_count,count)
+                    self.assertEqual(len(new_work.attempts()),count-1)
+                    self.assertEqual(studio.detail('workspace',pid)['research']['status'],'stopped')
+                    with self.assertRaises(CompanyError):
+                        action('research-run')
+                    self.assertEqual(ai.call_count,count)
+                    yt.assert_not_called()
+                    return
                 v1=action('research-run')
                 if repair:
                     self.assertEqual((parent.attempts(),old_work.attempts(),old_work.read('policy.json')),ledger_before)
@@ -131,6 +164,20 @@ class GeneralResearchTests(TestCase):
                 self.assertEqual(len(report['manager']['topics']),3)
                 self.assertEqual(report['duration_sample'],[23])
                 self.assertEqual(report['provenance'],'offline_fixture')
+                if development:
+                    self.assertEqual(len(set(payloads)),5)
+                    charges=new_work.attempts()
+                    self.assertEqual(charges['gemini:1']['result']['status'],'failed_or_uncertain')
+                    self.assertEqual(charges['gemini:2']['reservation']['replaces'],'gemini:1')
+                    self.assertEqual(charges['gemini:2']['result']['status'],'completed')
+                    self.assertEqual(child.attempts()['correct-research-0']['reservation']['replaces'],'research-0')
+                    from research_workflow import linked_attempt
+                    row=child.attempts()['correct-research-0']
+                    normalized=linked_attempt(child,'correct-research-0',row)['decision_normalization']
+                    self.assertEqual(normalized['original']['decision']['feasibility'],'시연 후보는 후속 확인 필요')
+                    self.assertEqual(normalized['normalized']['decision']['feasibility'],'')
+                    self.assertNotIn('시연 후보는 후속 확인 필요',json.dumps(report,ensure_ascii=False))
+                    return
                 with self.assertRaisesRegex(CompanyError,'owner_policy_exhausted'):
                     action('research-run')
                 with self.assertRaisesRegex(CompanyError,'general_report_changed'):
@@ -242,6 +289,9 @@ class GeneralResearchTests(TestCase):
                         self.assertGreater(checkpoint['response']['error_body_bytes'],0)
                     self.assertEqual(checkpoint['can_collect'],http==400)
                     self.assertFalse(checkpoint['can_contract_repair'])
+                    self.assertFalse(checkpoint['can_development_contract'])
+                    with self.assertRaisesRegex(CompanyError,'research_continuation_blocked'):
+                        action('research-checkpoint',route='development_contract')
                     with self.assertRaisesRegex(CompanyError,'research_continuation_blocked'):
                         action('research-checkpoint',route='contract_repair')
                     failure_types={400:'request_rejected',401:'authentication_or_permission',
